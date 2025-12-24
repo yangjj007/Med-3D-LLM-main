@@ -510,8 +510,11 @@ def visualize_ct_dataset(dataset_path: str, output_dir: Optional[str] = None):
 def create_index_html(output_dir: str, case_name: str, 
                      windows_data: Dict, organs_data: Dict):
     """创建索引页面"""
-    html_content = f"""
-<!DOCTYPE html>
+    import datetime
+    
+    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    html_content = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -680,9 +683,11 @@ def create_index_html(output_dir: str, case_name: str,
                     </div>
                 </div>
             </div>
-            
-            <!-- 窗口可视化 -->
-            {f'''
+"""
+    
+    # 添加窗口可视化部分
+    if windows_data:
+        html_content += f"""
             <div class="section">
                 <h2>🪟 窗口对比</h2>
                 <div class="grid">
@@ -693,25 +698,31 @@ def create_index_html(output_dir: str, case_name: str,
                     </div>
                 </div>
             </div>
-            ''' if windows_data else ''}
-            
-            <!-- 器官可视化 -->
-            {f'''
+"""
+    
+    # 添加器官可视化部分
+    if organs_data:
+        html_content += """
             <div class="section">
                 <h2>🫀 器官3D渲染</h2>
                 <div class="grid">
-                    {"".join([f'''
+"""
+        
+        for organ_name in organs_data.keys():
+            html_content += f"""
                     <div class="card">
                         <h3>{organ_name.capitalize()}</h3>
                         <p>{organ_name}的3D表面渲染，可交互查看。</p>
                         <a href="05_organ_{organ_name}_3d.html" target="_blank">打开查看 →</a>
                     </div>
-                    ''' for organ_name in organs_data.keys()])}
+"""
+        
+        html_content += """
                 </div>
             </div>
-            ''' if organs_data else ''}
-            
-            <!-- 使用说明 -->
+"""
+    
+    html_content += f"""
             <div class="section">
                 <h2>📖 使用说明</h2>
                 <div class="info-box">
@@ -728,12 +739,12 @@ def create_index_html(output_dir: str, case_name: str,
         
         <div class="footer">
             <p>🔬 TRELLIS Med-3D-LLM CT数据预处理可视化工具</p>
-            <p>生成时间: {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            <p>生成时间: {current_time}</p>
         </div>
     </div>
 </body>
 </html>
-    """
+"""
     
     index_path = os.path.join(output_dir, 'index.html')
     with open(index_path, 'w', encoding='utf-8') as f:

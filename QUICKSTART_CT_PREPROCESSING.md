@@ -223,12 +223,12 @@ for batch in loader:
 
 **可视化单个病例：**
 ```bash
-bash scripts/visualize_ct.sh ./output_ct/processed/0000
+bash scripts/visualize_ct.sh ./output_ct/0000/processed/0
 ```
 
 **批量可视化：**
 ```bash
-bash scripts/visualize_ct_batch.sh ./output_ct/processed
+bash scripts/visualize_ct_batch.sh ./output_ct/0000/processed
 ```
 
 ### 生成的可视化

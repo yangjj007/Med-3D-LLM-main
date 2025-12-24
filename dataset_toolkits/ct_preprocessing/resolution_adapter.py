@@ -67,7 +67,7 @@ def check_resolution_compatibility(input_shape: Tuple[int, int, int],
 def adapt_resolution(ct_array: np.ndarray,
                     target_resolution: Optional[int] = None,
                     fill_value: float = AIR_HU_VALUE,
-                    mode: str = 'edge') -> np.ndarray:
+                    mode: str = 'constant') -> np.ndarray:
     """
     适配CT数组到目标分辨率
     
@@ -81,8 +81,8 @@ def adapt_resolution(ct_array: np.ndarray,
         target_resolution: 目标分辨率。如果为None，自动确定
         fill_value: 填充值，默认为空气HU值(-1000)
         mode: 填充模式
-            - 'constant': 使用fill_value填充
-            - 'edge': 使用边缘值填充（保留边界信息）
+            - 'constant': 使用fill_value填充（默认，推荐用于CT数据）
+            - 'edge': 使用边缘值填充（会复制边缘切片，不推荐）
     
     Returns:
         适配后的CT数组，形状为 (target_resolution, target_resolution, target_resolution)
