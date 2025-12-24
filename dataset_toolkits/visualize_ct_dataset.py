@@ -209,7 +209,7 @@ def create_organ_surface_plot(mask: np.ndarray, organ_name: str,
 
 
 def create_multi_window_comparison(windows_data: Dict[str, np.ndarray], 
-                                   slice_idx: Optional[int] = None) -> go.Figure:
+                                   slice_idx: Optional[int] = 10) -> go.Figure:
     """
     创建多窗口对比图
     
