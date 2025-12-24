@@ -1,0 +1,31 @@
+{
+  "dataset_name": "3D-IRCADB",
+  "modality": "CT",
+  "description": "3D Image Reconstruction for Comparison of Algorithm Database - 肝脏CT数据集",
+  "organ_labels": {
+    "1": {
+      "name": "liver",
+      "window": "soft_tissue",
+      "description": "肝脏"
+    },
+    "2": {
+      "name": "right_kidney",
+      "window": "soft_tissue",
+      "description": "右肾"
+    },
+    "3": {
+      "name": "left_kidney",
+      "window": "soft_tissue",
+      "description": "左肾"
+    },
+    "4": {
+      "name": "spleen",
+      "window": "soft_tissue",
+      "description": "脾脏"
+    }
+  },
+  "default_resolution": 512,
+  "num_classes": 5,
+  "background_label": 0
+}
+
