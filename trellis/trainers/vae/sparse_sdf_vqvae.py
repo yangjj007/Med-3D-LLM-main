@@ -275,8 +275,8 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             batch = min(batch_size, num_samples - i)
             data = next(iter(dataloader))
             
-            # Move to device
-            sparse_sdf = data['sparse_sdf'][:batch].cuda() if isinstance(data['sparse_sdf'], torch.Tensor) else data['sparse_sdf'][:batch]
+            # Move to device (data already collated, no need to slice)
+            sparse_sdf = data['sparse_sdf'].cuda() if isinstance(data['sparse_sdf'], torch.Tensor) else data['sparse_sdf']
             sparse_index = data['sparse_index'].cuda() if isinstance(data['sparse_index'], torch.Tensor) else data['sparse_index']
             batch_idx = data['batch_idx'].cuda() if isinstance(data['batch_idx'], torch.Tensor) else data['batch_idx']
             
