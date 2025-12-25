@@ -64,6 +64,7 @@ class CTWindowSparseSDF(Dataset):
         self.window_type = window_type
         self.min_points = min_points
         self.max_points = max_points
+        self.value_range = (0, 1)  # For visualization - binary window values
         
         # Validate window type
         if window_type not in WINDOW_CONFIGS:
