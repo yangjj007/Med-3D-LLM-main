@@ -70,13 +70,18 @@ class SparseSDFEncoder_VQ(SparseSDFEncoder):
         x = self.input_layer1(x)
         for block in self.downsample:
             x = block(x)
+        
+        print("✅ Before transformer")
         h = SparseTransformerBase.forward(self, x, factor)
+        print("✅ After transformer")
         h = h.type(x.dtype)
         
         if not using_out_layer:
             return h
         
+        print("✅ Before layer_norm")
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        print("✅ After layer_norm")
         h = self.out_layer(h)
         
         return h
