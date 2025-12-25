@@ -27,11 +27,17 @@ class SparseConv3d(nn.Module):
         print(f"[DEBUG SparseConv3d.forward] Input feats dtype: {x.feats.dtype}, shape: {x.feats.shape}")
         print(f"[DEBUG SparseConv3d.forward] Input coords min: {x.coords.min(dim=0).values}, max: {x.coords.max(dim=0).values}")
         
-        # # [FIX] 确保 coords 是整数类型
-        # if x.coords.dtype not in [torch.int32, torch.int64]:
-        #     print(f"[ERROR] coords dtype is {x.coords.dtype}, NOT integer! This will cause floating point exception!")
-        #     print(f"[ERROR] coords sample: {x.coords[:5]}")
-        #     raise TypeError(f"spconv requires integer coordinates, but got {x.coords.dtype}")
+        if not torch.isfinite(x.features).all():
+        # 打印非法值位置和统计
+        nan_mask = torch.isnan(x.features)
+        inf_mask = torch.isinf(x.features)
+        print(f"[CRITICAL] NaN count: {nan_mask.sum().item()}, Inf count: {inf_mask.sum().item()}")
+        print(f"[CRITICAL] Features stats - mean: {x.features[torch.isfinite(x.features)].mean():.4f}, "
+              f"std: {x.features[torch.isfinite(x.features)].std():.4f}")
+        
+        feat_abs_max = x.features.abs().max()
+        if feat_abs_max > 1e4:
+            print(f"[WARNING] Large feature values! Max: {feat_abs_max:.2e}.")
         
         # 检查是否有 NaN 或 Inf
         if torch.isnan(x.feats).any():
