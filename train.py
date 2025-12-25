@@ -15,6 +15,7 @@ from trellis.utils.dist_utils import setup_dist
 
 # debug
 np.seterr(all='raise')  # 或 'warn'
+torch.autograd.set_detect_anomaly(True)
 
 
 def find_ckpt(cfg):
