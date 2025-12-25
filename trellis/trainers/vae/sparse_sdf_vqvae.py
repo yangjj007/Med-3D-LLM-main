@@ -267,6 +267,9 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         if hasattr(vqvae, 'module'):
             vqvae = vqvae.module
         
+        # Get model dtype for fp16 compatibility
+        model_dtype = vqvae.Encoder.dtype if hasattr(vqvae.Encoder, 'dtype') else torch.float32
+        
         # Inference
         gts = []
         recons = []
@@ -285,6 +288,9 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             sparse_sdf = sparse_sdf[mask]
             sparse_index = sparse_index[mask]
             batch_idx = batch_idx[mask]
+            
+            # Convert to model dtype (for fp16 compatibility)
+            sparse_sdf = sparse_sdf.to(dtype=model_dtype)
             
             # Construct sparse tensor
             coords = torch.cat([batch_idx.unsqueeze(-1), sparse_index], dim=-1).int()

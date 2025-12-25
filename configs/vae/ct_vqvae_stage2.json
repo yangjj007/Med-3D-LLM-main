@@ -14,7 +14,7 @@
                 "attn_mode": "swin",
                 "window_size": 8,
                 "pe_mode": "ape",
-                "use_fp16": true,
+                "use_fp16": false,
                 "use_checkpoint": false,
                 "qk_rms_norm": false,
                 "representation_config": null
