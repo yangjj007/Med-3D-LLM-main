@@ -93,6 +93,7 @@ class SparseSDFEncoder(SparseTransformerBase):
             SparseDownBlock3d(
                 channels=model_channels//16,
                 out_channels=model_channels // 8,
+                num_groups=16,    # 这里的修改，验证groupnorm错误，但是可能跟预训练权重不符
                 use_checkpoint=use_checkpoint,
             ),
             SparseDownBlock3d(
