@@ -232,8 +232,12 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         return terms, {}
     
     @torch.no_grad()
-    def snapshot(self, suffix=None, num_samples=64, batch_size=1, verbose=False):
+    def snapshot(self, suffix=None, num_samples=16, batch_size=None, verbose=False):
         """Take a snapshot of the model's performance."""
+        # Use training batch_size if not specified, default to 2 for safety
+        if batch_size is None:
+            batch_size = getattr(self, 'batch_size_per_gpu', 2)
+        print(f"[DEBUG] snapshot: Using batch_size={batch_size}, num_samples={num_samples}")
         super().snapshot(suffix=suffix, num_samples=num_samples, batch_size=batch_size, verbose=verbose)
     
     @torch.no_grad()
@@ -257,14 +261,23 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         try:
             print(f"\n[DEBUG] run_snapshot called with num_samples={num_samples}, batch_size={batch_size}")
             
+            # Create a dataset copy with potentially reduced max_points for stability
+            dataset_copy = copy.deepcopy(self.dataset)
+            original_max_points = getattr(dataset_copy, 'max_points', None)
+            
+            # Limit to 100k points per sample for snapshot to avoid numerical issues
+            if hasattr(dataset_copy, 'max_points') and (dataset_copy.max_points is None or dataset_copy.max_points > 100000):
+                print(f"[DEBUG] Temporarily limiting max_points from {dataset_copy.max_points} to 100000 for snapshot")
+                dataset_copy.max_points = 100000
+            
             dataloader = DataLoader(
-                copy.deepcopy(self.dataset),
+                dataset_copy,
                 batch_size=batch_size,
                 shuffle=True,
                 num_workers=0,
-                collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
+                collate_fn=dataset_copy.collate_fn if hasattr(dataset_copy, 'collate_fn') else None,
             )
-            print(f"[DEBUG] DataLoader created")
+            print(f"[DEBUG] DataLoader created with max_points={getattr(dataset_copy, 'max_points', 'N/A')}")
             
             # Get VQVAE model
             vqvae = self.models['vqvae']
@@ -316,13 +329,35 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                 # Construct sparse tensor
                 coords = torch.cat([batch_idx.unsqueeze(-1), sparse_index], dim=-1).int()
                 print(f"[DEBUG] coords shape: {coords.shape}")
+                print(f"[DEBUG] coords min: {coords.min(dim=0).values}, max: {coords.max(dim=0).values}")
+                print(f"[DEBUG] sparse_sdf min: {sparse_sdf.min()}, max: {sparse_sdf.max()}, mean: {sparse_sdf.mean()}")
                 
                 x = sp.SparseTensor(sparse_sdf, coords)
                 print(f"[DEBUG] SparseTensor created")
+                print(f"[DEBUG] SparseTensor shape: {x.shape}")
+                print(f"[DEBUG] SparseTensor feats shape: {x.feats.shape}")
+                print(f"[DEBUG] SparseTensor coords shape: {x.coords.shape}")
+                
+                # Check for any NaN or Inf
+                if torch.isnan(sparse_sdf).any():
+                    print(f"[ERROR] NaN detected in sparse_sdf!")
+                if torch.isinf(sparse_sdf).any():
+                    print(f"[ERROR] Inf detected in sparse_sdf!")
                 
                 # Encode and decode
-                encoding_indices = vqvae.Encode(x)
-                print(f"[DEBUG] Encoding done")
+                print(f"[DEBUG] Calling vqvae.Encode...")
+                try:
+                    encoding_indices = vqvae.Encode(x)
+                    print(f"[DEBUG] Encoding done")
+                except FloatingPointError as e:
+                    print(f"[ERROR] FloatingPointError in Encode: {e}")
+                    raise
+                except RuntimeError as e:
+                    print(f"[ERROR] RuntimeError in Encode: {e}")
+                    raise
+                except Exception as e:
+                    print(f"[ERROR] Unexpected error in Encode: {type(e).__name__}: {e}")
+                    raise
                 
                 recon = vqvae.Decode(encoding_indices)
                 print(f"[DEBUG] Decoding done")
