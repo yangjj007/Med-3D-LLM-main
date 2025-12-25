@@ -17,7 +17,8 @@ from pathlib import Path
 # Import window configurations
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../dataset_toolkits'))
-from ct_preprocessing.config import WINDOW_CONFIGS, get_window_filename
+from ct_preprocessing.config import WINDOW_CONFIGS
+from ct_preprocessing.window_processor import get_window_filename
 
 
 class CTWindowSparseSDF(Dataset):

@@ -123,7 +123,7 @@ CTWindowSparseSDF Dataset:
 python train.py \
     --config configs/vae/ct_vqvae_stage1.json \
     --output_dir outputs/ct_vqvae_lung_stage1 \
-    --data_dir /path/to/processed_dataset \
+    --data_dir ./processed_dataset \
     --num_gpus 1
 ```
 
