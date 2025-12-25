@@ -70,7 +70,9 @@ class SparseSDFEncoder_VQ(SparseSDFEncoder):
         
         print("✅ Before input_layer1")
         x = self.input_layer1(x)
-        print(f"DEBUG: Feature dim entering blocks: {x.feats.shape[1]}") # 检查这个值是否小于32
+        print(f"DEBUG: Voxel count (N): {x.feats.shape[0]}") 
+        if x.feats.shape[0] == 0:
+            print("❌ Error: Sparse Tensor is empty!")
         print("✅ After input_layer1")
 
         for block in self.downsample:
