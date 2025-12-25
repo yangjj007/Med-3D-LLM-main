@@ -251,6 +251,87 @@ class CTWindowSparseSDF(Dataset):
             'max_points': self.max_points,
         }
     
+    @torch.no_grad()
+    def visualize_sample(self, sample: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Visualize sparse CT window data by converting to 2D slice grids.
+        
+        Creates a grid of axial, sagittal, and coronal slices for visualization.
+        
+        Args:
+            sample: Dictionary containing sparse_sdf, sparse_index, batch_idx
+        
+        Returns:
+            Tensor of shape [B, 1, H, W] for visualization
+        """
+        sparse_sdf = sample['sparse_sdf']
+        sparse_index = sample['sparse_index']
+        batch_idx = sample['batch_idx']
+        
+        # Determine batch size
+        batch_size = int(batch_idx.max().item() + 1)
+        
+        # Parameters for visualization
+        num_slices_per_axis = 4  # Show 4 slices per axis
+        slice_size = 128  # Downsample to 128x128 for each slice
+        
+
+        print(f"Downsample to {slice_size}^3 for visualization") 
+
+        images = []
+        
+        for b in range(batch_size):
+            # Get data for this batch item
+            mask = batch_idx == b
+            indices = sparse_index[mask].cpu().numpy()
+            values = sparse_sdf[mask].cpu().numpy().squeeze()
+            
+            # Convert sparse to dense (downsampled)
+            scale = self.resolution / slice_size
+            dense = np.zeros((slice_size, slice_size, slice_size), dtype=np.float32)
+            
+            # Downsample indices
+            scaled_indices = (indices / scale).astype(np.int32)
+            scaled_indices = np.clip(scaled_indices, 0, slice_size - 1)
+            
+            # Fill dense array with max values at each location
+            for idx, val in zip(scaled_indices, values):
+                dense[idx[0], idx[1], idx[2]] = max(dense[idx[0], idx[1], idx[2]], val)
+            
+            # Sample slices from three axes
+            # Axial (XY plane), Sagittal (YZ plane), Coronal (XZ plane)
+            slice_positions = np.linspace(slice_size // 4, 3 * slice_size // 4, num_slices_per_axis, dtype=int)
+            
+            slices = []
+            
+            # Axial slices (top row)
+            for z in slice_positions:
+                slices.append(dense[:, :, z])
+            
+            # Sagittal slices (middle row)
+            for x in slice_positions:
+                slices.append(dense[x, :, :])
+            
+            # Coronal slices (bottom row)
+            for y in slice_positions:
+                slices.append(dense[:, y, :])
+            
+            # Arrange slices in a grid (3 rows x num_slices_per_axis cols)
+            grid = np.zeros((3 * slice_size, num_slices_per_axis * slice_size), dtype=np.float32)
+            
+            for i, slice_data in enumerate(slices):
+                row = i // num_slices_per_axis
+                col = i % num_slices_per_axis
+                grid[row * slice_size:(row + 1) * slice_size, 
+                     col * slice_size:(col + 1) * slice_size] = slice_data
+            
+            # Convert to tensor [1, H, W]
+            image = torch.from_numpy(grid).unsqueeze(0)
+            images.append(image)
+        
+        # Stack batch [B, 1, H, W]
+        return torch.stack(images)
+    
     def __str__(self):
         stats = self.get_stats()
         lines = [
