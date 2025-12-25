@@ -254,80 +254,125 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         Returns:
             Dictionary of samples for visualization
         """
-        dataloader = DataLoader(
-            copy.deepcopy(self.dataset),
-            batch_size=batch_size,
-            shuffle=True,
-            num_workers=0,
-            collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
-        )
-        
-        # Get VQVAE model
-        vqvae = self.models['vqvae']
-        if hasattr(vqvae, 'module'):
-            vqvae = vqvae.module
-        
-        # Get model dtype for fp16 compatibility
-        model_dtype = vqvae.Encoder.dtype if hasattr(vqvae.Encoder, 'dtype') else torch.float32
-        
-        # Inference
-        gts = []
-        recons = []
-        
-        for i in range(0, num_samples, batch_size):
-            batch = min(batch_size, num_samples - i)
-            data = next(iter(dataloader))
+        try:
+            print(f"\n[DEBUG] run_snapshot called with num_samples={num_samples}, batch_size={batch_size}")
             
-            # Move to device (data already collated, no need to slice)
-            sparse_sdf = data['sparse_sdf'].cuda() if isinstance(data['sparse_sdf'], torch.Tensor) else data['sparse_sdf']
-            sparse_index = data['sparse_index'].cuda() if isinstance(data['sparse_index'], torch.Tensor) else data['sparse_index']
-            batch_idx = data['batch_idx'].cuda() if isinstance(data['batch_idx'], torch.Tensor) else data['batch_idx']
+            dataloader = DataLoader(
+                copy.deepcopy(self.dataset),
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=0,
+                collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
+            )
+            print(f"[DEBUG] DataLoader created")
             
-            # Only keep points belonging to current batch
-            mask = batch_idx < batch
-            sparse_sdf = sparse_sdf[mask]
-            sparse_index = sparse_index[mask]
-            batch_idx = batch_idx[mask]
+            # Get VQVAE model
+            vqvae = self.models['vqvae']
+            if hasattr(vqvae, 'module'):
+                vqvae = vqvae.module
             
-            # Convert to model dtype (for fp16 compatibility)
-            sparse_sdf = sparse_sdf.to(dtype=model_dtype)
+            # Get model dtype for fp16 compatibility
+            model_dtype = vqvae.Encoder.dtype if hasattr(vqvae.Encoder, 'dtype') else torch.float32
+            print(f"[DEBUG] Model dtype: {model_dtype}")
             
-            # Construct sparse tensor
-            coords = torch.cat([batch_idx.unsqueeze(-1), sparse_index], dim=-1).int()
-            x = sp.SparseTensor(sparse_sdf, coords)
+            # Inference
+            gts = []
+            recons = []
             
-            # Encode and decode
-            encoding_indices = vqvae.Encode(x)
-            recon = vqvae.Decode(encoding_indices)
+            for i in range(0, num_samples, batch_size):
+                batch = min(batch_size, num_samples - i)
+                print(f"[DEBUG] Processing iteration {i}, batch={batch}")
+                
+                data = next(iter(dataloader))
+                print(f"[DEBUG] Data loaded from dataloader")
+                print(f"[DEBUG] Data keys: {data.keys()}")
+                
+                # Move to device (data already collated, no need to slice)
+                sparse_sdf = data['sparse_sdf'].cuda() if isinstance(data['sparse_sdf'], torch.Tensor) else data['sparse_sdf']
+                sparse_index = data['sparse_index'].cuda() if isinstance(data['sparse_index'], torch.Tensor) else data['sparse_index']
+                batch_idx = data['batch_idx'].cuda() if isinstance(data['batch_idx'], torch.Tensor) else data['batch_idx']
+                
+                print(f"[DEBUG] After moving to device:")
+                print(f"[DEBUG]   sparse_sdf shape: {sparse_sdf.shape}")
+                print(f"[DEBUG]   sparse_index shape: {sparse_index.shape}")
+                print(f"[DEBUG]   batch_idx shape: {batch_idx.shape}")
+                
+                # Only keep points belonging to current batch
+                mask = batch_idx < batch
+                print(f"[DEBUG] Mask sum: {mask.sum().item()} / {len(mask)}")
+                
+                sparse_sdf = sparse_sdf[mask]
+                sparse_index = sparse_index[mask]
+                batch_idx = batch_idx[mask]
+                
+                print(f"[DEBUG] After masking:")
+                print(f"[DEBUG]   sparse_sdf shape: {sparse_sdf.shape}")
+                print(f"[DEBUG]   sparse_index shape: {sparse_index.shape}")
+                print(f"[DEBUG]   batch_idx shape: {batch_idx.shape}")
+                
+                # Convert to model dtype (for fp16 compatibility)
+                sparse_sdf = sparse_sdf.to(dtype=model_dtype)
+                
+                # Construct sparse tensor
+                coords = torch.cat([batch_idx.unsqueeze(-1), sparse_index], dim=-1).int()
+                print(f"[DEBUG] coords shape: {coords.shape}")
+                
+                x = sp.SparseTensor(sparse_sdf, coords)
+                print(f"[DEBUG] SparseTensor created")
+                
+                # Encode and decode
+                encoding_indices = vqvae.Encode(x)
+                print(f"[DEBUG] Encoding done")
+                
+                recon = vqvae.Decode(encoding_indices)
+                print(f"[DEBUG] Decoding done")
+                
+                # Store results
+                gts.append({
+                    'sparse_sdf': sparse_sdf,
+                    'sparse_index': sparse_index,
+                    'batch_idx': batch_idx,
+                })
+                recons.append({
+                    'sparse_sdf': recon.feats,
+                    'sparse_index': recon.coords[:, 1:],
+                    'batch_idx': recon.coords[:, 0],
+                })
+                print(f"[DEBUG] Results stored for iteration {i}")
             
-            # Store results
-            gts.append({
-                'sparse_sdf': sparse_sdf,
-                'sparse_index': sparse_index,
-                'batch_idx': batch_idx,
-            })
-            recons.append({
-                'sparse_sdf': recon.feats,
-                'sparse_index': recon.coords[:, 1:],
-                'batch_idx': recon.coords[:, 0],
-            })
-        
-        # Combine results
-        gt_combined = {
-            'sparse_sdf': torch.cat([g['sparse_sdf'] for g in gts], dim=0),
-            'sparse_index': torch.cat([g['sparse_index'] for g in gts], dim=0),
-            'batch_idx': torch.cat([g['batch_idx'] for g in gts], dim=0),
-        }
-        recon_combined = {
-            'sparse_sdf': torch.cat([r['sparse_sdf'] for r in recons], dim=0),
-            'sparse_index': torch.cat([r['sparse_index'] for r in recons], dim=0),
-            'batch_idx': torch.cat([r['batch_idx'] for r in recons], dim=0),
-        }
-        
-        sample_dict = {
-            'gt': {'value': gt_combined, 'type': 'sample'},
-            'recon': {'value': recon_combined, 'type': 'sample'},
-        }
-        
-        return sample_dict
+            # Combine results
+            print(f"[DEBUG] Combining {len(gts)} ground truth results")
+            gt_combined = {
+                'sparse_sdf': torch.cat([g['sparse_sdf'] for g in gts], dim=0),
+                'sparse_index': torch.cat([g['sparse_index'] for g in gts], dim=0),
+                'batch_idx': torch.cat([g['batch_idx'] for g in gts], dim=0),
+            }
+            print(f"[DEBUG] GT combined shapes: sdf={gt_combined['sparse_sdf'].shape}, "
+                  f"index={gt_combined['sparse_index'].shape}, batch={gt_combined['batch_idx'].shape}")
+            
+            print(f"[DEBUG] Combining {len(recons)} reconstruction results")
+            recon_combined = {
+                'sparse_sdf': torch.cat([r['sparse_sdf'] for r in recons], dim=0),
+                'sparse_index': torch.cat([r['sparse_index'] for r in recons], dim=0),
+                'batch_idx': torch.cat([r['batch_idx'] for r in recons], dim=0),
+            }
+            print(f"[DEBUG] Recon combined shapes: sdf={recon_combined['sparse_sdf'].shape}, "
+                  f"index={recon_combined['sparse_index'].shape}, batch={recon_combined['batch_idx'].shape}")
+            
+            sample_dict = {
+                'gt': {'value': gt_combined, 'type': 'sample'},
+                'recon': {'value': recon_combined, 'type': 'sample'},
+            }
+            
+            print(f"[DEBUG] run_snapshot completed successfully")
+            return sample_dict
+            
+        except Exception as e:
+            print(f"\n[ERROR] Exception in run_snapshot:")
+            print(f"[ERROR] Exception type: {type(e).__name__}")
+            print(f"[ERROR] Exception message: {str(e)}")
+            import traceback
+            print(f"[ERROR] Full traceback:")
+            traceback.print_exc()
+            raise
 

@@ -264,80 +264,131 @@ class CTWindowSparseSDF(Dataset):
         Returns:
             Tensor of shape [B, 1, H, W] for visualization
         """
-        sparse_sdf = sample['sparse_sdf']
-        sparse_index = sample['sparse_index']
-        batch_idx = sample['batch_idx']
-        
-        # Determine batch size
-        batch_size = int(batch_idx.max().item() + 1)
-        
-        # Parameters for visualization
-        num_slices_per_axis = 4  # Show 4 slices per axis
-        slice_size = 128  # Downsample to 128x128 for each slice
-        
-        print(f"Downsample to {slice_size}^3 for visualization") 
+        try:
+            print("\n[DEBUG] visualize_sample called")
+            print(f"[DEBUG] sample keys: {sample.keys()}")
+            
+            sparse_sdf = sample['sparse_sdf']
+            sparse_index = sample['sparse_index']
+            batch_idx = sample['batch_idx']
+            
+            print(f"[DEBUG] sparse_sdf shape: {sparse_sdf.shape}, dtype: {sparse_sdf.dtype}")
+            print(f"[DEBUG] sparse_index shape: {sparse_index.shape}, dtype: {sparse_index.dtype}")
+            print(f"[DEBUG] batch_idx shape: {batch_idx.shape}, dtype: {batch_idx.dtype}")
+            
+            # Determine batch size
+            if len(batch_idx) == 0:
+                print("[DEBUG] batch_idx is empty! Creating dummy image")
+                return torch.zeros(1, 1, 384, 512)
+            
+            batch_size = int(batch_idx.max().item() + 1)
+            print(f"[DEBUG] batch_size determined: {batch_size}")
+            
+            # Parameters for visualization
+            num_slices_per_axis = 4  # Show 4 slices per axis
+            slice_size = 128  # Downsample to 128x128 for each slice
+            
+            print(f"Downsample to {slice_size}^3 for visualization") 
 
-        images = []
-        
-        for b in range(min(batch_size, 16)):  # Limit to 16 samples for visualization
-            # Get data for this batch item
-            mask = (batch_idx == b).squeeze()  # Ensure mask is 1D
+            images = []
             
-            # Handle edge case where there's no data for this batch
-            if mask.sum() == 0:
-                # Create empty grid
+            for b in range(min(batch_size, 16)):  # Limit to 16 samples for visualization
+                print(f"[DEBUG] Processing batch {b}/{min(batch_size, 16)}")
+                
+                # Get data for this batch item
+                mask = (batch_idx == b).squeeze()  # Ensure mask is 1D
+                print(f"[DEBUG]   mask shape: {mask.shape}, sum: {mask.sum().item()}")
+                
+                # Handle edge case where there's no data for this batch
+                if mask.sum() == 0:
+                    print(f"[DEBUG]   Batch {b} has no data, creating empty grid")
+                    # Create empty grid
+                    grid = np.zeros((3 * slice_size, num_slices_per_axis * slice_size), dtype=np.float32)
+                    images.append(torch.from_numpy(grid).unsqueeze(0))
+                    continue
+                
+                indices = sparse_index[mask].cpu().numpy()
+                values = sparse_sdf[mask].cpu().numpy().squeeze()
+                
+                print(f"[DEBUG]   indices shape: {indices.shape}, values shape: {values.shape}")
+                print(f"[DEBUG]   values range: [{values.min()}, {values.max()}]")
+                
+                # Convert sparse to dense (downsampled)
+                scale = self.resolution / slice_size
+                print(f"[DEBUG]   scale factor: {scale}, resolution: {self.resolution}")
+                
+                if scale == 0:
+                    print(f"[ERROR] Scale is zero! resolution={self.resolution}, slice_size={slice_size}")
+                    raise ValueError(f"Scale cannot be zero: resolution={self.resolution}, slice_size={slice_size}")
+                
+                dense = np.zeros((slice_size, slice_size, slice_size), dtype=np.float32)
+                
+                # Downsample indices
+                scaled_indices = (indices / scale).astype(np.int32)
+                scaled_indices = np.clip(scaled_indices, 0, slice_size - 1)
+                
+                print(f"[DEBUG]   scaled_indices shape: {scaled_indices.shape}")
+                print(f"[DEBUG]   scaled_indices range: [{scaled_indices.min()}, {scaled_indices.max()}]")
+                
+                # Fill dense array with max values at each location
+                for idx_i, (idx, val) in enumerate(zip(scaled_indices, values)):
+                    if idx_i < 3:  # Print first few for debugging
+                        print(f"[DEBUG]   Setting dense[{idx[0]}, {idx[1]}, {idx[2]}] = max(current, {val})")
+                    dense[idx[0], idx[1], idx[2]] = max(dense[idx[0], idx[1], idx[2]], val)
+                
+                print(f"[DEBUG]   dense array filled, non-zero count: {np.count_nonzero(dense)}")
+                
+                # Sample slices from three axes
+                # Axial (XY plane), Sagittal (YZ plane), Coronal (XZ plane)
+                slice_positions = np.linspace(slice_size // 4, 3 * slice_size // 4, num_slices_per_axis, dtype=int)
+                print(f"[DEBUG]   slice_positions: {slice_positions}")
+                
+                slices = []
+                
+                # Axial slices (top row)
+                for z in slice_positions:
+                    slices.append(dense[:, :, z])
+                
+                # Sagittal slices (middle row)
+                for x in slice_positions:
+                    slices.append(dense[x, :, :])
+                
+                # Coronal slices (bottom row)
+                for y in slice_positions:
+                    slices.append(dense[:, y, :])
+                
+                print(f"[DEBUG]   Created {len(slices)} slices")
+                
+                # Arrange slices in a grid (3 rows x num_slices_per_axis cols)
                 grid = np.zeros((3 * slice_size, num_slices_per_axis * slice_size), dtype=np.float32)
-                images.append(torch.from_numpy(grid).unsqueeze(0))
-                continue
+                
+                for i, slice_data in enumerate(slices):
+                    row = i // num_slices_per_axis
+                    col = i % num_slices_per_axis
+                    grid[row * slice_size:(row + 1) * slice_size, 
+                         col * slice_size:(col + 1) * slice_size] = slice_data
+                
+                print(f"[DEBUG]   Grid created with shape: {grid.shape}")
+                
+                # Convert to tensor [1, H, W]
+                image = torch.from_numpy(grid).unsqueeze(0)
+                images.append(image)
+                print(f"[DEBUG]   Batch {b} completed, image shape: {image.shape}")
             
-            indices = sparse_index[mask].cpu().numpy()
-            values = sparse_sdf[mask].cpu().numpy().squeeze()
+            # Stack batch [B, 1, H, W]
+            print(f"[DEBUG] Stacking {len(images)} images")
+            result = torch.stack(images)
+            print(f"[DEBUG] Final result shape: {result.shape}")
+            return result
             
-            # Convert sparse to dense (downsampled)
-            scale = self.resolution / slice_size
-            dense = np.zeros((slice_size, slice_size, slice_size), dtype=np.float32)
-            
-            # Downsample indices
-            scaled_indices = (indices / scale).astype(np.int32)
-            scaled_indices = np.clip(scaled_indices, 0, slice_size - 1)
-            
-            # Fill dense array with max values at each location
-            for idx, val in zip(scaled_indices, values):
-                dense[idx[0], idx[1], idx[2]] = max(dense[idx[0], idx[1], idx[2]], val)
-            
-            # Sample slices from three axes
-            # Axial (XY plane), Sagittal (YZ plane), Coronal (XZ plane)
-            slice_positions = np.linspace(slice_size // 4, 3 * slice_size // 4, num_slices_per_axis, dtype=int)
-            
-            slices = []
-            
-            # Axial slices (top row)
-            for z in slice_positions:
-                slices.append(dense[:, :, z])
-            
-            # Sagittal slices (middle row)
-            for x in slice_positions:
-                slices.append(dense[x, :, :])
-            
-            # Coronal slices (bottom row)
-            for y in slice_positions:
-                slices.append(dense[:, y, :])
-            
-            # Arrange slices in a grid (3 rows x num_slices_per_axis cols)
-            grid = np.zeros((3 * slice_size, num_slices_per_axis * slice_size), dtype=np.float32)
-            
-            for i, slice_data in enumerate(slices):
-                row = i // num_slices_per_axis
-                col = i % num_slices_per_axis
-                grid[row * slice_size:(row + 1) * slice_size, 
-                     col * slice_size:(col + 1) * slice_size] = slice_data
-            
-            # Convert to tensor [1, H, W]
-            image = torch.from_numpy(grid).unsqueeze(0)
-            images.append(image)
-        
-        # Stack batch [B, 1, H, W]
-        return torch.stack(images)
+        except Exception as e:
+            print(f"\n[ERROR] Exception in visualize_sample:")
+            print(f"[ERROR] Exception type: {type(e).__name__}")
+            print(f"[ERROR] Exception message: {str(e)}")
+            import traceback
+            print(f"[ERROR] Full traceback:")
+            traceback.print_exc()
+            raise
     
     def __str__(self):
         stats = self.get_stats()

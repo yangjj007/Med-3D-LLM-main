@@ -222,26 +222,47 @@ class Trainer:
         Sample images from the model.
         NOTE: This function should be called by all processes.
         """
-        if self.is_master:
-            print(f'\nSampling {num_samples} images...', end='')
+        try:
+            if self.is_master:
+                print(f'\nSampling {num_samples} images...', end='')
 
-        if suffix is None:
-            suffix = f'step{self.step:07d}'
+            if suffix is None:
+                suffix = f'step{self.step:07d}'
 
-        # Assign tasks
-        num_samples_per_process = int(np.ceil(num_samples / self.world_size))
-        samples = self.run_snapshot(num_samples_per_process, batch_size=batch_size, verbose=verbose)
+            # Assign tasks
+            num_samples_per_process = int(np.ceil(num_samples / self.world_size))
+            print(f"\n[DEBUG] snapshot: num_samples_per_process={num_samples_per_process}, batch_size={batch_size}")
+            
+            samples = self.run_snapshot(num_samples_per_process, batch_size=batch_size, verbose=verbose)
+            print(f"[DEBUG] snapshot: run_snapshot returned, samples keys: {samples.keys()}")
 
-        # Preprocess images
-        for key in list(samples.keys()):
-            if samples[key]['type'] == 'sample':
-                vis = self.visualize_sample(samples[key]['value'])
-                if isinstance(vis, dict):
-                    for k, v in vis.items():
-                        samples[f'{key}_{k}'] = {'value': v, 'type': 'image'}
-                    del samples[key]
-                else:
-                    samples[key] = {'value': vis, 'type': 'image'}
+            # Preprocess images
+            for key in list(samples.keys()):
+                print(f"[DEBUG] snapshot: Processing key '{key}', type: {samples[key]['type']}")
+                if samples[key]['type'] == 'sample':
+                    print(f"[DEBUG] snapshot: Calling visualize_sample for key '{key}'")
+                    print(f"[DEBUG] snapshot: Value type: {type(samples[key]['value'])}")
+                    if isinstance(samples[key]['value'], dict):
+                        print(f"[DEBUG] snapshot: Value is dict with keys: {samples[key]['value'].keys()}")
+                    
+                    vis = self.visualize_sample(samples[key]['value'])
+                    print(f"[DEBUG] snapshot: visualize_sample returned, type: {type(vis)}")
+                    
+                    if isinstance(vis, dict):
+                        for k, v in vis.items():
+                            samples[f'{key}_{k}'] = {'value': v, 'type': 'image'}
+                        del samples[key]
+                    else:
+                        samples[key] = {'value': vis, 'type': 'image'}
+                        
+        except Exception as e:
+            print(f"\n[ERROR] Exception in snapshot:")
+            print(f"[ERROR] Exception type: {type(e).__name__}")
+            print(f"[ERROR] Exception message: {str(e)}")
+            import traceback
+            print(f"[ERROR] Full traceback:")
+            traceback.print_exc()
+            raise
 
         # Gather results
         if self.world_size > 1:
