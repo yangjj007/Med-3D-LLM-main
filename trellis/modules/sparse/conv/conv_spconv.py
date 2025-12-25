@@ -28,12 +28,12 @@ class SparseConv3d(nn.Module):
         print(f"[DEBUG SparseConv3d.forward] Input coords min: {x.coords.min(dim=0).values}, max: {x.coords.max(dim=0).values}")
         
         if not torch.isfinite(x.features).all():
-        # 打印非法值位置和统计
-        nan_mask = torch.isnan(x.features)
-        inf_mask = torch.isinf(x.features)
-        print(f"[CRITICAL] NaN count: {nan_mask.sum().item()}, Inf count: {inf_mask.sum().item()}")
-        print(f"[CRITICAL] Features stats - mean: {x.features[torch.isfinite(x.features)].mean():.4f}, "
-              f"std: {x.features[torch.isfinite(x.features)].std():.4f}")
+            # 打印非法值位置和统计
+            nan_mask = torch.isnan(x.features)
+            inf_mask = torch.isinf(x.features)
+            print(f"[CRITICAL] NaN count: {nan_mask.sum().item()}, Inf count: {inf_mask.sum().item()}")
+            print(f"[CRITICAL] Features stats - mean: {x.features[torch.isfinite(x.features)].mean():.4f}, "
+                f"std: {x.features[torch.isfinite(x.features)].std():.4f}")
         
         feat_abs_max = x.features.abs().max()
         if feat_abs_max > 1e4:
