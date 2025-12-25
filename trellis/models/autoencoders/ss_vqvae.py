@@ -67,10 +67,14 @@ class SparseSDFEncoder_VQ(SparseSDFEncoder):
             如果using_out_layer=False，返回transformer的输出
             如果using_out_layer=True，返回最终的latent表示
         """
+        print("✅ Before input_layer1")
         x = self.input_layer1(x)
+        print("✅ After input_layer1")
+
         for block in self.downsample:
             x = block(x)
-        
+            print("✅ After downsample block")
+            
         print("✅ Before transformer")
         h = SparseTransformerBase.forward(self, x, factor)
         print("✅ After transformer")
