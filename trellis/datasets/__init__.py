@@ -17,6 +17,9 @@ __attributes = {
     
     # Sparse SDF dataset
     'SparseSDF': 'sparse_sdf',
+    
+    # CT Window Sparse SDF dataset
+    'CTWindowSparseSDF': 'ct_window_sparse',
 }
 
 __submodules = []
@@ -58,4 +61,7 @@ if __name__ == '__main__':
         TextConditionedSLat,
         ImageConditionedSLat,
     )
+    
+    from .sparse_sdf import SparseSDF
+    from .ct_window_sparse import CTWindowSparseSDF
     

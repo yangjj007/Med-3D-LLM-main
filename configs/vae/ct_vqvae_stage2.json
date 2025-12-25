@@ -1,0 +1,75 @@
+{
+    "models": {
+        "vqvae": {
+            "name": "Direct3DS2_VQVAE",
+            "args": {
+                "resolution": 64,
+                "model_channels": 512,
+                "latent_channels": 32,
+                "num_blocks": 8,
+                "num_embeddings": 8192,
+                "num_heads": null,
+                "num_head_channels": 64,
+                "mlp_ratio": 4.0,
+                "attn_mode": "swin",
+                "window_size": 8,
+                "pe_mode": "ape",
+                "use_fp16": true,
+                "use_checkpoint": false,
+                "qk_rms_norm": false,
+                "representation_config": null
+            }
+        }
+    },
+    "dataset": {
+        "name": "CTWindowSparseSDF",
+        "args": {
+            "resolution": 512,
+            "window_type": "lung",
+            "min_points": 100,
+            "max_points": 500000
+        }
+    },
+    "trainer": {
+        "name": "SparseSDF_VQVAETrainer",
+        "args": {
+            "training_stage": 2,
+            "pretrained_vae_path": null,
+            "max_steps": 200000,
+            "batch_size_per_gpu": 2,
+            "batch_split": 2,
+            "optimizer": {
+                "name": "AdamW",
+                "args": {
+                    "lr": 0.005,
+                    "weight_decay": 0.0
+                }
+            },
+            "lr_scheduler": {
+                "name": "ExponentialLR",
+                "args": {
+                    "gamma": 0.999
+                }
+            },
+            "ema_rate": [0.9999],
+            "fp16_mode": "inflat_all",
+            "fp16_scale_growth": 0.001,
+            "grad_clip": {
+                "name": "AdaptiveGradClipper",
+                "args": {
+                    "max_norm": 1.0,
+                    "clip_percentile": 95
+                }
+            },
+            "lambda_vq": 1.0,
+            "lambda_commitment": 0.25,
+            "loss_type": "l1_l2",
+            "i_print": 100,
+            "i_log": 100,
+            "i_sample": 5000,
+            "i_save": 5000,
+            "i_ddpcheck": 10000
+        }
+    }
+}
+

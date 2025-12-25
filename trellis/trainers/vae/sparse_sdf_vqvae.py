@@ -47,8 +47,9 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         
         lambda_vq (float): VQ loss weight.
         lambda_commitment (float): Commitment loss weight.
-        loss_type (str): Reconstruction loss type. 'mse' for MSE loss, 'l1' for L1 loss.
+        loss_type (str): Reconstruction loss type. 'mse' for MSE loss, 'l1' for L1 loss, 'l1_l2' for combined L1+L2 loss.
         pretrained_vae_path (str): Path to pretrained VAE checkpoint to initialize from.
+        training_stage (int): Training stage. 1 = freeze VAE, train codebook only; 2 = joint training (default: 1).
     """
     
     def __init__(
@@ -58,16 +59,21 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         lambda_commitment: float = 0.25,
         loss_type: str = 'mse',
         pretrained_vae_path: str = None,
+        training_stage: int = 1,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
         self.lambda_vq = lambda_vq
         self.lambda_commitment = lambda_commitment
         self.loss_type = loss_type
+        self.training_stage = training_stage
         
         # Load pretrained VAE if specified
         if pretrained_vae_path is not None and self.step == 0:
             self._load_pretrained_vae(pretrained_vae_path)
+        
+        # Apply training stage configuration
+        self._configure_training_stage()
     
     def _load_pretrained_vae(self, pretrained_vae_path: str):
         """
@@ -115,6 +121,65 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             if self.is_master:
                 print('Warning: VQVAE model does not have load_pretrained_vae method')
     
+    def _configure_training_stage(self):
+        """
+        Configure model parameters based on training stage.
+        
+        Stage 1: Freeze encoder and decoder, train only codebook
+        Stage 2: Unfreeze all parameters for joint training
+        """
+        vqvae = self.models['vqvae']
+        if hasattr(vqvae, 'module'):
+            vqvae = vqvae.module
+        
+        if self.training_stage == 1:
+            # Stage 1: Freeze encoder and decoder
+            if hasattr(vqvae, 'Encoder'):
+                for param in vqvae.Encoder.parameters():
+                    param.requires_grad = False
+            
+            if hasattr(vqvae, 'Decoder'):
+                for param in vqvae.Decoder.parameters():
+                    param.requires_grad = False
+            
+            # Ensure VQ parameters are trainable
+            if hasattr(vqvae, 'vq'):
+                for param in vqvae.vq.parameters():
+                    param.requires_grad = True
+            
+            if self.is_master:
+                print("\n" + "=" * 80)
+                print("[Stage 1] Encoder and Decoder frozen, training Codebook only")
+                print("=" * 80)
+                
+                # Count trainable parameters
+                total_params = sum(p.numel() for p in vqvae.parameters())
+                trainable_params = sum(p.numel() for p in vqvae.parameters() if p.requires_grad)
+                print(f"Total parameters: {total_params:,}")
+                print(f"Trainable parameters: {trainable_params:,}")
+                print(f"Frozen parameters: {total_params - trainable_params:,}")
+                print("=" * 80 + "\n")
+        
+        elif self.training_stage == 2:
+            # Stage 2: Unfreeze all parameters
+            for param in vqvae.parameters():
+                param.requires_grad = True
+            
+            if self.is_master:
+                print("\n" + "=" * 80)
+                print("[Stage 2] Joint training: Encoder + Decoder + Codebook")
+                print("=" * 80)
+                
+                # Count trainable parameters
+                total_params = sum(p.numel() for p in vqvae.parameters())
+                trainable_params = sum(p.numel() for p in vqvae.parameters() if p.requires_grad)
+                print(f"Total parameters: {total_params:,}")
+                print(f"Trainable parameters: {trainable_params:,}")
+                print("=" * 80 + "\n")
+        
+        else:
+            raise ValueError(f"Invalid training_stage: {self.training_stage}. Must be 1 or 2.")
+    
     def training_losses(
         self,
         sparse_sdf: torch.Tensor,
@@ -146,6 +211,10 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             recon_loss = F.mse_loss(recon.feats, sparse_sdf, reduction='mean')
         elif self.loss_type == 'l1':
             recon_loss = F.l1_loss(recon.feats, sparse_sdf, reduction='mean')
+        elif self.loss_type == 'l1_l2':
+            # Combined L1 + L2 loss for stage 2
+            recon_loss = 0.5 * F.l1_loss(recon.feats, sparse_sdf, reduction='mean') + \
+                         0.5 * F.mse_loss(recon.feats, sparse_sdf, reduction='mean')
         else:
             raise ValueError(f'Invalid loss type: {self.loss_type}')
         
