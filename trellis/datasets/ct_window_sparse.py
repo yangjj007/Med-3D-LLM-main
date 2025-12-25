@@ -275,14 +275,21 @@ class CTWindowSparseSDF(Dataset):
         num_slices_per_axis = 4  # Show 4 slices per axis
         slice_size = 128  # Downsample to 128x128 for each slice
         
-
         print(f"Downsample to {slice_size}^3 for visualization") 
 
         images = []
         
-        for b in range(batch_size):
+        for b in range(min(batch_size, 16)):  # Limit to 16 samples for visualization
             # Get data for this batch item
-            mask = batch_idx == b
+            mask = (batch_idx == b).squeeze()  # Ensure mask is 1D
+            
+            # # Handle edge case where there's no data for this batch
+            # if mask.sum() == 0:
+            #     # Create empty grid
+            #     grid = np.zeros((3 * slice_size, num_slices_per_axis * slice_size), dtype=np.float32)
+            #     images.append(torch.from_numpy(grid).unsqueeze(0))
+            #     continue
+            
             indices = sparse_index[mask].cpu().numpy()
             values = sparse_sdf[mask].cpu().numpy().squeeze()
             

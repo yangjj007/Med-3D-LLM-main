@@ -153,6 +153,17 @@ if __name__ == '__main__':
                     main(0, cfg)
                 break
             except Exception as e:
-                print(f'Error: {e}')
-                print(f'Retrying ({rty + 1}/{cfg.auto_retry})...')
+                import traceback
+                print('\n' + '='*80)
+                print('TRAINING ERROR - Full Traceback:')
+                print('='*80)
+                traceback.print_exc()
+                print('='*80)
+                print(f'\nError: {e}')
+                if rty + 1 < cfg.auto_retry:
+                    print(f'Retrying ({rty + 1}/{cfg.auto_retry})...\n')
+                else:
+                    print(f'\nTraining failed after {cfg.auto_retry} attempts.')
+                    print('Exiting...')
+                    sys.exit(1)
             
