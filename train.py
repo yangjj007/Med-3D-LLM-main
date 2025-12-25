@@ -13,6 +13,9 @@ import random
 from trellis import models, datasets, trainers
 from trellis.utils.dist_utils import setup_dist
 
+# debug
+np.seterr(all='raise')  # 或 'warn'
+
 
 def find_ckpt(cfg):
     # Load checkpoint
