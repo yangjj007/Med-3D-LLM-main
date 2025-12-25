@@ -265,10 +265,6 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             dataset_copy = copy.deepcopy(self.dataset)
             original_max_points = getattr(dataset_copy, 'max_points', None)
             
-            # Limit to 100k points per sample for snapshot to avoid numerical issues
-            if hasattr(dataset_copy, 'max_points') and (dataset_copy.max_points is None or dataset_copy.max_points > 100000):
-                print(f"[DEBUG] Temporarily limiting max_points from {dataset_copy.max_points} to 100000 for snapshot")
-                dataset_copy.max_points = 100000
             
             dataloader = DataLoader(
                 dataset_copy,

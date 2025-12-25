@@ -41,6 +41,7 @@ class Trainer:
         finetune_ckpt=None,
         log_param_stats=False,
         prefetch_data=True,
+        disable_snapshot=False,
         i_print=1000,
         i_log=500,
         i_sample=10000,
@@ -63,6 +64,7 @@ class Trainer:
         self.fp16_scale_growth = fp16_scale_growth
         self.log_param_stats = log_param_stats
         self.prefetch_data = prefetch_data
+        self.disable_snapshot = disable_snapshot
         if self.prefetch_data:
             self._data_prefetched = None
 
@@ -371,11 +373,19 @@ class Trainer:
         """
         if self.is_master:
             print('\nStarting training...')
-            self.snapshot_dataset()
-        if self.step == 0:
-            self.snapshot(suffix='init')
-        else: # resume
-            self.snapshot(suffix=f'resume_step{self.step:07d}')
+            if not self.disable_snapshot:
+                self.snapshot_dataset()
+            else:
+                print('⚠️  Snapshot disabled by configuration')
+        
+        if not self.disable_snapshot:
+            if self.step == 0:
+                self.snapshot(suffix='init')
+            else: # resume
+                self.snapshot(suffix=f'resume_step{self.step:07d}')
+        else:
+            if self.is_master:
+                print('⚠️  Skipping initial snapshot (disabled by configuration)')
 
         log = []
         time_last_print = 0.0
@@ -408,7 +418,7 @@ class Trainer:
                 self.check_ddp()
 
             # Sample images
-            if self.step % self.i_sample == 0:
+            if self.step % self.i_sample == 0 and not self.disable_snapshot:
                 self.snapshot()
 
             if self.is_master:
