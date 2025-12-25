@@ -324,8 +324,10 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                 
                 # Construct sparse tensor
                 coords = torch.cat([batch_idx.unsqueeze(-1), sparse_index], dim=-1).int()
-                print(f"[DEBUG] coords shape: {coords.shape}")
+                print(f"[DEBUG] coords shape: {coords.shape}, dtype: {coords.dtype}")
                 print(f"[DEBUG] coords min: {coords.min(dim=0).values}, max: {coords.max(dim=0).values}")
+                print(f"[DEBUG] coords is_integer: {coords.dtype in [torch.int32, torch.int64]}")
+                print(f"[DEBUG] sparse_sdf shape: {sparse_sdf.shape}, dtype: {sparse_sdf.dtype}")
                 print(f"[DEBUG] sparse_sdf min: {sparse_sdf.min()}, max: {sparse_sdf.max()}, mean: {sparse_sdf.mean()}")
                 
                 x = sp.SparseTensor(sparse_sdf, coords)

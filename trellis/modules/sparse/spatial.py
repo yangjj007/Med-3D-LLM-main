@@ -45,6 +45,11 @@ class SparseDownsample(nn.Module):
             [(code // OFFSET[i+1]) % MAX[i] for i in range(DIM)],
             dim=-1
         )
+        # [FIX] 确保 coords 是整数类型 (spconv 要求)
+        if new_coords.dtype not in [torch.int32, torch.int64]:
+            print(f"[WARNING SparseDownsample] new_coords dtype is {new_coords.dtype}, converting to int32!")
+            # new_coords = new_coords.to(dtype=torch.int32)
+        
         out = SparseTensor(new_feats, new_coords, input.shape,)
         out._scale = tuple([s // f for s, f in zip(input._scale, factor)])
         out._spatial_cache = input._spatial_cache

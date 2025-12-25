@@ -69,8 +69,14 @@ class SparseSDFEncoder_VQ(SparseSDFEncoder):
         """
         
         print("✅ Before input_layer1")
+        print(f"[DEBUG Encoder] Input x.coords dtype: {x.coords.dtype}, shape: {x.coords.shape}")
+        print(f"[DEBUG Encoder] Input x.feats dtype: {x.feats.dtype}, shape: {x.feats.shape}")
+        
         x = self.input_layer1(x)
-        print(f"DEBUG: Voxel count (N): {x.feats.shape[0]}") 
+        
+        print(f"[DEBUG Encoder] After input_layer1 - Voxel count (N): {x.feats.shape[0]}")
+        print(f"[DEBUG Encoder] After input_layer1 - coords dtype: {x.coords.dtype}")
+        print(f"[DEBUG Encoder] After input_layer1 - feats dtype: {x.feats.dtype}")
         if x.feats.shape[0] == 0:
             print("❌ Error: Sparse Tensor is empty!")
         print("✅ After input_layer1")

@@ -40,11 +40,17 @@ class SparseDownBlock3d(nn.Module):
         self.use_checkpoint = use_checkpoint
         
     def _forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
+        print(f"[DEBUG DownBlock] Input coords dtype: {x.coords.dtype}")
         h = self.act_layers(x)
+        print(f"[DEBUG DownBlock] After act_layers coords dtype: {h.coords.dtype}")
         h = self.down(h)
+        print(f"[DEBUG DownBlock] After down(h) coords dtype: {h.coords.dtype}")
         x = self.down(x)
+        print(f"[DEBUG DownBlock] After down(x) coords dtype: {x.coords.dtype}")
         h = self.out_layers(h)
+        print(f"[DEBUG DownBlock] After out_layers coords dtype: {h.coords.dtype}")
         h = h + self.skip_connection(x)
+        print(f"[DEBUG DownBlock] After skip_connection coords dtype: {h.coords.dtype}")
         return h
 
     def forward(self, x: torch.Tensor):

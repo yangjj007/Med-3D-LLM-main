@@ -252,6 +252,10 @@ class SparseTensor:
             )
             new_data._caches = self.data._caches
         elif BACKEND == 'spconv':
+            # [FIX] 确保 coords 是整数类型
+            if coords is not None and coords.dtype not in [torch.int32, torch.int64]:
+                print(f"[WARNING SparseTensor.replace] coords dtype is {coords.dtype}, converting to int32!")
+            
             new_data = SparseTensorData(
                 self.data.features.reshape(self.data.features.shape[0], -1),
                 self.data.indices,

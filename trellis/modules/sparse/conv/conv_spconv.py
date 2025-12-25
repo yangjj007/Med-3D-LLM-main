@@ -22,8 +22,27 @@ class SparseConv3d(nn.Module):
         self.padding = padding
 
     def forward(self, x: SparseTensor) -> SparseTensor:
+        # [DEBUG] 检查输入数据类型
+        print(f"[DEBUG SparseConv3d.forward] Input coords dtype: {x.coords.dtype}, shape: {x.coords.shape}")
+        print(f"[DEBUG SparseConv3d.forward] Input feats dtype: {x.feats.dtype}, shape: {x.feats.shape}")
+        print(f"[DEBUG SparseConv3d.forward] Input coords min: {x.coords.min(dim=0).values}, max: {x.coords.max(dim=0).values}")
+        
+        # # [FIX] 确保 coords 是整数类型
+        # if x.coords.dtype not in [torch.int32, torch.int64]:
+        #     print(f"[ERROR] coords dtype is {x.coords.dtype}, NOT integer! This will cause floating point exception!")
+        #     print(f"[ERROR] coords sample: {x.coords[:5]}")
+        #     raise TypeError(f"spconv requires integer coordinates, but got {x.coords.dtype}")
+        
+        # 检查是否有 NaN 或 Inf
+        if torch.isnan(x.feats).any():
+            print(f"[ERROR] NaN detected in feats!")
+        if torch.isinf(x.feats).any():
+            print(f"[ERROR] Inf detected in feats!")
+        
         spatial_changed = any(s != 1 for s in self.stride) or (self.padding is not None)
+        print(f"[DEBUG SparseConv3d.forward] Calling spconv with stride={self.stride}, padding={self.padding}")
         new_data = self.conv(x.data)
+        print(f"[DEBUG SparseConv3d.forward] spconv call succeeded")
         new_shape = [x.shape[0], self.conv.out_channels]
         new_layout = None if spatial_changed else x.layout
 
