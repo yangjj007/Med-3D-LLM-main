@@ -73,7 +73,7 @@ CASES=()
 for case_dir in "$PROCESSED_DIR"/*; do
     if [ -d "$case_dir" ]; then
         # 检查是否有CT数据文件
-        if [ -f "$case_dir/ct_normalized_512.npy" ] || [ -f "$case_dir/ct_normalized_1024.npy" ]; then
+        if [ -f "$case_dir/ct_original_512.npy" ] || [ -f "$case_dir/ct_original_1024.npy" ] || [ -f "$case_dir/ct_normalized_512.npy" ] || [ -f "$case_dir/ct_normalized_1024.npy" ]; then
             CASES+=("$case_dir")
         fi
     fi

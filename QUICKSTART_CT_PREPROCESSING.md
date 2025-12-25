@@ -88,8 +88,8 @@ python dataset_toolkits/process_m3d_seg_format.py \
 
 ```bash
 bash scripts/prepare_ct_recursive.sh \
-    ./med_datasets \
-    ./processed_datasets \
+    ./med_dataset \
+    ./processed_dataset \
     ./organ_mapping.json \
     8
 ```
@@ -102,8 +102,8 @@ bash scripts/prepare_ct_recursive.sh \
 
 预处理会自动完成：
 - ✅ 分辨率适配（自动选择512³或1024³）
-- ✅ CT标准化
-- ✅ 4种窗口二值化（肺、骨、软组织、脑）
+- ✅ 保存原始CT（HU值）
+- ✅ 4种窗口二值化（肺、骨、软组织、脑，直接在原始HU值上二值化）
 - ✅ 器官特定窗口提取
 - ✅ 生成元数据
 
@@ -112,11 +112,12 @@ bash scripts/prepare_ct_recursive.sh \
 ```python
 import numpy as np
 
-# 加载标准化的CT
-ct = np.load('output_ct/processed/case_001/ct_normalized_512.npy')
+# 加载原始CT（HU值）
+ct = np.load('output_ct/processed/case_001/ct_original_512.npy')
 print(f"CT形状: {ct.shape}")  # (512, 512, 512)
+print(f"HU值范围: [{ct.min():.2f}, {ct.max():.2f}]")
 
-# 加载肺窗
+# 加载肺窗（二值化后的结果）
 lung_window = np.load('output_ct/processed/case_001/windows/lung_w1500_l-600.npy')
 print(f"肺窗形状: {lung_window.shape}")  # (512, 512, 512)
 ```
@@ -177,8 +178,8 @@ output_dir/
 ├── dataset_config.json       # 配置
 └── processed/
     └── case_001/
-        ├── ct_normalized_512.npy
-        ├── windows/
+        ├── ct_original_512.npy    # 原始CT（HU值，已适配分辨率）
+        ├── windows/               # 窗口二值化结果（基于原始HU值）
         │   ├── lung_w1500_l-600.npy
         │   ├── bone_w1500_l300.npy
         │   └── ...
@@ -195,7 +196,8 @@ output_dir/
 
 ```python
 import numpy as np
-ct = np.load('output_ct/processed/case_001/ct_normalized_512.npy')
+# 加载原始CT（HU值）
+ct = np.load('output_ct/processed/case_001/ct_original_512.npy')
 ```
 
 ### 方法2：使用示例脚本
@@ -223,12 +225,12 @@ for batch in loader:
 
 **可视化单个病例：**
 ```bash
-bash scripts/visualize_ct.sh ./output_ct/0000/processed/0
+bash scripts/visualize_ct.sh ./processed_dataset/0000/processed/1
 ```
 
 **批量可视化：**
 ```bash
-bash scripts/visualize_ct_batch.sh ./output_ct/0000/processed
+bash scripts/visualize_ct_batch.sh ./processed_dataset/0000/processed
 ```
 
 ### 生成的可视化

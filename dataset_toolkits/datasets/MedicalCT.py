@@ -259,10 +259,10 @@ def get_data_loader(metadata: pd.DataFrame,
         row = row.iloc[0]
         case_id = row['case_id']
         
-        # 加载CT数据
-        ct_path = os.path.join(processed_dir, 'processed', case_id, f'ct_normalized_{resolution}.npy')
+        # 加载CT数据（优先使用ct_original，向后兼容ct_normalized）
+        ct_path = os.path.join(processed_dir, 'processed', case_id, f'ct_original_{resolution}.npy')
         if not os.path.exists(ct_path):
-            ct_path = os.path.join(processed_dir, 'processed', case_id, f'ct_original_{resolution}.npy')
+            ct_path = os.path.join(processed_dir, 'processed', case_id, f'ct_normalized_{resolution}.npy')
         
         ct_array = np.load(ct_path)
         

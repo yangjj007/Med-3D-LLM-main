@@ -376,8 +376,10 @@ def visualize_ct_dataset(dataset_path: str, output_dir: Optional[str] = None):
     # 1. 加载主CT数据
     print("\n[1/5] 加载CT数据...")
     ct_files = [
-        'ct_normalized_512.npy',
-        'ct_normalized_1024.npy'
+        'ct_original_512.npy',
+        'ct_original_1024.npy',
+        'ct_normalized_512.npy',  # 向后兼容
+        'ct_normalized_1024.npy'  # 向后兼容
     ]
     ct_volume = None
     for ct_file in ct_files:

@@ -204,11 +204,10 @@ def process_single_case(case_info: Dict,
         seg_adapted = adapt_resolution(seg_array, target_resolution, fill_value=0, mode='constant')
         print(f"     分割标签也已适配")
     
-    # 保存原始适配后的CT（可选）
-    if save_intermediate:
-        ct_original_path = os.path.join(case_output_dir, f'ct_original_{target_resolution}.npy')
-        np.save(ct_original_path, ct_adapted)
-        print(f"     保存原始CT: ct_original_{target_resolution}.npy")
+    # 保存原始适配后的CT
+    ct_original_path = os.path.join(case_output_dir, f'ct_original_{target_resolution}.npy')
+    np.save(ct_original_path, ct_adapted)
+    print(f"     保存原始CT: ct_original_{target_resolution}.npy")
     
     # 步骤3: 全局窗口处理（直接在原始CT上进行二值化）
     print(f"  3. 全局窗口处理（基于原始HU值）...")
@@ -309,7 +308,7 @@ def process_single_case(case_info: Dict,
         'windows_processed': list(global_windows.keys()),
         'file_size_mb': round(file_size_mb, 2),
         'processing_time_sec': round(processing_time, 2),
-        'ct_path': f'processed/{case_id}/ct_original_{target_resolution}.npy' if save_intermediate else None,
+        'ct_path': f'processed/{case_id}/ct_original_{target_resolution}.npy',
         'masks_path': f'processed/{case_id}/masks/segmentation_masks.npz' if seg_array is not None else None,
     }
     

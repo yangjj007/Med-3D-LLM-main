@@ -73,16 +73,22 @@ print_success "数据集路径有效: $DATASET_PATH"
 print_info "检查数据文件..."
 CT_FILE_FOUND=false
 
-if [ -f "$DATASET_PATH/ct_normalized_512.npy" ]; then
-    print_success "找到: ct_normalized_512.npy"
+if [ -f "$DATASET_PATH/ct_original_512.npy" ]; then
+    print_success "找到: ct_original_512.npy"
+    CT_FILE_FOUND=true
+elif [ -f "$DATASET_PATH/ct_original_1024.npy" ]; then
+    print_success "找到: ct_original_1024.npy"
+    CT_FILE_FOUND=true
+elif [ -f "$DATASET_PATH/ct_normalized_512.npy" ]; then
+    print_success "找到: ct_normalized_512.npy (旧版本)"
     CT_FILE_FOUND=true
 elif [ -f "$DATASET_PATH/ct_normalized_1024.npy" ]; then
-    print_success "找到: ct_normalized_1024.npy"
+    print_success "找到: ct_normalized_1024.npy (旧版本)"
     CT_FILE_FOUND=true
 fi
 
 if [ "$CT_FILE_FOUND" = false ]; then
-    print_error "未找到CT数据文件 (ct_normalized_*.npy)"
+    print_error "未找到CT数据文件 (ct_original_*.npy 或 ct_normalized_*.npy)"
     exit 1
 fi
 

@@ -223,17 +223,8 @@ def process_m3d_seg_case(case_info: Dict,
     np.save(ct_original_path, ct_adapted)
     print(f"     保存原始CT: ct_original_{target_resolution}.npy")
     
-    # 步骤3: CT标准化
-    print(f"  3. CT标准化...")
-    ct_normalized = normalize_ct(ct_adapted)
-    print(f"     标准化后范围: [{np.min(ct_normalized):.4f}, {np.max(ct_normalized):.4f}]")
-    
-    ct_normalized_path = os.path.join(case_output_dir, f'ct_normalized_{target_resolution}.npy')
-    np.save(ct_normalized_path, ct_normalized)
-    print(f"     保存标准化CT")
-    
-    # 步骤4: 全局窗口处理
-    print(f"  4. 全局窗口处理...")
+    # 步骤3: 全局窗口处理（直接在原始CT上进行二值化）
+    print(f"  3. 全局窗口处理（基于原始HU值）...")
     global_windows = process_all_windows(ct_adapted, binarize=True)
     
     for window_name, binary_array in global_windows.items():
@@ -243,10 +234,10 @@ def process_m3d_seg_case(case_info: Dict,
         positive_ratio = np.sum(binary_array) / binary_array.size
         print(f"     {window_name}: {positive_ratio:.2%} 正值")
     
-    # 步骤5: 器官特定窗口处理
+    # 步骤4: 器官特定窗口处理
     organs_info = []
     if seg_adapted is not None and organ_mapping is not None:
-        print(f"  5. 器官特定窗口处理...")
+        print(f"  4. 器官特定窗口处理...")
         
         # 验证分割
         is_valid, message = validate_segmentation(seg_adapted, ct_adapted)
@@ -303,7 +294,7 @@ def process_m3d_seg_case(case_info: Dict,
         sparse.save_npz(mask_path, seg_sparse)
         print(f"     保存分割掩码")
     else:
-        print(f"  5. 跳过器官处理")
+        print(f"  4. 跳过器官处理")
     
     # 生成元信息
     processing_time = time.time() - start_time
@@ -325,7 +316,7 @@ def process_m3d_seg_case(case_info: Dict,
         'windows_processed': list(global_windows.keys()),
         'file_size_mb': round(file_size_mb, 2),
         'processing_time_sec': round(processing_time, 2),
-        'ct_path': f'processed/{case_id}/ct_normalized_{target_resolution}.npy',
+        'ct_path': f'processed/{case_id}/ct_original_{target_resolution}.npy',
         'masks_path': f'processed/{case_id}/masks/segmentation_masks.npz' if seg_array is not None else None,
         'source_format': 'm3d_seg'
     }
