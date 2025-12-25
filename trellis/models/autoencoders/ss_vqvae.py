@@ -67,8 +67,10 @@ class SparseSDFEncoder_VQ(SparseSDFEncoder):
             如果using_out_layer=False，返回transformer的输出
             如果using_out_layer=True，返回最终的latent表示
         """
+        
         print("✅ Before input_layer1")
         x = self.input_layer1(x)
+        print(f"DEBUG: Feature dim entering blocks: {x.feats.shape[1]}") # 检查这个值是否小于32
         print("✅ After input_layer1")
 
         for block in self.downsample:
