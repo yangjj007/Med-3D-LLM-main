@@ -283,12 +283,12 @@ class CTWindowSparseSDF(Dataset):
             # Get data for this batch item
             mask = (batch_idx == b).squeeze()  # Ensure mask is 1D
             
-            # # Handle edge case where there's no data for this batch
-            # if mask.sum() == 0:
-            #     # Create empty grid
-            #     grid = np.zeros((3 * slice_size, num_slices_per_axis * slice_size), dtype=np.float32)
-            #     images.append(torch.from_numpy(grid).unsqueeze(0))
-            #     continue
+            # Handle edge case where there's no data for this batch
+            if mask.sum() == 0:
+                # Create empty grid
+                grid = np.zeros((3 * slice_size, num_slices_per_axis * slice_size), dtype=np.float32)
+                images.append(torch.from_numpy(grid).unsqueeze(0))
+                continue
             
             indices = sparse_index[mask].cpu().numpy()
             values = sparse_sdf[mask].cpu().numpy().squeeze()
