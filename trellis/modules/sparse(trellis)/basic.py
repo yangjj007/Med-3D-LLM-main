@@ -252,6 +252,10 @@ class SparseTensor:
             )
             new_data._caches = self.data._caches
         elif BACKEND == 'spconv':
+            # [FIX] 确保 coords 是整数类型
+            if coords is not None and coords.dtype not in [torch.int32, torch.int64]:
+                print(f"[WARNING SparseTensor.replace] coords dtype is {coords.dtype}, converting to int32!")
+            
             new_data = SparseTensorData(
                 self.data.features.reshape(self.data.features.shape[0], -1),
                 self.data.indices,
@@ -303,14 +307,37 @@ class SparseTensor:
         return self.replace(-self.feats)
     
     def __elemwise__(self, other: Union[torch.Tensor, 'SparseTensor'], op: callable) -> 'SparseTensor':
+        print(f"\n{'='*80}")
+        print(f"[DEBUG __elemwise__] 开始元素级操作")
+        print(f"[DEBUG __elemwise__] self 类型: {type(self)}")
+        print(f"[DEBUG __elemwise__] self.feats.shape: {self.feats.shape}")
+        print(f"[DEBUG __elemwise__] self.coords.shape: {self.coords.shape}")
+        print(f"[DEBUG __elemwise__] self.shape: {self.shape}")
+        print(f"[DEBUG __elemwise__] other 类型: {type(other)}")
+        
         if isinstance(other, torch.Tensor):
+            print(f"[DEBUG __elemwise__] other 是 torch.Tensor, shape: {other.shape}")
             try:
                 other = torch.broadcast_to(other, self.shape)
+                print(f"[DEBUG __elemwise__] broadcast_to 后 other.shape: {other.shape}")
                 other = sparse_batch_broadcast(self, other)
-            except:
+                print(f"[DEBUG __elemwise__] sparse_batch_broadcast 后 other.shape: {other.shape}")
+            except Exception as e:
+                print(f"[DEBUG __elemwise__] broadcast 失败: {e}")
                 pass
         if isinstance(other, SparseTensor):
+            print(f"[DEBUG __elemwise__] other 是 SparseTensor")
+            print(f"[DEBUG __elemwise__] other.feats.shape: {other.feats.shape}")
+            print(f"[DEBUG __elemwise__] other.coords.shape: {other.coords.shape}")
+            print(f"[DEBUG __elemwise__] other.shape: {other.shape}")
             other = other.feats
+            print(f"[DEBUG __elemwise__] 提取 other.feats 后 shape: {other.shape}")
+        
+        print(f"[DEBUG __elemwise__] 准备执行操作: {op}")
+        print(f"[DEBUG __elemwise__] self.feats.shape: {self.feats.shape} (大小: {self.feats.shape[0]})")
+        print(f"[DEBUG __elemwise__] other.shape: {other.shape} (大小: {other.shape[0] if hasattr(other, 'shape') else 'N/A'})")
+        print(f"{'='*80}\n")
+        
         new_feats = op(self.feats, other)
         new_tensor = self.replace(new_feats)
         if isinstance(other, SparseTensor):

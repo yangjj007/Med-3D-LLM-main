@@ -1,6 +1,6 @@
 from typing import *
 
-BACKEND = 'torchsparse'
+BACKEND = 'spconv' 
 DEBUG = False
 ATTN = 'flash_attn'
 
@@ -55,11 +55,11 @@ __attributes = {
     'SparseLayerNorm': 'norm',
     'SparseGroupNorm32': 'norm',
     'SparseLayerNorm32': 'norm',
-    'SparseSigmoid': 'nonlinearity',
     'SparseReLU': 'nonlinearity',
     'SparseSiLU': 'nonlinearity',
     'SparseGELU': 'nonlinearity',
     'SparseTanh': 'nonlinearity',
+    'SparseSigmoid': 'nonlinearity',
     'SparseActivation': 'nonlinearity',
     'SparseLinear': 'linear',
     'sparse_scaled_dot_product_attention': 'attention',
@@ -69,7 +69,6 @@ __attributes = {
     'SparseMultiHeadAttention': 'attention',
     'SparseConv3d': 'conv',
     'SparseInverseConv3d': 'conv',
-    'sparseconv3d_func': 'conv',
     'SparseDownsample': 'spatial',
     'SparseUpsample': 'spatial',
     'SparseSubdivide' : 'spatial'

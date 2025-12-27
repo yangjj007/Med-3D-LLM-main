@@ -15,12 +15,17 @@ class SparseDownsample(nn.Module):
     Downsample a sparse tensor by a factor of `factor`.
     Implemented as average pooling.
     """
-    def __init__(self, factor: Union[int, Tuple[int, ...], List[int]], mode="mean"):
+    def __init__(self, factor: Union[int, Tuple[int, ...], List[int]]):
         super(SparseDownsample, self).__init__()
         self.factor = tuple(factor) if isinstance(factor, (list, tuple)) else factor
-        self.mode = mode
 
     def forward(self, input: SparseTensor) -> SparseTensor:
+        print(f"\n{'>'*80}")
+        print(f"[DEBUG SparseDownsample] === 开始下采样操作 ===")
+        print(f"[DEBUG SparseDownsample] 输入 input.feats.shape: {input.feats.shape}")
+        print(f"[DEBUG SparseDownsample] 输入 input.coords.shape: {input.coords.shape}")
+        print(f"[DEBUG SparseDownsample] 下采样因子 factor: {self.factor}")
+        
         DIM = input.coords.shape[-1] - 1
         factor = self.factor if isinstance(self.factor, tuple) else (self.factor,) * DIM
         assert DIM == len(factor), 'Input coordinates must have the same dimension as the downsample factor.'
@@ -33,23 +38,28 @@ class SparseDownsample(nn.Module):
         OFFSET = torch.cumprod(torch.tensor(MAX[::-1]), 0).tolist()[::-1] + [1]
         code = sum([c * o for c, o in zip(coord, OFFSET)])
         code, idx = code.unique(return_inverse=True)
+        
+        print(f"[DEBUG SparseDownsample] 原始体素数: {input.feats.shape[0]}")
+        print(f"[DEBUG SparseDownsample] 下采样后唯一体素数: {code.shape[0]}")
+        print(f"[DEBUG SparseDownsample] idx.shape: {idx.shape}")
 
-        #### using fp16 could cause overflow when factor is large ######
-        dtype = input.feats.dtype
         new_feats = torch.scatter_reduce(
-            torch.zeros(code.shape[0], input.feats.shape[1], device=input.feats.device, dtype=torch.float64),
+            torch.zeros(code.shape[0], input.feats.shape[1], device=input.feats.device, dtype=input.feats.dtype),
             dim=0,
             index=idx.unsqueeze(1).expand(-1, input.feats.shape[1]),
-            src=input.feats.double(),
-            reduce=self.mode,
+            src=input.feats,
+            reduce='mean'
         )
-        new_feats = new_feats.to(dtype)
-        
         new_coords = torch.stack(
             [code // OFFSET[0]] +
             [(code // OFFSET[i+1]) % MAX[i] for i in range(DIM)],
             dim=-1
         )
+        # [FIX] 确保 coords 是整数类型 (spconv 要求)
+        if new_coords.dtype not in [torch.int32, torch.int64]:
+            print(f"[WARNING SparseDownsample] new_coords dtype is {new_coords.dtype}, converting to int32!")
+            # new_coords = new_coords.to(dtype=torch.int32)
+        
         out = SparseTensor(new_feats, new_coords, input.shape,)
         out._scale = tuple([s // f for s, f in zip(input._scale, factor)])
         out._spatial_cache = input._spatial_cache
@@ -58,6 +68,10 @@ class SparseDownsample(nn.Module):
         out.register_spatial_cache(f'upsample_{factor}_layout', input.layout)
         out.register_spatial_cache(f'upsample_{factor}_idx', idx)
 
+        print(f"[DEBUG SparseDownsample] 输出 out.feats.shape: {out.feats.shape}")
+        print(f"[DEBUG SparseDownsample] 输出 out.coords.shape: {out.coords.shape}")
+        print(f"[DEBUG SparseDownsample] === 完成下采样操作 ===")
+        print(f"{'>'*80}\n")
         return out
 
 

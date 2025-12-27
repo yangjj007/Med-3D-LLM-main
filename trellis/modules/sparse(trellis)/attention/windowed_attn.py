@@ -88,7 +88,9 @@ def sparse_windowed_scaled_dot_product_self_attention(
     T = qkv.feats.shape[0]
     H = qkv.feats.shape[2]
     C = qkv.feats.shape[3]
+    
     qkv_feats = qkv.feats[fwd_indices]      # [M, 3, H, C]
+
     if DEBUG:
         start = 0
         qkv_coords = qkv.coords[fwd_indices]
