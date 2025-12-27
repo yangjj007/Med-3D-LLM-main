@@ -27,7 +27,7 @@
             "resolution": 512,
             "window_type": "lung",
             "min_points": 100,
-            "max_points": 400000
+            "max_points": 300000
         }
     },
     "trainer": {
