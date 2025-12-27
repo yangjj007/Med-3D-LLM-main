@@ -20,6 +20,12 @@ class SparseDownsample(nn.Module):
         self.factor = tuple(factor) if isinstance(factor, (list, tuple)) else factor
 
     def forward(self, input: SparseTensor) -> SparseTensor:
+        print(f"\n{'>'*80}")
+        print(f"[DEBUG SparseDownsample] === 开始下采样操作 ===")
+        print(f"[DEBUG SparseDownsample] 输入 input.feats.shape: {input.feats.shape}")
+        print(f"[DEBUG SparseDownsample] 输入 input.coords.shape: {input.coords.shape}")
+        print(f"[DEBUG SparseDownsample] 下采样因子 factor: {self.factor}")
+        
         DIM = input.coords.shape[-1] - 1
         factor = self.factor if isinstance(self.factor, tuple) else (self.factor,) * DIM
         assert DIM == len(factor), 'Input coordinates must have the same dimension as the downsample factor.'
@@ -32,6 +38,10 @@ class SparseDownsample(nn.Module):
         OFFSET = torch.cumprod(torch.tensor(MAX[::-1]), 0).tolist()[::-1] + [1]
         code = sum([c * o for c, o in zip(coord, OFFSET)])
         code, idx = code.unique(return_inverse=True)
+        
+        print(f"[DEBUG SparseDownsample] 原始体素数: {input.feats.shape[0]}")
+        print(f"[DEBUG SparseDownsample] 下采样后唯一体素数: {code.shape[0]}")
+        print(f"[DEBUG SparseDownsample] idx.shape: {idx.shape}")
 
         new_feats = torch.scatter_reduce(
             torch.zeros(code.shape[0], input.feats.shape[1], device=input.feats.device, dtype=input.feats.dtype),
@@ -58,6 +68,10 @@ class SparseDownsample(nn.Module):
         out.register_spatial_cache(f'upsample_{factor}_layout', input.layout)
         out.register_spatial_cache(f'upsample_{factor}_idx', idx)
 
+        print(f"[DEBUG SparseDownsample] 输出 out.feats.shape: {out.feats.shape}")
+        print(f"[DEBUG SparseDownsample] 输出 out.coords.shape: {out.coords.shape}")
+        print(f"[DEBUG SparseDownsample] === 完成下采样操作 ===")
+        print(f"{'>'*80}\n")
         return out
 
 

@@ -11,11 +11,18 @@ class SparseConv3d(nn.Module):
         self.conv = torchsparse.nn.Conv3d(in_channels, out_channels, kernel_size, stride, 0, dilation, bias)
 
     def forward(self, x: SparseTensor) -> SparseTensor:
+        print(f"[DEBUG SparseConv3d-torchsparse] 输入 x.feats.shape: {x.feats.shape}")
+        print(f"[DEBUG SparseConv3d-torchsparse] 输入 x.coords.shape: {x.coords.shape}")
+        print(f"[DEBUG SparseConv3d-torchsparse] Conv stride: {self.conv.stride}")
+        
         out = self.conv(x.data)
         new_shape = [x.shape[0], self.conv.out_channels]
         out = SparseTensor(out, shape=torch.Size(new_shape), layout=x.layout if all(s == 1 for s in self.conv.stride) else None)
         out._spatial_cache = x._spatial_cache
         out._scale = tuple([s * stride for s, stride in zip(x._scale, self.conv.stride)])
+        
+        print(f"[DEBUG SparseConv3d-torchsparse] 输出 out.feats.shape: {out.feats.shape}")
+        print(f"[DEBUG SparseConv3d-torchsparse] 输出 out.coords.shape: {out.coords.shape}")
         return out
 
 

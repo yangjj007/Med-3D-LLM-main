@@ -22,9 +22,10 @@ class SparseConv3d(nn.Module):
 
     def forward(self, x: SparseTensor) -> SparseTensor:
         # [DEBUG] 检查输入数据类型
-        print(f"[DEBUG SparseConv3d.forward] Input coords dtype: {x.coords.dtype}, shape: {x.coords.shape}")
-        print(f"[DEBUG SparseConv3d.forward] Input feats dtype: {x.feats.dtype}, shape: {x.feats.shape}")
-        print(f"[DEBUG SparseConv3d.forward] Input coords min: {x.coords.min(dim=0).values}, max: {x.coords.max(dim=0).values}")
+        print(f"\n[DEBUG SparseConv3d-spconv] ===== 开始卷积操作 =====")
+        print(f"[DEBUG SparseConv3d-spconv] 输入 coords dtype: {x.coords.dtype}, shape: {x.coords.shape}")
+        print(f"[DEBUG SparseConv3d-spconv] 输入 feats dtype: {x.feats.dtype}, shape: {x.feats.shape}")
+        print(f"[DEBUG SparseConv3d-spconv] 输入 coords min: {x.coords.min(dim=0).values}, max: {x.coords.max(dim=0).values}")
         
         if not torch.isfinite(x.feats).all():
             # 打印非法值位置和统计
@@ -45,9 +46,9 @@ class SparseConv3d(nn.Module):
             print(f"[ERROR] Inf detected in feats!")
         
         spatial_changed = any(s != 1 for s in self.stride) or (self.padding is not None)
-        print(f"[DEBUG SparseConv3d.forward] Calling spconv with stride={self.stride}, padding={self.padding}")
+        print(f"[DEBUG SparseConv3d-spconv] Calling spconv with stride={self.stride}, padding={self.padding}")
         new_data = self.conv(x.data)
-        print(f"[DEBUG SparseConv3d.forward] spconv call succeeded")
+        print(f"[DEBUG SparseConv3d-spconv] spconv call succeeded")
         new_shape = [x.shape[0], self.conv.out_channels]
         new_layout = None if spatial_changed else x.layout
 
@@ -70,6 +71,9 @@ class SparseConv3d(nn.Module):
             out.register_spatial_cache(f'conv_{self.stride}_unsorted_data', unsorted_data)
             out.register_spatial_cache(f'conv_{self.stride}_sort_bwd', bwd)
  
+        print(f"[DEBUG SparseConv3d-spconv] 输出 out.feats.shape: {out.feats.shape}")
+        print(f"[DEBUG SparseConv3d-spconv] 输出 out.coords.shape: {out.coords.shape}")
+        print(f"[DEBUG SparseConv3d-spconv] ===== 完成卷积操作 =====\n")
         return out
 
 

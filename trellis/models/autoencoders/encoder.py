@@ -40,17 +40,43 @@ class SparseDownBlock3d(nn.Module):
         self.use_checkpoint = use_checkpoint
         
     def _forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
+        print(f"\n{'#'*80}")
+        print(f"[DEBUG DownBlock] === 开始 DownBlock 前向传播 ===")
+        print(f"[DEBUG DownBlock] Input x.feats.shape: {x.feats.shape}")
+        print(f"[DEBUG DownBlock] Input x.coords.shape: {x.coords.shape}")
         print(f"[DEBUG DownBlock] Input coords dtype: {x.coords.dtype}")
+        
         h = self.act_layers(x)
+        print(f"[DEBUG DownBlock] After act_layers h.feats.shape: {h.feats.shape}")
         print(f"[DEBUG DownBlock] After act_layers coords dtype: {h.coords.dtype}")
+        
         h = self.down(h)
-        print(f"[DEBUG DownBlock] After down(h) coords dtype: {h.coords.dtype}")
+        print(f"[DEBUG DownBlock] After down(h) h.feats.shape: {h.feats.shape}")
+        print(f"[DEBUG DownBlock] After down(h) h.coords.shape: {h.coords.shape}")
+        
         x = self.down(x)
-        print(f"[DEBUG DownBlock] After down(x) coords dtype: {x.coords.dtype}")
+        print(f"[DEBUG DownBlock] After down(x) x.feats.shape: {x.feats.shape}")
+        print(f"[DEBUG DownBlock] After down(x) x.coords.shape: {x.coords.shape}")
+        
         h = self.out_layers(h)
-        print(f"[DEBUG DownBlock] After out_layers coords dtype: {h.coords.dtype}")
-        h = h + self.skip_connection(x)
-        print(f"[DEBUG DownBlock] After skip_connection coords dtype: {h.coords.dtype}")
+        print(f"[DEBUG DownBlock] After out_layers h.feats.shape: {h.feats.shape}")
+        print(f"[DEBUG DownBlock] After out_layers h.coords.shape: {h.coords.shape}")
+        
+        print(f"\n[DEBUG DownBlock] === 准备执行 skip_connection ===")
+        skip_result = self.skip_connection(x)
+        print(f"[DEBUG DownBlock] skip_connection(x) result.feats.shape: {skip_result.feats.shape}")
+        print(f"[DEBUG DownBlock] skip_connection(x) result.coords.shape: {skip_result.coords.shape}")
+        
+        print(f"\n[DEBUG DownBlock] === 准备执行加法操作 ===")
+        print(f"[DEBUG DownBlock] h.feats.shape[0]: {h.feats.shape[0]} (要相加的张量A)")
+        print(f"[DEBUG DownBlock] skip_result.feats.shape[0]: {skip_result.feats.shape[0]} (要相加的张量B)")
+        print(f"[DEBUG DownBlock] h.coords 唯一值数量: {len(torch.unique(h.coords, dim=0))}")
+        print(f"[DEBUG DownBlock] skip_result.coords 唯一值数量: {len(torch.unique(skip_result.coords, dim=0))}")
+        
+        h = h + skip_result
+        print(f"[DEBUG DownBlock] After skip_connection h.coords dtype: {h.coords.dtype}")
+        print(f"[DEBUG DownBlock] === 完成 DownBlock 前向传播 ===")
+        print(f"{'#'*80}\n")
         return h
 
     def forward(self, x: torch.Tensor):
