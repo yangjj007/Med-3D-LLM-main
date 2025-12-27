@@ -10,6 +10,10 @@ import torch.multiprocessing as mp
 import numpy as np
 import random
 
+
+# 不同稀疏后端
+os.environ['SPARSE_BACKEND'] = 'torchsparse' # 或 'spconv' 
+
 from trellis import models, datasets, trainers
 from trellis.utils.dist_utils import setup_dist
 
@@ -17,8 +21,6 @@ from trellis.utils.dist_utils import setup_dist
 np.seterr(all='raise')  # 或 'warn'
 torch.autograd.set_detect_anomaly(True)
 
-# 不同稀疏后端
-os.environ['SPARSE_BACKEND'] = 'torchsparse' # 或 'spconv' 
 
 
 def find_ckpt(cfg):
