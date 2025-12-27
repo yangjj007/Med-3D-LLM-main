@@ -119,8 +119,10 @@ CTWindowSparseSDF Dataset:
 
 ### 步骤3：阶段1训练 - 冻结VAE，训练码本
 
+为了解决int64_t(N) * int64_t(C) * tv::bit_size(algo_desp.dtype_a) / 8 < int_max assert faild. your data exceed int32 range. 报错，加入环境变量 SPCONV_ALGO='native'
+
 ```bash
-python train.py \
+SPCONV_ALGO='native' python train.py \
     --config configs/vae/ct_vqvae_stage1.json \
     --output_dir outputs/ct_vqvae_lung_stage1 \
     --data_dir ./processed_dataset \

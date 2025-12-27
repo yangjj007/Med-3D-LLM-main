@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import spconv.pytorch as spconv
 from .. import SparseTensor
 from .. import DEBUG
 from . import SPCONV_ALGO
@@ -7,8 +8,6 @@ from . import SPCONV_ALGO
 class SparseConv3d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, padding=None, bias=True, indice_key=None):
         super(SparseConv3d, self).__init__()
-        if 'spconv' not in globals():
-            import spconv.pytorch as spconv
         algo = None
         if SPCONV_ALGO == 'native':
             algo = spconv.ConvAlgo.Native
@@ -38,8 +37,6 @@ class SparseConv3d(nn.Module):
 
             indice_dict = new_data.indice_dict 
             
-            if 'spconv' not in globals():
-                import spconv.pytorch as spconv
             new_data = spconv.SparseConvTensor(sorted_feats, sorted_coords, unsorted_data.spatial_shape, unsorted_data.batch_size, indice_dict=indice_dict)  # type: ignore
 
         out = SparseTensor(
@@ -58,8 +55,6 @@ class SparseConv3d(nn.Module):
 class SparseInverseConv3d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, bias=True, indice_key=None):
         super(SparseInverseConv3d, self).__init__()
-        if 'spconv' not in globals():
-            import spconv.pytorch as spconv
         self.conv = spconv.SparseInverseConv3d(in_channels, out_channels, kernel_size, bias=bias, indice_key=indice_key)
         self.stride = tuple(stride) if isinstance(stride, (list, tuple)) else (stride, stride, stride)
 
