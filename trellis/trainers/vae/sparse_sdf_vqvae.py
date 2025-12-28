@@ -134,12 +134,12 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         
         if self.training_stage == 1:
             # Stage 1: Freeze encoder and decoder
-            if hasattr(vqvae, 'Encoder'):
-                for param in vqvae.Encoder.parameters():
+            if hasattr(vqvae, 'encoder'):
+                for param in vqvae.encoder.parameters():
                     param.requires_grad = False
             
-            if hasattr(vqvae, 'Decoder'):
-                for param in vqvae.Decoder.parameters():
+            if hasattr(vqvae, 'decoder'):
+                for param in vqvae.decoder.parameters():
                     param.requires_grad = False
             
             # Ensure VQ parameters are trainable
@@ -281,7 +281,7 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                 vqvae = vqvae.module
             
             # Get model dtype for fp16 compatibility
-            model_dtype = vqvae.Encoder.dtype if hasattr(vqvae.Encoder, 'dtype') else torch.float32
+            model_dtype = vqvae.encoder.dtype if hasattr(vqvae.encoder, 'dtype') else torch.float32
             print(f"[DEBUG] Model dtype: {model_dtype}")
             
             # Inference
