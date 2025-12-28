@@ -69,25 +69,76 @@ class SparseSDFVQVAE(nn.Module):
     严格遵循 SparseSDFVAE 的结构，只替换 VQ 部分
     """
     def __init__(self, *,
-                 embed_dim: int = 0,
+                 embed_dim: int = None,
+                 latent_channels: int = None,  # 别名，兼容旧配置
                  resolution: int = 64,
-                 model_channels_encoder: int = 512,
-                 num_blocks_encoder: int = 4,
-                 num_heads_encoder: int = 8,
+                 model_channels_encoder: int = None,
+                 model_channels_decoder: int = None,
+                 model_channels: int = None,  # 别名，兼容旧配置
+                 num_blocks_encoder: int = None,
+                 num_blocks_decoder: int = None,
+                 num_blocks: int = None,  # 别名，兼容旧配置
+                 num_heads_encoder: int = None,
+                 num_heads_decoder: int = None,
+                 num_heads: int = None,  # 别名，兼容旧配置
                  num_head_channels_encoder: int = 64,
-                 model_channels_decoder: int = 512,
-                 num_blocks_decoder: int = 4,
-                 num_heads_decoder: int = 8,
                  num_head_channels_decoder: int = 64,
+                 num_head_channels: int = None,  # 别名，兼容旧配置
                  out_channels: int = 1,
                  use_fp16: bool = False,
                  use_checkpoint: bool = False,
                  chunk_size: int = 1,
                  latents_scale: float = 1.0,
                  latents_shift: float = 0.0,
-                 num_embeddings: int = 8192):
+                 num_embeddings: int = 8192,
+                 mlp_ratio: float = 4,
+                 attn_mode: str = "swin",
+                 window_size: int = 8,
+                 pe_mode: str = "ape",
+                 qk_rms_norm: bool = False,
+                 representation_config: dict = None):
 
         super().__init__()
+        
+        # 处理参数别名（兼容旧配置文件）
+        if latent_channels is not None and embed_dim is None:
+            embed_dim = latent_channels
+        if embed_dim is None:
+            embed_dim = 0
+            
+        if model_channels is not None:
+            if model_channels_encoder is None:
+                model_channels_encoder = model_channels
+            if model_channels_decoder is None:
+                model_channels_decoder = model_channels
+        if model_channels_encoder is None:
+            model_channels_encoder = 512
+        if model_channels_decoder is None:
+            model_channels_decoder = 512
+            
+        if num_blocks is not None:
+            if num_blocks_encoder is None:
+                num_blocks_encoder = num_blocks
+            if num_blocks_decoder is None:
+                num_blocks_decoder = num_blocks
+        if num_blocks_encoder is None:
+            num_blocks_encoder = 4
+        if num_blocks_decoder is None:
+            num_blocks_decoder = 4
+            
+        if num_heads is not None:
+            if num_heads_encoder is None:
+                num_heads_encoder = num_heads
+            if num_heads_decoder is None:
+                num_heads_decoder = num_heads
+        if num_heads_encoder is None:
+            num_heads_encoder = 8
+        if num_heads_decoder is None:
+            num_heads_decoder = 8
+            
+        if num_head_channels is not None:
+            num_head_channels_encoder = num_head_channels
+            num_head_channels_decoder = num_head_channels
 
         self.use_checkpoint = use_checkpoint
         self.resolution = resolution
@@ -102,8 +153,13 @@ class SparseSDFVQVAE(nn.Module):
             num_blocks=num_blocks_encoder,
             num_heads=num_heads_encoder,
             num_head_channels=num_head_channels_encoder,
+            mlp_ratio=mlp_ratio,
+            attn_mode=attn_mode,
+            window_size=window_size,
+            pe_mode=pe_mode,
             use_fp16=use_fp16,
             use_checkpoint=use_checkpoint,
+            qk_rms_norm=qk_rms_norm,
         )
 
         self.decoder = SparseSDFDecoder(
@@ -113,9 +169,15 @@ class SparseSDFVQVAE(nn.Module):
             num_blocks=num_blocks_decoder,
             num_heads=num_heads_decoder,
             num_head_channels=num_head_channels_decoder,
-            out_channels=out_channels,
+            mlp_ratio=mlp_ratio,
+            attn_mode=attn_mode,
+            window_size=window_size,
+            pe_mode=pe_mode,
             use_fp16=use_fp16,
             use_checkpoint=use_checkpoint,
+            qk_rms_norm=qk_rms_norm,
+            representation_config=representation_config,
+            out_channels=out_channels,
             chunk_size=chunk_size,
         )
         

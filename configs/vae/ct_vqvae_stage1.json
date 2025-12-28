@@ -1,7 +1,7 @@
 {
     "models": {
         "vqvae": {
-            "name": "Direct3DS2_VQVAE",
+            "name": "SparseSDFVQVAE",
             "args": {
                 "resolution": 64,
                 "model_channels": 512,

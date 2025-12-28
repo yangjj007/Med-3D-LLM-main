@@ -19,9 +19,7 @@ __attributes = {
     'ElasticSLatFlowModel': 'structured_latent_flow',
     
     # Sparse SDF VQVAE models
-    'Direct3DS2_VQVAE': 'autoencoders.ss_vqvae',
-    'SparseSDFEncoder_VQ': 'autoencoders.ss_vqvae',
-    'SparseSDFDecoder_VQ': 'autoencoders.ss_vqvae',
+    'SparseSDFVQVAE': 'autoencoders.ss_vqvae',
     'SparseVectorQuantizer': 'autoencoders.ss_vqvae',
 }
 
