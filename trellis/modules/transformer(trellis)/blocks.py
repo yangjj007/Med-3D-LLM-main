@@ -32,13 +32,11 @@ class AbsolutePositionEmbedder(nn.Module):
         out = torch.cat([torch.sin(out), torch.cos(out)], dim=-1)
         return out
 
-    def forward(self, x: torch.Tensor, factor: float = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x (torch.Tensor): (N, D) tensor of spatial positions
         """
-        if factor is not None:
-            x = x * factor
         N, D = x.shape
         assert D == self.in_channels, "Input dimension must match number of input channels"
         embed = self._sin_cos_embedding(x.reshape(-1))
