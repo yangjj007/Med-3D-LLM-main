@@ -345,7 +345,13 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                 # Encode and decode
                 print(f"[DEBUG] Calling vqvae.Encode...")
                 try:
-                    encoding_indices = vqvae.Encode(x)
+                    # 构建字典格式的 batch，符合 Encode 方法的输入要求
+                    batch_dict = {
+                        'sparse_sdf': sparse_sdf,
+                        'sparse_index': sparse_index,
+                        'batch_idx': batch_idx,
+                    }
+                    encoding_indices = vqvae.Encode(batch_dict)
                     print(f"[DEBUG] Encoding done")
                 except FloatingPointError as e:
                     print(f"[ERROR] FloatingPointError in Encode: {e}")
