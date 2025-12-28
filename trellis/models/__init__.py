@@ -20,6 +20,7 @@ __attributes = {
     
     # Sparse SDF VQVAE models
     'SparseSDFVQVAE': 'autoencoders.ss_vqvae',
+    'Direct3DS2_VQVAE': 'autoencoders.ss_vqvae',  # 向后兼容的别名
     'SparseVectorQuantizer': 'autoencoders.ss_vqvae',
 }
 

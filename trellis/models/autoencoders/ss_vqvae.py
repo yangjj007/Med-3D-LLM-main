@@ -329,3 +329,7 @@ class SparseSDFVQVAE(nn.Module):
         print(f"✅ Loaded pretrained VAE parameters from {pretrained_vae_path}")
         print(f"   Encoder: {len(pretrained_encoder)} parameters loaded")
         print(f"   Decoder: {len(pretrained_decoder)} parameters loaded")
+
+
+# 向后兼容的别名
+Direct3DS2_VQVAE = SparseSDFVQVAE
