@@ -128,8 +128,7 @@ python train.py \
     --config configs/vae/ct_vqvae_stage1.json \
     --output_dir outputs/ct_vqvae_lung_stage1 \
     --data_dir ./processed_dataset \
-    --num_gpus 1 \
-    --auto_retry 0
+    --num_gpus 1 
 ```
 
 训练日志示例：

@@ -113,7 +113,7 @@ if __name__ == '__main__':
     parser.add_argument('--load_dir', type=str, default='', help='Load directory, default to output_dir')
     parser.add_argument('--ckpt', type=str, default='latest', help='Checkpoint step to resume training, default to latest')
     parser.add_argument('--data_dir', type=str, default='./data/', help='Data directory')
-    parser.add_argument('--auto_retry', type=int, default=3, help='Number of retries on error')
+    parser.add_argument('--auto_retry', type=int, default=0, help='Number of retries on error')
     ## dubug
     parser.add_argument('--tryrun', action='store_true', help='Try run without training')
     parser.add_argument('--profile', action='store_true', help='Profile training')
