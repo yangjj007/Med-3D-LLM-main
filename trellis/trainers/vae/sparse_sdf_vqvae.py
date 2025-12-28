@@ -351,6 +351,21 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                         'sparse_index': sparse_index,
                         'batch_idx': batch_idx,
                     }
+                    
+                    # ===== DEBUG: 详细检查 batch_dict =====
+                    print(f"\n[DEBUG run_snapshot] Before calling Encode:")
+                    print(f"[DEBUG run_snapshot] batch_dict type: {type(batch_dict)}")
+                    print(f"[DEBUG run_snapshot] batch_dict is dict: {isinstance(batch_dict, dict)}")
+                    print(f"[DEBUG run_snapshot] batch_dict keys: {batch_dict.keys()}")
+                    print(f"[DEBUG run_snapshot] batch_dict['sparse_sdf'] type: {type(batch_dict['sparse_sdf'])}")
+                    print(f"[DEBUG run_snapshot] batch_dict['sparse_sdf'] shape: {batch_dict['sparse_sdf'].shape}")
+                    print(f"[DEBUG run_snapshot] batch_dict['sparse_index'] type: {type(batch_dict['sparse_index'])}")
+                    print(f"[DEBUG run_snapshot] batch_dict['sparse_index'] shape: {batch_dict['sparse_index'].shape}")
+                    print(f"[DEBUG run_snapshot] batch_dict['batch_idx'] type: {type(batch_dict['batch_idx'])}")
+                    print(f"[DEBUG run_snapshot] batch_dict['batch_idx'] shape: {batch_dict['batch_idx'].shape}")
+                    print("=" * 80)
+                    # ===== DEBUG END =====
+                    
                     encoding_indices = vqvae.Encode(batch_dict)
                     print(f"[DEBUG] Encoding done")
                 except FloatingPointError as e:

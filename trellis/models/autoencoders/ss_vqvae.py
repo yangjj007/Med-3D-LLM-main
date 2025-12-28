@@ -194,6 +194,19 @@ class SparseSDFVQVAE(nn.Module):
         """
         训练时的完整前向传播
         """
+        # ===== DEBUG: 检查 forward 接收的 batch =====
+        print(f"\n[DEBUG forward] batch type: {type(batch)}")
+        print(f"[DEBUG forward] batch class: {batch.__class__.__name__}")
+        if isinstance(batch, dict):
+            print(f"[DEBUG forward] batch is dict, keys: {batch.keys()}")
+        elif hasattr(batch, 'feats'):
+            print(f"[DEBUG forward] batch is SparseTensor")
+            print(f"[DEBUG forward] batch.shape: {batch.shape}")
+            print(f"[DEBUG forward] batch.feats.shape: {batch.feats.shape}")
+            print(f"[DEBUG forward] batch.coords.shape: {batch.coords.shape}")
+        print("=" * 80)
+        # ===== DEBUG END =====
+        
         z, vq_loss, commitment_loss = self.encode(batch)
 
         reconst_x = self.decoder(z)
@@ -208,33 +221,97 @@ class SparseSDFVQVAE(nn.Module):
         """
         编码过程，替代 VAE 的采样过程
         Args:
-            batch: 输入数据批次
+            batch: 输入数据批次。可以是：
+                  - SparseTensor：训练时使用
+                  - dict：推理时使用，包含 'sparse_sdf', 'sparse_index', 'batch_idx' 键
             only_return_indices: 是否只返回量化索引（用于推理）
         Returns:
             如果 only_return_indices=True: 返回 encoding_indices
             否则: 返回 (z, vq_loss, commitment_loss)
         """
-        feat, xyz, batch_idx = batch['sparse_sdf'], batch['sparse_index'], batch['batch_idx']
-        if feat.ndim == 1:
-            feat = feat.unsqueeze(-1)
-        coords = torch.cat([batch_idx.unsqueeze(-1), xyz], dim=-1).int()
-       
-        x = sp.SparseTensor(feat, coords)
-        h = self.encoder(x, batch.get('factor', None))
+        # ===== DEBUG: 详细检查 batch 类型和内容 =====
+        print(f"\n[DEBUG encode] batch type: {type(batch)}")
+        print(f"[DEBUG encode] batch class name: {batch.__class__.__name__}")
+        
+        # 判断 batch 的类型并处理
+        if hasattr(batch, 'feats') and hasattr(batch, 'coords'):
+            # batch 是 SparseTensor（训练时的情况）
+            print(f"[DEBUG encode] batch is SparseTensor (training mode)")
+            print(f"[DEBUG encode] batch.shape: {batch.shape}")
+            print(f"[DEBUG encode] batch.feats.shape: {batch.feats.shape}")
+            print(f"[DEBUG encode] batch.coords.shape: {batch.coords.shape}")
+            
+            # 直接使用 SparseTensor
+            x = batch
+            
+        elif isinstance(batch, dict):
+            # batch 是字典（推理时的情况）
+            print(f"[DEBUG encode] batch is dict (inference mode)")
+            print(f"[DEBUG encode] batch keys: {batch.keys()}")
+            
+            # 从字典中提取数据并构建 SparseTensor
+            feat, xyz, batch_idx = batch['sparse_sdf'], batch['sparse_index'], batch['batch_idx']
+            print(f"[DEBUG encode] feat shape: {feat.shape}, dtype: {feat.dtype}")
+            print(f"[DEBUG encode] xyz shape: {xyz.shape}, dtype: {xyz.dtype}")
+            print(f"[DEBUG encode] batch_idx shape: {batch_idx.shape}, dtype: {batch_idx.dtype}")
+            
+            if feat.ndim == 1:
+                feat = feat.unsqueeze(-1)
+                print(f"[DEBUG encode] feat expanded to shape: {feat.shape}")
+            
+            coords = torch.cat([batch_idx.unsqueeze(-1), xyz], dim=-1).int()
+            print(f"[DEBUG encode] coords shape: {coords.shape}, dtype: {coords.dtype}")
+            
+            x = sp.SparseTensor(feat, coords)
+            print(f"[DEBUG encode] Created SparseTensor from dict")
+            
+        else:
+            print(f"[DEBUG encode] ERROR: Unknown batch type!")
+            print(f"[DEBUG encode] batch attributes: {dir(batch)}")
+            
+            # 打印调用栈
+            import traceback
+            print(f"[DEBUG encode] Call stack:")
+            for line in traceback.format_stack()[:-1]:
+                print(line.strip())
+            print("=" * 80)
+            
+            raise TypeError(f"batch must be either SparseTensor or dict, got {type(batch)}")
+        
+        print("=" * 80)
+        # ===== DEBUG END =====
+        
+        # 获取 factor 参数（如果有）
+        factor = None
+        if isinstance(batch, dict):
+            factor = batch.get('factor', None)
+        
+        print(f"[DEBUG encode] Calling encoder with x.shape={x.shape}, factor={factor}")
+        h = self.encoder(x, factor)
+        print(f"[DEBUG encode] Encoder output h.shape={h.shape}, h.feats.shape={h.feats.shape}")
         
         # 获取 mean（替代 VAE 的 posterior.mode()）
         # encoder 输出的是 2*latent_channels，取前半部分作为 mean
+        print(f"[DEBUG encode] Creating DiagonalGaussianDistribution")
         posterior = DiagonalGaussianDistribution(h.feats, feat_dim=1)
         mean_feats = posterior.mode()  # 使用 mode() 获取 mean，不采样
+        print(f"[DEBUG encode] mean_feats shape: {mean_feats.shape}")
         h_mean = h.replace(mean_feats)
+        print(f"[DEBUG encode] h_mean shape: {h_mean.shape}")
         
         if only_return_indices:
             # 只返回量化索引（用于 Encode 方法）
+            print(f"[DEBUG encode] only_return_indices=True, calling vq...")
             encoding_indices = self.vq(h_mean, only_return_indices=True)
+            print(f"[DEBUG encode] encoding_indices shape: {encoding_indices.shape}")
             return encoding_indices
         
         # 量化（替代 VAE 的采样）
+        print(f"[DEBUG encode] Calling vq for quantization...")
         quantized, vq_loss, commitment_loss, _ = self.vq(h_mean)
+        print(f"[DEBUG encode] Quantization done")
+        print(f"[DEBUG encode] quantized shape: {quantized.shape}")
+        print(f"[DEBUG encode] vq_loss: {vq_loss.item()}, commitment_loss: {commitment_loss.item()}")
 
         return quantized, vq_loss, commitment_loss
     
@@ -246,6 +323,17 @@ class SparseSDFVQVAE(nn.Module):
         Returns:
             encoding_indices: SparseTensor，包含量化后的 indices
         """
+        # ===== DEBUG: 在 Encode 方法入口检查 batch =====
+        print(f"\n[DEBUG Encode] Entering Encode method")
+        print(f"[DEBUG Encode] batch type: {type(batch)}")
+        print(f"[DEBUG Encode] batch class: {batch.__class__.__name__}")
+        if isinstance(batch, dict):
+            print(f"[DEBUG Encode] batch is dict, keys: {batch.keys()}")
+        else:
+            print(f"[DEBUG Encode] batch is NOT dict!")
+        print("=" * 80)
+        # ===== DEBUG END =====
+        
         return self.encode(batch, only_return_indices=True)
     
     def Decode(self, encoding_indices: sp.SparseTensor):
