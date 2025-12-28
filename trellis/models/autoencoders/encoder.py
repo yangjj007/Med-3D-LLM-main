@@ -40,43 +40,11 @@ class SparseDownBlock3d(nn.Module):
         self.use_checkpoint = use_checkpoint
         
     def _forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
-        print(f"\n{'#'*80}")
-        print(f"[DEBUG DownBlock] === 开始 DownBlock 前向传播 ===")
-        print(f"[DEBUG DownBlock] Input x.feats.shape: {x.feats.shape}")
-        print(f"[DEBUG DownBlock] Input x.coords.shape: {x.coords.shape}")
-        print(f"[DEBUG DownBlock] Input coords dtype: {x.coords.dtype}")
-        
         h = self.act_layers(x)
-        print(f"[DEBUG DownBlock] After act_layers h.feats.shape: {h.feats.shape}")
-        print(f"[DEBUG DownBlock] After act_layers coords dtype: {h.coords.dtype}")
-        
         h = self.down(h)
-        print(f"[DEBUG DownBlock] After down(h) h.feats.shape: {h.feats.shape}")
-        print(f"[DEBUG DownBlock] After down(h) h.coords.shape: {h.coords.shape}")
-        
         x = self.down(x)
-        print(f"[DEBUG DownBlock] After down(x) x.feats.shape: {x.feats.shape}")
-        print(f"[DEBUG DownBlock] After down(x) x.coords.shape: {x.coords.shape}")
-        
         h = self.out_layers(h)
-        print(f"[DEBUG DownBlock] After out_layers h.feats.shape: {h.feats.shape}")
-        print(f"[DEBUG DownBlock] After out_layers h.coords.shape: {h.coords.shape}")
-        
-        print(f"\n[DEBUG DownBlock] === 准备执行 skip_connection ===")
-        skip_result = self.skip_connection(x)
-        print(f"[DEBUG DownBlock] skip_connection(x) result.feats.shape: {skip_result.feats.shape}")
-        print(f"[DEBUG DownBlock] skip_connection(x) result.coords.shape: {skip_result.coords.shape}")
-        
-        print(f"\n[DEBUG DownBlock] === 准备执行加法操作 ===")
-        print(f"[DEBUG DownBlock] h.feats.shape[0]: {h.feats.shape[0]} (要相加的张量A)")
-        print(f"[DEBUG DownBlock] skip_result.feats.shape[0]: {skip_result.feats.shape[0]} (要相加的张量B)")
-        print(f"[DEBUG DownBlock] h.coords 唯一值数量: {len(torch.unique(h.coords, dim=0))}")
-        print(f"[DEBUG DownBlock] skip_result.coords 唯一值数量: {len(torch.unique(skip_result.coords, dim=0))}")
-        
-        h = h + skip_result
-        print(f"[DEBUG DownBlock] After skip_connection h.coords dtype: {h.coords.dtype}")
-        print(f"[DEBUG DownBlock] === 完成 DownBlock 前向传播 ===")
-        print(f"{'#'*80}\n")
+        h = h + self.skip_connection(x)
         return h
 
     def forward(self, x: torch.Tensor):
@@ -153,27 +121,11 @@ class SparseSDFEncoder(SparseTransformerBase):
         nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: sp.SparseTensor, factor: float = None):
-        print(f"\n{'*'*80}")
-        print(f"[DEBUG encoder.py] === 进入 SparseSDFEncoder.forward ===")
-        print(f"[DEBUG encoder.py] 输入 x.feats.shape: {x.feats.shape}")
-        print(f"[DEBUG encoder.py] self.input_layer1 权重形状: {self.input_layer1.weight.shape}")
-        print(f"[DEBUG encoder.py] 继承的 self.input_layer 权重形状: {self.input_layer.weight.shape}")
-        print(f"{'*'*80}\n")
-
         x = self.input_layer1(x)
-        print(f"[DEBUG encoder.py] 经过 input_layer1 后 x.feats.shape: {x.feats.shape}")
-        
         for block in self.downsample:
             x = block(x)
-        
-        print(f"[DEBUG encoder.py] 所有 downsample 完成后 x.feats.shape: {x.feats.shape}")
-        print(f"[DEBUG encoder.py] 准备调用 super().forward(x, factor)...")
-        print(f"[DEBUG encoder.py] 此时 x 的特征维度是 {x.feats.shape[-1]}，但父类的 input_layer 期望维度是 {self.input_layer.in_features}")
-        print(f"[DEBUG encoder.py] ⚠️ 维度不匹配！这就是错误的原因！\n")
-        
         h = super().forward(x, factor)
         h = h.type(x.dtype)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
         h = self.out_layer(h)
-        
         return h

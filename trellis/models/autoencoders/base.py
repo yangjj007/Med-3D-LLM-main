@@ -109,18 +109,6 @@ class SparseTransformerBase(nn.Module):
         self.apply(_basic_init)
 
     def forward(self, x: sp.SparseTensor, factor: float = None) -> sp.SparseTensor:
-        print(f"\n{'='*80}")
-        print(f"[DEBUG base.py] === 进入 SparseTransformerBase.forward ===")
-        print(f"[DEBUG base.py] 输入 x.feats.shape: {x.feats.shape}")
-        print(f"[DEBUG base.py] 输入 x.coords.shape: {x.coords.shape}")
-        print(f"[DEBUG base.py] self.in_channels: {self.in_channels}")
-        print(f"[DEBUG base.py] self.model_channels: {self.model_channels}")
-        print(f"[DEBUG base.py] self.input_layer 权重形状: {self.input_layer.weight.shape}")
-        print(f"[DEBUG base.py] self.input_layer 期望输入维度: {self.input_layer.in_features}")
-        print(f"[DEBUG base.py] self.input_layer 输出维度: {self.input_layer.out_features}")
-        print(f"[DEBUG base.py] 实际输入特征维度: {x.feats.shape[-1]}")
-        print(f"{'='*80}\n")
-        
         h = self.input_layer(x)
         if self.pe_mode == "ape":
             h = h + self.pos_embedder(x.coords[:, 1:], factor)
