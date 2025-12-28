@@ -1,6 +1,6 @@
 import torch.nn as nn
-import direct3d_s2.modules.sparse as sp
-
+# import direct3d_s2.modules.sparse as sp
+import trellis.modules.sparse as sp
 
 class SparseDownBlock3d_v1(nn.Module):
 

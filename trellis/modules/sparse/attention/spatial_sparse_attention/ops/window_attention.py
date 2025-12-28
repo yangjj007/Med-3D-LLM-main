@@ -1,9 +1,11 @@
 from typing import *
 import torch
 import flash_attn   
-from direct3d_s2.modules.sparse import SparseTensor
-from direct3d_s2.modules.sparse.attention.windowed_attn import calc_window_partition
+# from direct3d_s2.modules.sparse import SparseTensor
+# from direct3d_s2.modules.sparse.attention.windowed_attn import calc_window_partition
 
+from trellis.modules.sparse import SparseTensor
+from trellis.modules.sparse.attention.windowed_attn import calc_window_partition
 
 def sparse_window_attention(
     q: SparseTensor,
