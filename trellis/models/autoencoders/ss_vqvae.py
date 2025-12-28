@@ -86,6 +86,12 @@ class SparseSDFEncoder_VQ(SparseSDFEncoder):
             print("✅ After downsample block")
             
         print("✅ Before transformer")
+        print(f"[DEBUG ss_vqvae.py] 准备进入 transformer")
+        print(f"[DEBUG ss_vqvae.py] 当前 x.feats.shape: {x.feats.shape}")
+        print(f"[DEBUG ss_vqvae.py] self.in_channels (父类的): {self.in_channels}")
+        print(f"[DEBUG ss_vqvae.py] self.model_channels (父类的): {self.model_channels}")
+        print(f"[DEBUG ss_vqvae.py] 父类的 input_layer 权重形状: {self.input_layer.weight.shape}")
+        print(f"[DEBUG ss_vqvae.py] ⚠️ 问题：当前特征维度 {x.feats.shape[-1]}，但父类 input_layer 期望 {self.in_channels}\n")
         h = SparseTransformerBase.forward(self, x, factor)
         print("✅ After transformer")
         h = h.type(x.dtype)

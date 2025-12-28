@@ -153,10 +153,24 @@ class SparseSDFEncoder(SparseTransformerBase):
         nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: sp.SparseTensor, factor: float = None):
+        print(f"\n{'*'*80}")
+        print(f"[DEBUG encoder.py] === 进入 SparseSDFEncoder.forward ===")
+        print(f"[DEBUG encoder.py] 输入 x.feats.shape: {x.feats.shape}")
+        print(f"[DEBUG encoder.py] self.input_layer1 权重形状: {self.input_layer1.weight.shape}")
+        print(f"[DEBUG encoder.py] 继承的 self.input_layer 权重形状: {self.input_layer.weight.shape}")
+        print(f"{'*'*80}\n")
 
         x = self.input_layer1(x)
+        print(f"[DEBUG encoder.py] 经过 input_layer1 后 x.feats.shape: {x.feats.shape}")
+        
         for block in self.downsample:
             x = block(x)
+        
+        print(f"[DEBUG encoder.py] 所有 downsample 完成后 x.feats.shape: {x.feats.shape}")
+        print(f"[DEBUG encoder.py] 准备调用 super().forward(x, factor)...")
+        print(f"[DEBUG encoder.py] 此时 x 的特征维度是 {x.feats.shape[-1]}，但父类的 input_layer 期望维度是 {self.input_layer.in_features}")
+        print(f"[DEBUG encoder.py] ⚠️ 维度不匹配！这就是错误的原因！\n")
+        
         h = super().forward(x, factor)
         h = h.type(x.dtype)
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
