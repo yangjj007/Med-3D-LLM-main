@@ -5,7 +5,7 @@
             "args": {
                 "resolution": 64,
                 "model_channels": 512,
-                "latent_channels": 32,
+                "latent_channels": 16,
                 "num_blocks": 8,
                 "num_embeddings": 8192,
                 "num_heads": null,
