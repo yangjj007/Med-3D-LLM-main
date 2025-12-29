@@ -121,11 +121,30 @@ class SparseSDFEncoder(SparseTransformerBase):
         nn.init.constant_(self.out_layer.bias, 0)
 
     def forward(self, x: sp.SparseTensor, factor: float = None):
+        print(f"[DEBUG Encoder.forward] Input x.shape: {x.shape}, x.feats.shape: {x.feats.shape}")
+        print(f"[DEBUG Encoder.forward] Input x.feats min: {x.feats.min().item():.6f}, max: {x.feats.max().item():.6f}, mean: {x.feats.mean().item():.6f}")
+        
         x = self.input_layer1(x)
-        for block in self.downsample:
+        print(f"[DEBUG Encoder.forward] After input_layer1, x.feats.shape: {x.feats.shape}")
+        print(f"[DEBUG Encoder.forward] After input_layer1, x.feats min: {x.feats.min().item():.6f}, max: {x.feats.max().item():.6f}, mean: {x.feats.mean().item():.6f}")
+        
+        for idx, block in enumerate(self.downsample):
             x = block(x)
+            print(f"[DEBUG Encoder.forward] After downsample block {idx}, x.feats.shape: {x.feats.shape}")
+            print(f"[DEBUG Encoder.forward] After downsample block {idx}, x.feats min: {x.feats.min().item():.6f}, max: {x.feats.max().item():.6f}, mean: {x.feats.mean().item():.6f}")
+        
+        print(f"[DEBUG Encoder.forward] Before super().forward, x.feats.shape: {x.feats.shape}")
         h = super().forward(x, factor)
+        print(f"[DEBUG Encoder.forward] After super().forward, h.feats.shape: {h.feats.shape}")
+        print(f"[DEBUG Encoder.forward] After super().forward, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
+        
         h = h.type(x.dtype)
+        print(f"[DEBUG Encoder.forward] After type conversion, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}")
+        
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
+        print(f"[DEBUG Encoder.forward] After layer_norm, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
+        
         h = self.out_layer(h)
+        print(f"[DEBUG Encoder.forward] After out_layer, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
+        
         return h

@@ -284,6 +284,47 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             model_dtype = vqvae.encoder.dtype if hasattr(vqvae.encoder, 'dtype') else torch.float32
             print(f"[DEBUG] Model dtype: {model_dtype}")
             
+            # ===== 检查模型权重 =====
+            print(f"\n[DEBUG] Checking model weights...")
+            print(f"[DEBUG] vqvae.training: {vqvae.training}")
+            print(f"[DEBUG] vqvae.encoder.training: {vqvae.encoder.training}")
+            
+            # 检查encoder的out_layer权重（这是问题所在！）
+            if hasattr(vqvae.encoder, 'out_layer'):
+                out_layer = vqvae.encoder.out_layer
+                print(f"\n[CRITICAL] Encoder out_layer weights:")
+                print(f"[CRITICAL] out_layer.weight shape: {out_layer.weight.shape}")
+                print(f"[CRITICAL] out_layer.weight min: {out_layer.weight.min().item():.6f}, max: {out_layer.weight.max().item():.6f}")
+                print(f"[CRITICAL] out_layer.weight mean: {out_layer.weight.mean().item():.6f}, std: {out_layer.weight.std().item():.6f}")
+                print(f"[CRITICAL] out_layer.weight abs sum: {out_layer.weight.abs().sum().item():.6f}")
+                if out_layer.weight.abs().sum().item() < 1e-6:
+                    print(f"[ERROR] ⚠️⚠️⚠️ Encoder out_layer weights are ALL ZERO! This will cause all encoder outputs to be 0!")
+                    print(f"[ERROR] ⚠️⚠️⚠️ The model either:")
+                    print(f"[ERROR]   1. Was just initialized and not trained yet")
+                    print(f"[ERROR]   2. Checkpoint was not loaded correctly")
+                    print(f"[ERROR]   3. out_layer is not being trained (frozen or no gradients)")
+                if hasattr(out_layer, 'bias') and out_layer.bias is not None:
+                    print(f"[CRITICAL] out_layer.bias min: {out_layer.bias.min().item():.6f}, max: {out_layer.bias.max().item():.6f}")
+            
+            # 检查encoder第一层权重
+            first_conv_layer = None
+            for name, module in vqvae.encoder.named_modules():
+                if 'conv' in name.lower() and hasattr(module, 'weight'):
+                    first_conv_layer = module
+                    print(f"\n[DEBUG] First conv layer: {name}")
+                    print(f"[DEBUG] Weight shape: {module.weight.shape}")
+                    print(f"[DEBUG] Weight min: {module.weight.min().item():.6f}, max: {module.weight.max().item():.6f}, mean: {module.weight.mean().item():.6f}")
+                    print(f"[DEBUG] Weight std: {module.weight.std().item():.6f}")
+                    if hasattr(module, 'bias') and module.bias is not None:
+                        print(f"[DEBUG] Bias min: {module.bias.min().item():.6f}, max: {module.bias.max().item():.6f}")
+                    break
+            
+            # 检查VQ codebook
+            print(f"\n[DEBUG] VQ codebook weight shape: {vqvae.vq.embeddings.weight.shape}")
+            print(f"[DEBUG] VQ codebook min: {vqvae.vq.embeddings.weight.min().item():.6f}, max: {vqvae.vq.embeddings.weight.max().item():.6f}")
+            print(f"[DEBUG] VQ codebook mean: {vqvae.vq.embeddings.weight.mean().item():.6f}, std: {vqvae.vq.embeddings.weight.std().item():.6f}")
+            print("=" * 80)
+            
             # Inference
             gts = []
             recons = []

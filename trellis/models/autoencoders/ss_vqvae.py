@@ -308,9 +308,18 @@ class SparseSDFVQVAE(nn.Module):
         if isinstance(batch, dict):
             factor = batch.get('factor', None)
         
-        print(f"[DEBUG encode] Calling encoder with x.shape={x.shape}, factor={factor}")
+        print(f"[DEBUG encode] About to call encoder...")
+        print(f"[DEBUG encode] Input x.shape={x.shape}, x.feats.shape={x.feats.shape}, x.coords.shape={x.coords.shape}")
+        print(f"[DEBUG encode] Input x.feats min: {x.feats.min().item():.6f}, max: {x.feats.max().item():.6f}, mean: {x.feats.mean().item():.6f}")
+        print(f"[DEBUG encode] Input x.feats std: {x.feats.std().item():.6f}")
+        print(f"[DEBUG encode] Input x.coords min: {x.coords.min(0).values}, max: {x.coords.max(0).values}")
+        print(f"[DEBUG encode] Input x.dtype: {x.dtype}, x.feats.dtype: {x.feats.dtype}")
+        print(f"[DEBUG encode] Encoder training mode: {self.encoder.training}")
+        
+        print(f"[DEBUG encode] Calling encoder with factor={factor}")
         h = self.encoder(x, factor)
         print(f"[DEBUG encode] Encoder output h.shape={h.shape}, h.feats.shape={h.feats.shape}")
+        print(f"[DEBUG encode] Encoder output h.coords min: {h.coords.min(0).values}, max: {h.coords.max(0).values}")
         
         # 获取 mean（替代 VAE 的 posterior.mode()）
         # encoder 输出的是 2*latent_channels，取前半部分作为 mean
@@ -449,29 +458,26 @@ class SparseSDFVQVAE(nn.Module):
         return meshes
     
     @torch.no_grad()
-    def load_pretrained_vae(self, pretrained_vae_path: str):
+    def load_pretrained_vae(self, encoder_state_dict: dict, decoder_state_dict: dict):
         """
         加载预训练的 VAE 参数
         Args:
-            pretrained_vae_path: 预训练 VAE 模型的路径
+            encoder_state_dict: 预训练的 encoder 权重字典
+            decoder_state_dict: 预训练的 decoder 权重字典
         """
-        pretrained = torch.load(pretrained_vae_path, map_location='cpu')
-        
         # 加载 encoder 参数
         encoder_dict = self.encoder.state_dict()
-        pretrained_encoder = {k.replace('encoder.', ''): v for k, v in pretrained.items() if 'encoder.' in k}
-        encoder_dict.update(pretrained_encoder)
+        encoder_dict.update(encoder_state_dict)
         self.encoder.load_state_dict(encoder_dict, strict=False)
         
         # 加载 decoder 参数
         decoder_dict = self.decoder.state_dict()
-        pretrained_decoder = {k.replace('decoder.', ''): v for k, v in pretrained.items() if 'decoder.' in k}
-        decoder_dict.update(pretrained_decoder)
+        decoder_dict.update(decoder_state_dict)
         self.decoder.load_state_dict(decoder_dict, strict=False)
         
-        print(f"✅ Loaded pretrained VAE parameters from {pretrained_vae_path}")
-        print(f"   Encoder: {len(pretrained_encoder)} parameters loaded")
-        print(f"   Decoder: {len(pretrained_decoder)} parameters loaded")
+        print(f"✅ Loaded pretrained VAE parameters")
+        print(f"   Encoder: {len(encoder_state_dict)} parameters loaded")
+        print(f"   Decoder: {len(decoder_state_dict)} parameters loaded")
 
 
 # 向后兼容的别名

@@ -34,7 +34,7 @@
         "name": "SparseSDF_VQVAETrainer",
         "args": {
             "training_stage": 1,
-            "pretrained_vae_path": null,
+            "pretrained_vae_path": "./vae_weights/sparse_vae_512.pth",
             "max_steps": 100000,
             "batch_size_per_gpu": 2,
             "batch_split": 2,
