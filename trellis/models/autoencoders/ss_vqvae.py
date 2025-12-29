@@ -35,16 +35,38 @@ class SparseVectorQuantizer(nn.Module):
             如果 only_return_indices=True: 返回 indices 的 SparseTensor
             否则: 返回 (quantized, vq_loss, commitment_loss, encoding_indices)
         """
+        print(f"[DEBUG VQ.forward] Input z.shape: {z.shape}, z.feats.shape: {z.feats.shape}")
+        print(f"[DEBUG VQ.forward] z.feats min: {z.feats.min().item():.6f}, max: {z.feats.max().item():.6f}, mean: {z.feats.mean().item():.6f}")
+        print(f"[DEBUG VQ.forward] z.feats std: {z.feats.std().item():.6f}")
+        print(f"[DEBUG VQ.forward] Codebook weight min: {self.embeddings.weight.min().item():.6f}, max: {self.embeddings.weight.max().item():.6f}")
+        
         # z.feats: [N, embedding_dim]
         z_flatten = z.feats  # [N, embedding_dim]
         
         # 计算距离并找到最近的 codebook entry
+        print(f"[DEBUG VQ.forward] Computing distances...")
         distances = torch.cdist(z_flatten, self.embeddings.weight)  # [N, num_embeddings]
+        print(f"[DEBUG VQ.forward] distances.shape: {distances.shape}")
+        print(f"[DEBUG VQ.forward] distances min: {distances.min().item():.6f}, max: {distances.max().item():.6f}, mean: {distances.mean().item():.6f}")
+        
+        # 检查第一个样本的距离分布
+        if len(distances) > 0:
+            first_dists = distances[0]
+            print(f"[DEBUG VQ.forward] First sample distances - min: {first_dists.min().item():.6f}, max: {first_dists.max().item():.6f}")
+            print(f"[DEBUG VQ.forward] First sample top-5 closest indices: {torch.argsort(first_dists)[:5].tolist()}")
+            print(f"[DEBUG VQ.forward] First sample top-5 closest distances: {first_dists[torch.argsort(first_dists)[:5]].tolist()}")
+        
         encoding_indices = torch.argmin(distances, dim=1)  # [N]
+        print(f"[DEBUG VQ.forward] encoding_indices.shape: {encoding_indices.shape}")
+        print(f"[DEBUG VQ.forward] encoding_indices min: {encoding_indices.min().item()}, max: {encoding_indices.max().item()}")
+        print(f"[DEBUG VQ.forward] encoding_indices unique values: {len(torch.unique(encoding_indices))}")
+        print(f"[DEBUG VQ.forward] encoding_indices value counts (top 10): {torch.bincount(encoding_indices).sort(descending=True).values[:10].tolist()}")
         
         if only_return_indices:
             # 返回 indices 作为 SparseTensor，保持原始坐标
-            return z.replace(encoding_indices.unsqueeze(-1).float())
+            result = z.replace(encoding_indices.unsqueeze(-1).float())
+            print(f"[DEBUG VQ.forward] Returning indices only, result.shape: {result.shape}, result.feats.shape: {result.feats.shape}")
+            return result
         
         # 量化
         quantized_feats = self.embeddings(encoding_indices)  # [N, embedding_dim]
@@ -293,11 +315,14 @@ class SparseSDFVQVAE(nn.Module):
         # 获取 mean（替代 VAE 的 posterior.mode()）
         # encoder 输出的是 2*latent_channels，取前半部分作为 mean
         print(f"[DEBUG encode] Creating DiagonalGaussianDistribution")
+        print(f"[DEBUG encode] h.feats before DGD - shape: {h.feats.shape}, min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
         posterior = DiagonalGaussianDistribution(h.feats, feat_dim=1)
         mean_feats = posterior.mode()  # 使用 mode() 获取 mean，不采样
         print(f"[DEBUG encode] mean_feats shape: {mean_feats.shape}")
+        print(f"[DEBUG encode] mean_feats min: {mean_feats.min().item():.6f}, max: {mean_feats.max().item():.6f}, mean: {mean_feats.mean().item():.6f}, std: {mean_feats.std().item():.6f}")
         h_mean = h.replace(mean_feats)
         print(f"[DEBUG encode] h_mean shape: {h_mean.shape}")
+        print(f"[DEBUG encode] h_mean.coords shape: {h_mean.coords.shape}, h_mean.feats shape: {h_mean.feats.shape}")
         
         if only_return_indices:
             # 只返回量化索引（用于 Encode 方法）
@@ -348,15 +373,41 @@ class SparseSDFVQVAE(nn.Module):
         Returns:
             recon: 重建的 SparseTensor
         """
+        print(f"[DEBUG Decode] encoding_indices type: {type(encoding_indices)}")
+        print(f"[DEBUG Decode] encoding_indices.shape: {encoding_indices.shape}")
+        print(f"[DEBUG Decode] encoding_indices.feats.shape: {encoding_indices.feats.shape}")
+        print(f"[DEBUG Decode] encoding_indices.coords.shape: {encoding_indices.coords.shape}")
+        print(f"[DEBUG Decode] encoding_indices.feats dtype: {encoding_indices.feats.dtype}")
+        print(f"[DEBUG Decode] encoding_indices.coords dtype: {encoding_indices.coords.dtype}")
+        
         # 从 indices 获取 embedding
         indices = encoding_indices.feats.long().squeeze(-1)  # [N]
+        print(f"[DEBUG Decode] After squeeze, indices.shape: {indices.shape}")
+        print(f"[DEBUG Decode] indices min: {indices.min().item()}, max: {indices.max().item()}, unique count: {len(torch.unique(indices))}")
+        print(f"[DEBUG Decode] First 10 indices: {indices[:10].tolist() if len(indices) >= 10 else indices.tolist()}")
+        print(f"[DEBUG Decode] VQ codebook size: {self.vq.embeddings.num_embeddings}")
+        print(f"[DEBUG Decode] VQ embedding dim: {self.vq.embeddings.embedding_dim}")
+        
+        # 检查索引是否在有效范围内
+        if indices.max() >= self.vq.embeddings.num_embeddings:
+            print(f"[ERROR Decode] Index out of range! max index: {indices.max().item()}, codebook size: {self.vq.embeddings.num_embeddings}")
+        
         quantized_feats = self.vq.embeddings(indices)  # [N, latent_channels]
+        print(f"[DEBUG Decode] quantized_feats.shape: {quantized_feats.shape}")
+        print(f"[DEBUG Decode] quantized_feats min: {quantized_feats.min().item():.4f}, max: {quantized_feats.max().item():.4f}, mean: {quantized_feats.mean().item():.4f}")
         
         # 创建 quantized SparseTensor
         quantized = encoding_indices.replace(quantized_feats)
+        print(f"[DEBUG Decode] quantized SparseTensor created")
+        print(f"[DEBUG Decode] quantized.shape: {quantized.shape}")
+        print(f"[DEBUG Decode] quantized.feats.shape: {quantized.feats.shape}")
+        print(f"[DEBUG Decode] quantized.coords.shape: {quantized.coords.shape}")
+        print(f"[DEBUG Decode] quantized.coords min: {quantized.coords.min(0).values}, max: {quantized.coords.max(0).values}")
         
         # 解码
+        print(f"[DEBUG Decode] Calling decoder...")
         recon = self.decoder(quantized)
+        print(f"[DEBUG Decode] Decoder returned successfully")
         return recon
 
     def decode_mesh(self,

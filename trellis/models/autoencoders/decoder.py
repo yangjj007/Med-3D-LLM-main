@@ -34,9 +34,18 @@ class SparseSubdivideBlock3d(nn.Module):
         )
         
     def _forward(self, x: sp.SparseTensor) -> sp.SparseTensor:
+        print(f"[DEBUG ResBlock._forward] Input x.shape: {x.shape}, x.feats.shape: {x.feats.shape}, x.coords.shape: {x.coords.shape}")
+        print(f"[DEBUG ResBlock._forward] Input coords range: {x.coords.min(0).values} to {x.coords.max(0).values}")
+        
         h = self.act_layers(x)
+        print(f"[DEBUG ResBlock._forward] After act_layers, h.shape: {h.shape}, h.feats.shape: {h.feats.shape}")
+        
         h = self.sub(h)
+        print(f"[DEBUG ResBlock._forward] After sub, h.shape: {h.shape}, h.feats.shape: {h.feats.shape}")
+        
+        print(f"[DEBUG ResBlock._forward] About to call out_layers...")
         h = self.out_layers(h)
+        print(f"[DEBUG ResBlock._forward] After out_layers, h.shape: {h.shape}, h.feats.shape: {h.feats.shape}")
         return h
     
     def forward(self, x: torch.Tensor):
@@ -288,10 +297,21 @@ class SparseSDFDecoder(SparseTransformerBase):
             return output
     
     def forward(self, x: sp.SparseTensor, factor: float = None, return_feat: bool = False):
+        print(f"[DEBUG SparseSDFDecoder.forward] Input x.shape: {x.shape}, x.feats.shape: {x.feats.shape}, x.coords.shape: {x.coords.shape}")
+        print(f"[DEBUG SparseSDFDecoder.forward] Input x.coords min: {x.coords.min(0).values}, max: {x.coords.max(0).values}")
+        print(f"[DEBUG SparseSDFDecoder.forward] Input x.feats min: {x.feats.min().item():.4f}, max: {x.feats.max().item():.4f}")
+        
         h = super().forward(x, factor)
+        print(f"[DEBUG SparseSDFDecoder.forward] After super().forward, h.shape: {h.shape}, h.feats.shape: {h.feats.shape}")
+        print(f"[DEBUG SparseSDFDecoder.forward] h.coords min: {h.coords.min(0).values}, max: {h.coords.max(0).values}")
+        
         if self.chunk_size <= 1:
-            for block in self.upsample:
+            print(f"[DEBUG SparseSDFDecoder.forward] chunk_size <= 1, processing {len(self.upsample)} upsample blocks")
+            for block_idx, block in enumerate(self.upsample):
+                print(f"[DEBUG SparseSDFDecoder.forward] Processing block {block_idx}, h.shape: {h.shape}, h.feats.shape: {h.feats.shape}")
+                print(f"[DEBUG SparseSDFDecoder.forward] Block {block_idx} input coords range: {h.coords.min(0).values} to {h.coords.max(0).values}")
                 h = block(h)
+                print(f"[DEBUG SparseSDFDecoder.forward] After block {block_idx}, h.shape: {h.shape}, h.feats.shape: {h.feats.shape}")
             h = h.type(x.dtype)
 
             if return_feat:
