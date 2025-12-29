@@ -335,7 +335,7 @@ class SparseSDFVQVAE(nn.Module):
         # ===== DEBUG END =====
         
         encoding_indices = self.encode(batch, only_return_indices=True)
-        print(f"DEBUG Encode: Indices max: {encoding_indices.max()}, min: {encoding_indices.min()}")
+        print(f"DEBUG Encode: Indices max: {encoding_indices.feats.max()}, min: {encoding_indices.feats.min()}")
         # 确保 max 值没有超过你的 codebook_size
 
         return encoding_indices

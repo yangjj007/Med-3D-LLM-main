@@ -1,7 +1,8 @@
 from typing import *
 
 BACKEND = 'torchsparse'
-DEBUG = False
+# DEBUG = False
+DEBUG = True
 ATTN = 'flash_attn'
 
 def __from_env():
