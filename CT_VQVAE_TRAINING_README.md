@@ -124,6 +124,8 @@ CTWindowSparseSDF Dataset:
 "max_points": 100000  这个值似乎不能太大
 
 ```bash
+export CUDA_LAUNCH_BLOCKING=1
+export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/ct_vqvae_stage1.json \
     --output_dir outputs/ct_vqvae_lung_stage1 \

@@ -334,7 +334,11 @@ class SparseSDFVQVAE(nn.Module):
         print("=" * 80)
         # ===== DEBUG END =====
         
-        return self.encode(batch, only_return_indices=True)
+        encoding_indices = self.encode(batch, only_return_indices=True)
+        print(f"DEBUG Encode: Indices max: {encoding_indices.max()}, min: {encoding_indices.min()}")
+        # 确保 max 值没有超过你的 codebook_size
+
+        return encoding_indices
     
     def Decode(self, encoding_indices: sp.SparseTensor):
         """

@@ -21,6 +21,10 @@ from trellis.utils.dist_utils import setup_dist
 np.seterr(all='raise')  # 或 'warn'
 torch.autograd.set_detect_anomaly(True)
 
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+# 强制禁用某些可能导致冲突的优化
+torch.backends.cuda.preferred_linalg_library('magma')
 
 
 def find_ckpt(cfg):
