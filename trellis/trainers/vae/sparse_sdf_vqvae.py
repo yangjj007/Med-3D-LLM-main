@@ -204,7 +204,39 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         
         # Forward pass through VQVAE
         vqvae = self.training_models['vqvae']
-        recon, vq_loss, commitment_loss = vqvae(x)
+        
+        # ===== DEBUG 输出 =====
+        print(f"\n[DEBUG training_losses] Calling vqvae forward...")
+        print(f"[DEBUG training_losses] Input x type: {type(x)}")
+        print(f"[DEBUG training_losses] Input x.feats shape: {x.feats.shape}")
+        print(f"[DEBUG training_losses] Input x.coords shape: {x.coords.shape}")
+        # =====================
+        
+        outputs = vqvae(x)
+        
+        # ===== DEBUG 输出 =====
+        print(f"[DEBUG training_losses] vqvae output type: {type(outputs)}")
+        if isinstance(outputs, dict):
+            print(f"[DEBUG training_losses] vqvae output keys: {outputs.keys()}")
+            for key, value in outputs.items():
+                print(f"[DEBUG training_losses]   {key}: type={type(value)}, "
+                      f"{'shape=' + str(value.shape) if hasattr(value, 'shape') else 'value=' + str(value)}")
+        else:
+            print(f"[DEBUG training_losses] vqvae output (unexpected): {outputs}")
+        # =====================
+        
+        # Extract outputs from dictionary
+        recon = outputs['reconst_x']
+        vq_loss = outputs['vq_loss']
+        commitment_loss = outputs['commitment_loss']
+        
+        # ===== DEBUG 输出 =====
+        print(f"[DEBUG training_losses] recon type: {type(recon)}")
+        if hasattr(recon, 'feats'):
+            print(f"[DEBUG training_losses] recon.feats shape: {recon.feats.shape}")
+        print(f"[DEBUG training_losses] vq_loss: {vq_loss}")
+        print(f"[DEBUG training_losses] commitment_loss: {commitment_loss}")
+        # =====================
         
         # Compute reconstruction loss
         if self.loss_type == 'mse':
@@ -232,7 +264,7 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         return terms, {}
     
     @torch.no_grad()
-    def snapshot(self, suffix=None, num_samples=16, batch_size=None, verbose=False):
+    def snapshot(self, suffix=None, num_samples=16, batch_size=1, verbose=False):  # 默认batch_size=1避免内存问题
         """Take a snapshot of the model's performance."""
         # Use training batch_size if not specified, default to 2 for safety
         if batch_size is None:
@@ -421,6 +453,9 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                 
                 recon = vqvae.Decode(encoding_indices)
                 print(f"[DEBUG] Decoding done")
+                
+                # 清理CUDA缓存，避免内存累积
+                torch.cuda.empty_cache()
                 
                 # Store results
                 gts.append({

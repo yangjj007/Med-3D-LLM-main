@@ -129,7 +129,7 @@ class SparseSDF(StandardDatasetBase):
             sample: Dictionary containing sparse_sdf, sparse_index, batch_idx
         
         Returns:
-            Tensor of shape [B, 3, H, W] for visualization
+            Tensor of shape [B, 3, H, W] for visualization (on the same device as input)
         """
         from ..representations.octree import DfsOctree as Octree
         from ..renderers import OctreeRenderer
@@ -138,6 +138,9 @@ class SparseSDF(StandardDatasetBase):
         sparse_sdf = sample['sparse_sdf']
         sparse_index = sample['sparse_index']
         batch_idx = sample['batch_idx']
+        
+        # Get the device from input tensors (for multi-GPU compatibility)
+        device = sparse_sdf.device if isinstance(sparse_sdf, torch.Tensor) else torch.device('cuda')
         
         # Determine batch size
         batch_size = int(batch_idx.max().item() + 1)
@@ -225,8 +228,8 @@ class SparseSDF(StandardDatasetBase):
             images.append(grid)
         
         if len(images) == 0:
-            # Return empty image if no valid samples
-            return torch.zeros(1, 3, 512, 512)
+            # Return empty image if no valid samples (on the correct device)
+            return torch.zeros(1, 3, 512, 512, device=device)
         
         return torch.stack(images)
 

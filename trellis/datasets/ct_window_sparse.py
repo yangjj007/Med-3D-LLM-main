@@ -262,7 +262,7 @@ class CTWindowSparseSDF(Dataset):
             sample: Dictionary containing sparse_sdf, sparse_index, batch_idx
         
         Returns:
-            Tensor of shape [B, 1, H, W] for visualization
+            Tensor of shape [B, 1, H, W] for visualization (on the same device as input)
         """
         try:
             print("\n[DEBUG] visualize_sample called")
@@ -276,10 +276,14 @@ class CTWindowSparseSDF(Dataset):
             print(f"[DEBUG] sparse_index shape: {sparse_index.shape}, dtype: {sparse_index.dtype}")
             print(f"[DEBUG] batch_idx shape: {batch_idx.shape}, dtype: {batch_idx.dtype}")
             
+            # Get the device from input tensors (for multi-GPU compatibility)
+            device = sparse_sdf.device if isinstance(sparse_sdf, torch.Tensor) else torch.device('cuda')
+            print(f"[DEBUG] Using device: {device}")
+            
             # Determine batch size
             if len(batch_idx) == 0:
                 print("[DEBUG] batch_idx is empty! Creating dummy image")
-                return torch.zeros(1, 1, 384, 512)
+                return torch.zeros(1, 1, 384, 512, device=device)
             
             batch_size = int(batch_idx.max().item() + 1)
             print(f"[DEBUG] batch_size determined: {batch_size}")
@@ -302,9 +306,9 @@ class CTWindowSparseSDF(Dataset):
                 # Handle edge case where there's no data for this batch
                 if mask.sum() == 0:
                     print(f"[DEBUG]   Batch {b} has no data, creating empty grid")
-                    # Create empty grid
+                    # Create empty grid on the correct device
                     grid = np.zeros((3 * slice_size, num_slices_per_axis * slice_size), dtype=np.float32)
-                    images.append(torch.from_numpy(grid).unsqueeze(0))
+                    images.append(torch.from_numpy(grid).unsqueeze(0).to(device))
                     continue
                 
                 indices = sparse_index[mask].cpu().numpy()
@@ -370,8 +374,8 @@ class CTWindowSparseSDF(Dataset):
                 
                 print(f"[DEBUG]   Grid created with shape: {grid.shape}")
                 
-                # Convert to tensor [1, H, W]
-                image = torch.from_numpy(grid).unsqueeze(0)
+                # Convert to tensor [1, H, W] and move to correct device
+                image = torch.from_numpy(grid).unsqueeze(0).to(device)
                 images.append(image)
                 print(f"[DEBUG]   Batch {b} completed, image shape: {image.shape}")
             
@@ -379,6 +383,7 @@ class CTWindowSparseSDF(Dataset):
             print(f"[DEBUG] Stacking {len(images)} images")
             result = torch.stack(images)
             print(f"[DEBUG] Final result shape: {result.shape}")
+            print(f"[DEBUG] Final result device: {result.device}")
             return result
             
         except Exception as e:

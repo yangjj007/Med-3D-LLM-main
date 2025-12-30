@@ -62,7 +62,7 @@
             "loss_type": "l1",
             "i_print": 100,
             "i_log": 100,
-            "i_sample": 5000,
+            "i_sample": 10000,
             "i_save": 5000,
             "i_ddpcheck": 10000
         }
