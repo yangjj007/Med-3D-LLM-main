@@ -31,6 +31,9 @@ pip install monai nibabel
 
 # 可选：用于Sparse SDF生成（需要CUDA）
 pip install torch trimesh
+
+# 编译voxelize库（必需）
+pip install ./third_party/voxelize/
 ```
 
 ## 快速开始
