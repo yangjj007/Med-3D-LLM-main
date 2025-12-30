@@ -57,6 +57,8 @@ class CTWindowSparseSDF(Dataset):
         window_type: str = 'lung',
         min_points: int = 100,
         max_points: int = 500000,
+        cache_data: bool = True,  # 新增：是否缓存数据到内存
+        precompute_sparse: bool = True,  # 新增：是否预计算稀疏索引
     ):
         super().__init__()
         
@@ -65,6 +67,8 @@ class CTWindowSparseSDF(Dataset):
         self.min_points = min_points
         self.max_points = max_points
         self.value_range = (0, 1)  # For visualization - binary window values
+        self.cache_data = cache_data
+        self.precompute_sparse = precompute_sparse
         
         # Validate window type
         if window_type not in WINDOW_CONFIGS:
@@ -82,11 +86,27 @@ class CTWindowSparseSDF(Dataset):
         self.metadata = {}
         self._discover_datasets()
         
+        # 缓存机制
+        self._cache = {} if cache_data else None
+        self._sparse_cache = {} if precompute_sparse else None
+        
         print(f"\nCTWindowSparseSDF Dataset:")
         print(f"  Window type: {window_type}")
         print(f"  Resolution: {resolution}")
         print(f"  Total instances: {len(self.instances)}")
         print(f"  Min points: {min_points}, Max points: {max_points}")
+        print(f"  Cache enabled: {cache_data}")
+        print(f"  Precompute sparse: {precompute_sparse}")
+        
+        # 预加载所有数据到内存（如果数据集不大）
+        if cache_data and len(self.instances) <= 100:  # 只在数据集较小时全部缓存
+            print(f"  Preloading all {len(self.instances)} instances to memory...")
+            import time
+            start_time = time.time()
+            for idx in range(len(self.instances)):
+                self._load_window_data(idx)
+            elapsed = time.time() - start_time
+            print(f"  Preloading completed in {elapsed:.2f}s")
     
     def _discover_datasets(self):
         """
@@ -94,6 +114,8 @@ class CTWindowSparseSDF(Dataset):
         
         Searches for directories with structure:
         {root}/{dataset_name}/processed/{case_id}/
+        
+        Also supports direct paths to 'processed' directories.
         """
         for root in self.roots:
             root = os.path.expanduser(root)
@@ -101,8 +123,20 @@ class CTWindowSparseSDF(Dataset):
                 print(f"Warning: Root directory not found: {root}")
                 continue
             
+            # 检查是否直接指向 processed 目录
+            if os.path.basename(root) == 'processed' and os.path.isdir(root):
+                print(f"  Detected direct 'processed' directory: {root}")
+                self._discover_in_processed_dir(root, parent_dir=os.path.dirname(root))
+                continue
+            
             # Find all metadata.csv files (indicates a dataset)
             metadata_files = glob.glob(os.path.join(root, '**/metadata.csv'), recursive=True)
+            
+            if len(metadata_files) == 0:
+                print(f"  No metadata.csv found in {root}, trying direct case discovery...")
+                # 尝试直接在该目录下查找case目录
+                self._discover_in_processed_dir(root, parent_dir=root)
+                continue
             
             for metadata_file in metadata_files:
                 dataset_root = os.path.dirname(metadata_file)
@@ -115,42 +149,100 @@ class CTWindowSparseSDF(Dataset):
                 try:
                     metadata_df = pd.read_csv(metadata_file)
                 except Exception as e:
-                    print(f"Warning: Failed to load metadata from {metadata_file}: {e}")
-                    continue
+                    print(f"  Warning: Failed to load metadata from {metadata_file}: {e}")
+                    metadata_df = None
                 
-                # Find all case directories
-                case_dirs = glob.glob(os.path.join(processed_dir, '*'))
-                case_dirs = [d for d in case_dirs if os.path.isdir(d)]
-                
-                for case_dir in case_dirs:
-                    case_id = os.path.basename(case_dir)
-                    
-                    # Check if window file exists
-                    window_path = os.path.join(
-                        case_dir, 
-                        'windows', 
-                        self.window_filename
-                    )
-                    
-                    if not os.path.exists(window_path):
-                        continue
-                    
-                    # Add to instances
-                    self.instances.append({
-                        'dataset_root': dataset_root,
-                        'case_id': case_id,
-                        'case_dir': case_dir,
-                        'window_path': window_path
-                    })
-                    
-                    # Store metadata if available
-                    if 'case_id' in metadata_df.columns:
-                        case_metadata = metadata_df[metadata_df['case_id'] == case_id]
-                        if not case_metadata.empty:
-                            self.metadata[case_id] = case_metadata.iloc[0].to_dict()
+                self._discover_in_processed_dir(processed_dir, dataset_root, metadata_df)
+    
+    def _discover_in_processed_dir(self, processed_dir, parent_dir, metadata_df=None):
+        """
+        在processed目录中发现case目录
+        
+        Args:
+            processed_dir: processed目录路径
+            parent_dir: 父目录（用于存储dataset_root）
+            metadata_df: 可选的metadata DataFrame
+        """
+        # Find all case directories
+        case_dirs = glob.glob(os.path.join(processed_dir, '*'))
+        case_dirs = [d for d in case_dirs if os.path.isdir(d)]
+        
+        print(f"  Found {len(case_dirs)} case directories in {processed_dir}")
+        
+        for case_dir in case_dirs:
+            case_id = os.path.basename(case_dir)
+            
+            # Check if window file exists
+            window_path = os.path.join(
+                case_dir, 
+                'windows', 
+                self.window_filename
+            )
+            
+            if not os.path.exists(window_path):
+                print(f"  Skipping {case_id}: window file not found at {window_path}")
+                continue
+            
+            # Add to instances
+            self.instances.append({
+                'dataset_root': parent_dir,
+                'case_id': case_id,
+                'case_dir': case_dir,
+                'window_path': window_path
+            })
+            
+            # Store metadata if available
+            if metadata_df is not None and 'case_id' in metadata_df.columns:
+                case_metadata = metadata_df[metadata_df['case_id'] == case_id]
+                if not case_metadata.empty:
+                    self.metadata[case_id] = case_metadata.iloc[0].to_dict()
     
     def __len__(self):
         return len(self.instances)
+    
+    def _load_window_data(self, index: int):
+        """
+        加载窗口数据，使用内存映射或缓存。
+        """
+        # 检查缓存
+        if self._cache is not None and index in self._cache:
+            return self._cache[index]
+        
+        instance = self.instances[index]
+        
+        # 使用mmap_mode加速加载（不立即加载到内存）
+        if self._cache is None:
+            window_data = np.load(instance['window_path'], mmap_mode='r')
+        else:
+            window_data = np.load(instance['window_path'])
+            self._cache[index] = window_data
+        
+        return window_data
+    
+    def _get_sparse_indices(self, index: int, window_data: np.ndarray):
+        """
+        获取稀疏索引，使用缓存。
+        """
+        # 检查稀疏索引缓存
+        if self._sparse_cache is not None:
+            if index in self._sparse_cache:
+                return self._sparse_cache[index]
+        
+        # 计算稀疏索引 - 优化的方法
+        # 使用nonzero比argwhere快
+        indices = np.stack(np.nonzero(window_data), axis=1)
+        
+        # 提取值
+        if len(indices) > 0:
+            values = window_data[indices[:, 0], indices[:, 1], indices[:, 2]]
+        else:
+            values = np.array([], dtype=window_data.dtype)
+        
+        # 缓存结果
+        if self._sparse_cache is not None:
+            self._sparse_cache[index] = (indices, values)
+        
+        return indices, values
     
     def __getitem__(self, index: int) -> Dict[str, Any]:
         """
@@ -165,24 +257,18 @@ class CTWindowSparseSDF(Dataset):
                 - sparse_index: Tensor[N, 3] - 3D coordinates
         """
         try:
-            instance = self.instances[index]
+            # 加载窗口数据（可能从缓存）
+            window_data = self._load_window_data(index)
             
-            # Load window data
-            window_data = np.load(instance['window_path'])
+            # 获取稀疏表示（可能从缓存）
+            indices, values = self._get_sparse_indices(index, window_data)
             
-            # Convert to sparse format
-            # Find non-zero voxels
-            indices = np.argwhere(window_data > 0)
-            
-            # Check minimum points requirement
+            # 检查最小点数要求
             if len(indices) < self.min_points:
-                # Return a random valid instance instead
+                # 返回随机有效实例
                 return self.__getitem__(np.random.randint(0, len(self)))
             
-            # Extract values at non-zero locations
-            values = window_data[indices[:, 0], indices[:, 1], indices[:, 2]]
-            
-            # Subsample if too many points
+            # 如果点数过多，进行子采样
             if self.max_points is not None and len(indices) > self.max_points:
                 subsample_indices = np.random.choice(
                     len(indices), 
@@ -192,9 +278,9 @@ class CTWindowSparseSDF(Dataset):
                 indices = indices[subsample_indices]
                 values = values[subsample_indices]
             
-            # Convert to tensors
-            sparse_sdf = torch.from_numpy(values).float().unsqueeze(-1)  # [N, 1]
-            sparse_index = torch.from_numpy(indices).long()  # [N, 3]
+            # 转换为张量（这个操作很快）
+            sparse_sdf = torch.from_numpy(values.copy()).float().unsqueeze(-1)  # [N, 1]
+            sparse_index = torch.from_numpy(indices.copy()).long()  # [N, 3]
             
             return {
                 'sparse_sdf': sparse_sdf,
@@ -203,7 +289,9 @@ class CTWindowSparseSDF(Dataset):
         
         except Exception as e:
             print(f"Error loading instance {index}: {e}")
-            # Return a random valid instance
+            import traceback
+            traceback.print_exc()
+            # 返回随机有效实例
             return self.__getitem__(np.random.randint(0, len(self)))
     
     def collate_fn(self, batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
@@ -334,11 +422,24 @@ class CTWindowSparseSDF(Dataset):
                 print(f"[DEBUG]   scaled_indices shape: {scaled_indices.shape}")
                 print(f"[DEBUG]   scaled_indices range: [{scaled_indices.min()}, {scaled_indices.max()}]")
                 
-                # Fill dense array with max values at each location
-                for idx_i, (idx, val) in enumerate(zip(scaled_indices, values)):
-                    if idx_i < 3:  # Print first few for debugging
-                        print(f"[DEBUG]   Setting dense[{idx[0]}, {idx[1]}, {idx[2]}] = max(current, {val})")
-                    dense[idx[0], idx[1], idx[2]] = max(dense[idx[0], idx[1], idx[2]], val)
+                # # Fill dense array with max values at each location
+                # for idx_i, (idx, val) in enumerate(zip(scaled_indices, values)):
+                #     if idx_i < 3:  # Print first few for debugging
+                #         print(f"[DEBUG]   Setting dense[{idx[0]}, {idx[1]}, {idx[2]}] = max(current, {val})")
+                #     dense[idx[0], idx[1], idx[2]] = max(dense[idx[0], idx[1], idx[2]], val)
+
+                # Fill dense array with max values at each location (vectorized)
+                # Convert 3D indices to linear indices for efficient processing
+                linear_indices = np.ravel_multi_index(
+                    (scaled_indices[:, 0], scaled_indices[:, 1], scaled_indices[:, 2]),
+                    (slice_size, slice_size, slice_size),
+                    mode='clip'
+                )
+
+                # Use np.maximum.at for vectorized max operation
+                dense_flat = dense.flatten()
+                np.maximum.at(dense_flat, linear_indices, values)
+                dense = dense_flat.reshape(slice_size, slice_size, slice_size)
                 
                 print(f"[DEBUG]   dense array filled, non-zero count: {np.count_nonzero(dense)}")
                 

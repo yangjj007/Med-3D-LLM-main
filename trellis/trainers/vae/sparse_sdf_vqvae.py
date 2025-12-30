@@ -54,26 +54,73 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
     
     def __init__(
         self,
-        *args,
+        models,
+        dataset,
+        *,
         lambda_vq: float = 1.0,
         lambda_commitment: float = 0.25,
         loss_type: str = 'mse',
         pretrained_vae_path: str = None,
         training_stage: int = 1,
+        load_dir=None,
+        step=None,
         **kwargs
     ):
-        super().__init__(*args, **kwargs)
+        # 保存配置，稍后使用
         self.lambda_vq = lambda_vq
         self.lambda_commitment = lambda_commitment
         self.loss_type = loss_type
         self.training_stage = training_stage
+        self.pretrained_vae_path = pretrained_vae_path
+        self._should_load_pretrained = (pretrained_vae_path is not None and 
+                                       load_dir is None and 
+                                       step is None)
         
-        # Load pretrained VAE if specified
-        if pretrained_vae_path is not None and self.step == 0:
-            self._load_pretrained_vae(pretrained_vae_path)
+        # 调用父类初始化
+        super().__init__(models, dataset, load_dir=load_dir, step=step, **kwargs)
+    
+    def init_models_and_more(self, **kwargs):
+        """
+        重写父类方法，在初始化DDP和收集参数之前先配置训练阶段（冻结参数）
         
-        # Apply training stage configuration
+        关键时序：
+        1. 先加载预训练权重（如果需要且不是从checkpoint恢复）
+        2. 配置训练阶段（冻结不需要训练的参数）
+        3. 调用父类方法（收集参数、初始化DDP、optimizer等）
+        
+        这样可以确保DDP和optimizer只包含真正需要训练的参数，避免
+        "parameters that were not used in producing loss" 错误
+        """
+        # ===== 阶段1：加载预训练权重（仅当不从checkpoint恢复时）=====
+        if self._should_load_pretrained:
+            if self.is_master:
+                print(f"\n{'='*80}")
+                print(f"[INFO] Loading pretrained VAE weights...")
+                print(f"{'='*80}")
+            self._load_pretrained_vae(self.pretrained_vae_path)
+        
+        # ===== 阶段2：配置训练阶段（冻结参数）=====
+        # ⚠️ 关键：必须在父类的init_models_and_more之前调用
+        # 这样父类收集model_params时就不会包含冻结的参数
         self._configure_training_stage()
+        
+        # ===== 阶段3：调用父类方法 =====
+        # 此时会：
+        # - 收集model_params（只包含requires_grad=True的参数）✅
+        # - 初始化DDP（只包含可训练参数，避免unused parameter错误）✅
+        # - 初始化optimizer（只优化可训练参数）✅
+        if self.is_master:
+            print(f"\n{'='*80}")
+            print(f"[INFO] Initializing trainer components with correct parameter set...")
+            print(f"{'='*80}")
+        super().init_models_and_more(**kwargs)
+        
+        if self.is_master:
+            print(f"\n{'='*80}")
+            print(f"[SUCCESS] Trainer initialization complete!")
+            print(f"  - Model parameters: {len(self.model_params)}")
+            print(f"  - Optimizer parameters: {sum(len(g['params']) for g in self.optimizer.param_groups)}")
+            print(f"{'='*80}\n")
     
     def _load_pretrained_vae(self, pretrained_vae_path: str):
         """
@@ -204,50 +251,17 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         
         # Forward pass through VQVAE
         vqvae = self.training_models['vqvae']
-        
-        # ===== DEBUG 输出 =====
-        print(f"\n[DEBUG training_losses] Calling vqvae forward...")
-        print(f"[DEBUG training_losses] Input x type: {type(x)}")
-        print(f"[DEBUG training_losses] Input x.feats shape: {x.feats.shape}")
-        print(f"[DEBUG training_losses] Input x.coords shape: {x.coords.shape}")
-        # =====================
-        
         outputs = vqvae(x)
-        
-        # ===== DEBUG 输出 =====
-        print(f"[DEBUG training_losses] vqvae output type: {type(outputs)}")
-        if isinstance(outputs, dict):
-            print(f"[DEBUG training_losses] vqvae output keys: {outputs.keys()}")
-            for key, value in outputs.items():
-                print(f"[DEBUG training_losses]   {key}: type={type(value)}, "
-                      f"{'shape=' + str(value.shape) if hasattr(value, 'shape') else 'value=' + str(value)}")
-        else:
-            print(f"[DEBUG training_losses] vqvae output (unexpected): {outputs}")
-        # =====================
         
         # Extract outputs from dictionary
         recon = outputs['reconst_x']
         vq_loss = outputs['vq_loss']
         commitment_loss = outputs['commitment_loss']
         
-        # ===== DEBUG 输出 =====
-        print(f"[DEBUG training_losses] recon type: {type(recon)}")
-        if hasattr(recon, 'feats'):
-            print(f"[DEBUG training_losses] recon.feats shape: {recon.feats.shape}")
-            print(f"[DEBUG training_losses] recon.coords shape: {recon.coords.shape}")
-        print(f"[DEBUG training_losses] Input x.feats shape: {x.feats.shape}")
-        print(f"[DEBUG training_losses] Input x.coords shape: {x.coords.shape}")
-        print(f"[DEBUG training_losses] vq_loss: {vq_loss}")
-        print(f"[DEBUG training_losses] commitment_loss: {commitment_loss}")
-        # =====================
-        
         # Align reconstruction with input coordinates (ShapeLLM方法)
         # Decoder可能生成扩展体素，需要只对输入位置计算损失
         input_coords = x.coords  # [N_input, 4] (batch, x, y, z)
         output_coords = recon.coords  # [N_output, 4]
-        
-        print(f"[DEBUG training_losses] Aligning coordinates...")
-        print(f"[DEBUG training_losses] Input coords: {input_coords.shape}, Output coords: {output_coords.shape}")
         
         # 构建坐标到索引的映射字典（更高效的方法）
         # 将输入坐标转换为字符串键
@@ -265,10 +279,8 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                 aligned_indices_output.append(i)
                 aligned_indices_input.append(input_coord_dict[key])
         
-        print(f"[DEBUG training_losses] Found {len(aligned_indices_output)} matching voxels out of {len(output_coords)} output and {len(input_coords)} input voxels")
-        
         if len(aligned_indices_output) == 0:
-            raise RuntimeError("No matching voxels found between input and output! This should not happen.")
+            raise RuntimeError("❌ 没有找到输入输出之间匹配的体素！这不应该发生。")
         
         # 提取对齐的特征
         aligned_indices_output = torch.tensor(aligned_indices_output, device=recon.feats.device)
@@ -276,8 +288,6 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         
         recon_aligned = recon.feats[aligned_indices_output]
         target_aligned = sparse_sdf[aligned_indices_input]
-        
-        print(f"[DEBUG training_losses] Aligned recon shape: {recon_aligned.shape}, target shape: {target_aligned.shape}")
         
         # Compute reconstruction loss on aligned voxels
         if self.loss_type == 'mse':
@@ -302,7 +312,15 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             commitment=commitment_loss,
         )
         
-        return terms, {}
+        # Status dictionary with additional metrics
+        status = edict(
+            num_input_voxels=len(input_coords),
+            num_output_voxels=len(output_coords),
+            num_aligned_voxels=len(aligned_indices_output),
+            alignment_ratio=len(aligned_indices_output) / len(input_coords),
+        )
+        
+        return terms, status
     
     @torch.no_grad()
     def snapshot(self, suffix=None, num_samples=16, batch_size=1, verbose=False):  # 默认batch_size=1避免内存问题
@@ -310,7 +328,6 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         # Use training batch_size if not specified, default to 2 for safety
         if batch_size is None:
             batch_size = getattr(self, 'batch_size_per_gpu', 2)
-        print(f"[DEBUG] snapshot: Using batch_size={batch_size}, num_samples={num_samples}")
         super().snapshot(suffix=suffix, num_samples=num_samples, batch_size=batch_size, verbose=verbose)
     
     @torch.no_grad()
@@ -332,12 +349,9 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             Dictionary of samples for visualization
         """
         try:
-            print(f"\n[DEBUG] run_snapshot called with num_samples={num_samples}, batch_size={batch_size}")
-            
             # Create a dataset copy with potentially reduced max_points for stability
             dataset_copy = copy.deepcopy(self.dataset)
             original_max_points = getattr(dataset_copy, 'max_points', None)
-            
             
             dataloader = DataLoader(
                 dataset_copy,
@@ -346,7 +360,6 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                 num_workers=0,
                 collate_fn=dataset_copy.collate_fn if hasattr(dataset_copy, 'collate_fn') else None,
             )
-            print(f"[DEBUG] DataLoader created with max_points={getattr(dataset_copy, 'max_points', 'N/A')}")
             
             # Get VQVAE model
             vqvae = self.models['vqvae']
@@ -355,48 +368,16 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             
             # Get model dtype for fp16 compatibility
             model_dtype = vqvae.encoder.dtype if hasattr(vqvae.encoder, 'dtype') else torch.float32
-            print(f"[DEBUG] Model dtype: {model_dtype}")
             
-            # ===== 检查模型权重 =====
-            print(f"\n[DEBUG] Checking model weights...")
-            print(f"[DEBUG] vqvae.training: {vqvae.training}")
-            print(f"[DEBUG] vqvae.encoder.training: {vqvae.encoder.training}")
-            
-            # 检查encoder的out_layer权重（这是问题所在！）
-            if hasattr(vqvae.encoder, 'out_layer'):
-                out_layer = vqvae.encoder.out_layer
-                print(f"\n[CRITICAL] Encoder out_layer weights:")
-                print(f"[CRITICAL] out_layer.weight shape: {out_layer.weight.shape}")
-                print(f"[CRITICAL] out_layer.weight min: {out_layer.weight.min().item():.6f}, max: {out_layer.weight.max().item():.6f}")
-                print(f"[CRITICAL] out_layer.weight mean: {out_layer.weight.mean().item():.6f}, std: {out_layer.weight.std().item():.6f}")
-                print(f"[CRITICAL] out_layer.weight abs sum: {out_layer.weight.abs().sum().item():.6f}")
-                if out_layer.weight.abs().sum().item() < 1e-6:
-                    print(f"[ERROR] ⚠️⚠️⚠️ Encoder out_layer weights are ALL ZERO! This will cause all encoder outputs to be 0!")
-                    print(f"[ERROR] ⚠️⚠️⚠️ The model either:")
-                    print(f"[ERROR]   1. Was just initialized and not trained yet")
-                    print(f"[ERROR]   2. Checkpoint was not loaded correctly")
-                    print(f"[ERROR]   3. out_layer is not being trained (frozen or no gradients)")
-                if hasattr(out_layer, 'bias') and out_layer.bias is not None:
-                    print(f"[CRITICAL] out_layer.bias min: {out_layer.bias.min().item():.6f}, max: {out_layer.bias.max().item():.6f}")
-            
-            # 检查encoder第一层权重
-            first_conv_layer = None
-            for name, module in vqvae.encoder.named_modules():
-                if 'conv' in name.lower() and hasattr(module, 'weight'):
-                    first_conv_layer = module
-                    print(f"\n[DEBUG] First conv layer: {name}")
-                    print(f"[DEBUG] Weight shape: {module.weight.shape}")
-                    print(f"[DEBUG] Weight min: {module.weight.min().item():.6f}, max: {module.weight.max().item():.6f}, mean: {module.weight.mean().item():.6f}")
-                    print(f"[DEBUG] Weight std: {module.weight.std().item():.6f}")
-                    if hasattr(module, 'bias') and module.bias is not None:
-                        print(f"[DEBUG] Bias min: {module.bias.min().item():.6f}, max: {module.bias.max().item():.6f}")
-                    break
-            
-            # 检查VQ codebook
-            print(f"\n[DEBUG] VQ codebook weight shape: {vqvae.vq.embeddings.weight.shape}")
-            print(f"[DEBUG] VQ codebook min: {vqvae.vq.embeddings.weight.min().item():.6f}, max: {vqvae.vq.embeddings.weight.max().item():.6f}")
-            print(f"[DEBUG] VQ codebook mean: {vqvae.vq.embeddings.weight.mean().item():.6f}, std: {vqvae.vq.embeddings.weight.std().item():.6f}")
-            print("=" * 80)
+            # 检查encoder的out_layer权重（仅在首次快照时检查）
+            if self.step == 0 or self.step % (self.i_sample * 10) == 0:
+                if hasattr(vqvae.encoder, 'out_layer'):
+                    out_layer = vqvae.encoder.out_layer
+                    weight_sum = out_layer.weight.abs().sum().item()
+                    if weight_sum < 1e-6:
+                        print(f"\n⚠️  警告: Encoder out_layer权重几乎为零！")
+                        print(f"  这可能表示模型未被训练或checkpoint未正确加载")
+                        print(f"  权重绝对值总和: {weight_sum:.6e}\n")
             
             # Inference
             gts = []
@@ -404,60 +385,32 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             
             for i in range(0, num_samples, batch_size):
                 batch = min(batch_size, num_samples - i)
-                print(f"[DEBUG] Processing iteration {i}, batch={batch}")
                 
                 data = next(iter(dataloader))
-                print(f"[DEBUG] Data loaded from dataloader")
-                print(f"[DEBUG] Data keys: {data.keys()}")
                 
                 # Move to device (data already collated, no need to slice)
                 sparse_sdf = data['sparse_sdf'].cuda() if isinstance(data['sparse_sdf'], torch.Tensor) else data['sparse_sdf']
                 sparse_index = data['sparse_index'].cuda() if isinstance(data['sparse_index'], torch.Tensor) else data['sparse_index']
                 batch_idx = data['batch_idx'].cuda() if isinstance(data['batch_idx'], torch.Tensor) else data['batch_idx']
                 
-                print(f"[DEBUG] After moving to device:")
-                print(f"[DEBUG]   sparse_sdf shape: {sparse_sdf.shape}")
-                print(f"[DEBUG]   sparse_index shape: {sparse_index.shape}")
-                print(f"[DEBUG]   batch_idx shape: {batch_idx.shape}")
-                
                 # Only keep points belonging to current batch
                 mask = batch_idx < batch
-                print(f"[DEBUG] Mask sum: {mask.sum().item()} / {len(mask)}")
-                
                 sparse_sdf = sparse_sdf[mask]
                 sparse_index = sparse_index[mask]
                 batch_idx = batch_idx[mask]
-                
-                print(f"[DEBUG] After masking:")
-                print(f"[DEBUG]   sparse_sdf shape: {sparse_sdf.shape}")
-                print(f"[DEBUG]   sparse_index shape: {sparse_index.shape}")
-                print(f"[DEBUG]   batch_idx shape: {batch_idx.shape}")
                 
                 # Convert to model dtype (for fp16 compatibility)
                 sparse_sdf = sparse_sdf.to(dtype=model_dtype)
                 
                 # Construct sparse tensor
                 coords = torch.cat([batch_idx.unsqueeze(-1), sparse_index], dim=-1).int()
-                print(f"[DEBUG] coords shape: {coords.shape}, dtype: {coords.dtype}")
-                print(f"[DEBUG] coords min: {coords.min(dim=0).values}, max: {coords.max(dim=0).values}")
-                print(f"[DEBUG] coords is_integer: {coords.dtype in [torch.int32, torch.int64]}")
-                print(f"[DEBUG] sparse_sdf shape: {sparse_sdf.shape}, dtype: {sparse_sdf.dtype}")
-                print(f"[DEBUG] sparse_sdf min: {sparse_sdf.min()}, max: {sparse_sdf.max()}, mean: {sparse_sdf.mean()}")
-                
                 x = sp.SparseTensor(sparse_sdf, coords)
-                print(f"[DEBUG] SparseTensor created")
-                print(f"[DEBUG] SparseTensor shape: {x.shape}")
-                print(f"[DEBUG] SparseTensor feats shape: {x.feats.shape}")
-                print(f"[DEBUG] SparseTensor coords shape: {x.coords.shape}")
                 
                 # Check for any NaN or Inf
-                if torch.isnan(sparse_sdf).any():
-                    print(f"[ERROR] NaN detected in sparse_sdf!")
-                if torch.isinf(sparse_sdf).any():
-                    print(f"[ERROR] Inf detected in sparse_sdf!")
+                if torch.isnan(sparse_sdf).any() or torch.isinf(sparse_sdf).any():
+                    print(f"⚠️  警告: 检测到NaN或Inf值在sparse_sdf中！")
                 
                 # Encode and decode
-                print(f"[DEBUG] Calling vqvae.Encode...")
                 try:
                     # 构建字典格式的 batch，符合 Encode 方法的输入要求
                     batch_dict = {
@@ -466,34 +419,12 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                         'batch_idx': batch_idx,
                     }
                     
-                    # ===== DEBUG: 详细检查 batch_dict =====
-                    print(f"\n[DEBUG run_snapshot] Before calling Encode:")
-                    print(f"[DEBUG run_snapshot] batch_dict type: {type(batch_dict)}")
-                    print(f"[DEBUG run_snapshot] batch_dict is dict: {isinstance(batch_dict, dict)}")
-                    print(f"[DEBUG run_snapshot] batch_dict keys: {batch_dict.keys()}")
-                    print(f"[DEBUG run_snapshot] batch_dict['sparse_sdf'] type: {type(batch_dict['sparse_sdf'])}")
-                    print(f"[DEBUG run_snapshot] batch_dict['sparse_sdf'] shape: {batch_dict['sparse_sdf'].shape}")
-                    print(f"[DEBUG run_snapshot] batch_dict['sparse_index'] type: {type(batch_dict['sparse_index'])}")
-                    print(f"[DEBUG run_snapshot] batch_dict['sparse_index'] shape: {batch_dict['sparse_index'].shape}")
-                    print(f"[DEBUG run_snapshot] batch_dict['batch_idx'] type: {type(batch_dict['batch_idx'])}")
-                    print(f"[DEBUG run_snapshot] batch_dict['batch_idx'] shape: {batch_dict['batch_idx'].shape}")
-                    print("=" * 80)
-                    # ===== DEBUG END =====
-                    
                     encoding_indices = vqvae.Encode(batch_dict)
-                    print(f"[DEBUG] Encoding done")
-                except FloatingPointError as e:
-                    print(f"[ERROR] FloatingPointError in Encode: {e}")
-                    raise
-                except RuntimeError as e:
-                    print(f"[ERROR] RuntimeError in Encode: {e}")
-                    raise
                 except Exception as e:
-                    print(f"[ERROR] Unexpected error in Encode: {type(e).__name__}: {e}")
+                    print(f"❌ 编码错误: {type(e).__name__}: {e}")
                     raise
                 
                 recon = vqvae.Decode(encoding_indices)
-                print(f"[DEBUG] Decoding done")
                 
                 # 清理CUDA缓存，避免内存累积
                 torch.cuda.empty_cache()
@@ -509,41 +440,33 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                     'sparse_index': recon.coords[:, 1:],
                     'batch_idx': recon.coords[:, 0],
                 })
-                print(f"[DEBUG] Results stored for iteration {i}")
             
             # Combine results
-            print(f"[DEBUG] Combining {len(gts)} ground truth results")
             gt_combined = {
                 'sparse_sdf': torch.cat([g['sparse_sdf'] for g in gts], dim=0),
                 'sparse_index': torch.cat([g['sparse_index'] for g in gts], dim=0),
                 'batch_idx': torch.cat([g['batch_idx'] for g in gts], dim=0),
             }
-            print(f"[DEBUG] GT combined shapes: sdf={gt_combined['sparse_sdf'].shape}, "
-                  f"index={gt_combined['sparse_index'].shape}, batch={gt_combined['batch_idx'].shape}")
             
-            print(f"[DEBUG] Combining {len(recons)} reconstruction results")
             recon_combined = {
                 'sparse_sdf': torch.cat([r['sparse_sdf'] for r in recons], dim=0),
                 'sparse_index': torch.cat([r['sparse_index'] for r in recons], dim=0),
                 'batch_idx': torch.cat([r['batch_idx'] for r in recons], dim=0),
             }
-            print(f"[DEBUG] Recon combined shapes: sdf={recon_combined['sparse_sdf'].shape}, "
-                  f"index={recon_combined['sparse_index'].shape}, batch={recon_combined['batch_idx'].shape}")
             
             sample_dict = {
                 'gt': {'value': gt_combined, 'type': 'sample'},
                 'recon': {'value': recon_combined, 'type': 'sample'},
             }
             
-            print(f"[DEBUG] run_snapshot completed successfully")
             return sample_dict
             
         except Exception as e:
-            print(f"\n[ERROR] Exception in run_snapshot:")
-            print(f"[ERROR] Exception type: {type(e).__name__}")
-            print(f"[ERROR] Exception message: {str(e)}")
+            print(f"\n❌ run_snapshot错误:")
+            print(f"  异常类型: {type(e).__name__}")
+            print(f"  异常信息: {str(e)}")
             import traceback
-            print(f"[ERROR] Full traceback:")
+            print(f"\n完整堆栈跟踪:")
             traceback.print_exc()
             raise
 

@@ -137,15 +137,40 @@ class Trainer:
             self.dataset,
             shuffle=True,
         )
+        
+        # 优化num_workers配置
+        # 对于小数据集，减少worker数量以降低进程创建开销
+        dataset_size = len(self.dataset)
+        cpu_count = os.cpu_count()
+        gpu_count = torch.cuda.device_count()
+        
+        if dataset_size < 50:
+            # 小数据集：使用较少的worker
+            num_workers = min(2, cpu_count // gpu_count)
+        elif dataset_size < 200:
+            # 中等数据集
+            num_workers = min(4, cpu_count // gpu_count)
+        else:
+            # 大数据集：使用更多worker
+            num_workers = min(8, int(np.ceil(cpu_count / gpu_count)))
+        
+        print(f"\n[DataLoader] Configuration:")
+        print(f"  Dataset size: {dataset_size}")
+        print(f"  Batch size per GPU: {self.batch_size_per_gpu}")
+        print(f"  Num workers: {num_workers}")
+        print(f"  Pin memory: True")
+        print(f"  Persistent workers: {num_workers > 0}")
+        
         self.dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size_per_gpu,
-            num_workers=int(np.ceil(os.cpu_count() / torch.cuda.device_count())),
+            num_workers=num_workers,
             pin_memory=True,
             drop_last=True,
-            persistent_workers=True,
+            persistent_workers=num_workers > 0,
             collate_fn=self.dataset.collate_fn if hasattr(self.dataset, 'collate_fn') else None,
             sampler=self.data_sampler,
+            prefetch_factor=2 if num_workers > 0 else None,  # 预取因子
         )
         self.data_iterator = cycle(self.dataloader)
 
@@ -226,29 +251,20 @@ class Trainer:
         """
         try:
             if self.is_master:
-                print(f'\nSampling {num_samples} images...', end='')
+                print(f'\n📸 生成快照：{num_samples} 个样本...', end='', flush=True)
 
             if suffix is None:
                 suffix = f'step{self.step:07d}'
 
             # Assign tasks
             num_samples_per_process = int(np.ceil(num_samples / self.world_size))
-            print(f"\n[DEBUG] snapshot: num_samples_per_process={num_samples_per_process}, batch_size={batch_size}")
             
             samples = self.run_snapshot(num_samples_per_process, batch_size=batch_size, verbose=verbose)
-            print(f"[DEBUG] snapshot: run_snapshot returned, samples keys: {samples.keys()}")
 
             # Preprocess images
             for key in list(samples.keys()):
-                print(f"[DEBUG] snapshot: Processing key '{key}', type: {samples[key]['type']}")
                 if samples[key]['type'] == 'sample':
-                    print(f"[DEBUG] snapshot: Calling visualize_sample for key '{key}'")
-                    print(f"[DEBUG] snapshot: Value type: {type(samples[key]['value'])}")
-                    if isinstance(samples[key]['value'], dict):
-                        print(f"[DEBUG] snapshot: Value is dict with keys: {samples[key]['value'].keys()}")
-                    
                     vis = self.visualize_sample(samples[key]['value'])
-                    print(f"[DEBUG] snapshot: visualize_sample returned, type: {type(vis)}")
                     
                     if isinstance(vis, dict):
                         for k, v in vis.items():
@@ -258,11 +274,11 @@ class Trainer:
                         samples[key] = {'value': vis, 'type': 'image'}
                         
         except Exception as e:
-            print(f"\n[ERROR] Exception in snapshot:")
-            print(f"[ERROR] Exception type: {type(e).__name__}")
-            print(f"[ERROR] Exception message: {str(e)}")
+            print(f"\n❌ 快照生成错误:")
+            print(f"  异常类型: {type(e).__name__}")
+            print(f"  异常信息: {str(e)}")
             import traceback
-            print(f"[ERROR] Full traceback:")
+            print(f"\n完整堆栈跟踪:")
             traceback.print_exc()
             raise
 
@@ -306,7 +322,7 @@ class Trainer:
                     )
 
         if self.is_master:
-            print(' Done.')
+            print(' ✅ 完成')
 
     @abstractmethod
     def update_ema(self):
@@ -337,8 +353,10 @@ class Trainer:
         """
         if self.prefetch_data:
             if self._data_prefetched is None:
+                # 第一次预取
                 self._data_prefetched = recursive_to_device(next(self.data_iterator), self.device, non_blocking=True)
             data = self._data_prefetched
+            # 预取下一批
             self._data_prefetched = recursive_to_device(next(self.data_iterator), self.device, non_blocking=True)
         else:
             data = recursive_to_device(next(self.data_iterator), self.device, non_blocking=True)
@@ -372,11 +390,13 @@ class Trainer:
         Run training.
         """
         if self.is_master:
-            print('\nStarting training...')
+            print('\n' + '='*100)
+            print('🚀 开始训练...')
+            print('='*100)
             if not self.disable_snapshot:
                 self.snapshot_dataset()
             else:
-                print('⚠️  Snapshot disabled by configuration')
+                print('⚠️  快照功能已被配置禁用')
         
         if not self.disable_snapshot:
             if self.step == 0:
@@ -385,33 +405,96 @@ class Trainer:
                 self.snapshot(suffix=f'resume_step{self.step:07d}')
         else:
             if self.is_master:
-                print('⚠️  Skipping initial snapshot (disabled by configuration)')
+                print('⚠️  跳过初始快照（已被配置禁用）')
 
         log = []
         time_last_print = 0.0
         time_elapsed = 0.0
+        time_data_load = 0.0
+        time_forward = 0.0
+        time_backward = 0.0
+        
+        if self.is_master:
+            print(f"\n{'='*100}")
+            print(f"📊 训练循环开始")
+            print(f"  总步数: {self.max_steps:,}")
+            print(f"  起始步数: {self.step:,}")
+            print(f"  剩余步数: {self.max_steps - self.step:,}")
+            print(f"  批大小: {self.batch_size} (每GPU: {self.batch_size_per_gpu})")
+            print(f"  数据集大小: {len(self.dataset):,} 样本")
+            print(f"{'='*100}\n")
+        
         while self.step < self.max_steps:
-            time_start = time.time()
-
+            step_start_time = time.time()
+            
+            # 数据加载
+            data_load_start = time.time()
             data_list = self.load_data()
+            data_load_time = time.time() - data_load_start
+            time_data_load += data_load_time
+            
+            # 训练步骤
+            forward_backward_start = time.time()
             step_log = self.run_step(data_list)
-
-            time_end = time.time()
-            time_elapsed += time_end - time_start
+            forward_backward_time = time.time() - forward_backward_start
+            
+            step_end_time = time.time()
+            step_time = step_end_time - step_start_time
+            time_elapsed += step_time
 
             self.step += 1
 
-            # Print progress
+            # 详细的步骤级打印（每个step都打印关键信息）
+            if self.is_master:
+                # 提取loss信息
+                if step_log is not None and 'loss' in step_log:
+                    loss_info = step_log['loss']
+                    loss_str = f"Loss: {loss_info.get('loss', 0.0):.6f}"
+                    if 'recon' in loss_info:
+                        loss_str += f" (Recon: {loss_info['recon']:.6f}"
+                    if 'vq' in loss_info:
+                        loss_str += f", VQ: {loss_info['vq']:.6f}"
+                    if 'commitment' in loss_info:
+                        loss_str += f", Commit: {loss_info['commitment']:.6f})"
+                    elif 'recon' in loss_info:
+                        loss_str += ")"
+                else:
+                    loss_str = "Loss: N/A"
+                
+                # 每个step打印简要信息
+                print(f"[Step {self.step:>6}/{self.max_steps}] {loss_str} | "
+                      f"时间: {step_time:.3f}s (数据: {data_load_time:.3f}s, 训练: {forward_backward_time:.3f}s)", 
+                      flush=True)
+            
+            # Print progress summary（每i_print步打印详细统计）
             if self.is_master and self.step % self.i_print == 0:
-                speed = self.i_print / (time_elapsed - time_last_print) * 3600
-                columns = [
-                    f'Step: {self.step}/{self.max_steps} ({self.step / self.max_steps * 100:.2f}%)',
-                    f'Elapsed: {time_elapsed / 3600:.2f} h',
-                    f'Speed: {speed:.2f} steps/h',
-                    f'ETA: {(self.max_steps - self.step) / speed:.2f} h',
-                ]
-                print(' | '.join([c.ljust(25) for c in columns]), flush=True)
+                time_interval = time_elapsed - time_last_print
+                speed = self.i_print / time_interval * 3600 if time_interval > 0 else 0
+                avg_data_time = time_data_load / self.i_print
+                avg_train_time = (time_elapsed - time_last_print - time_data_load) / self.i_print
+                
+                print(f"\n{'='*100}")
+                print(f"📈 训练进度汇总 [Step {self.step:,}]")
+                print(f"{'='*100}")
+                print(f"  进度: {self.step}/{self.max_steps} ({self.step / self.max_steps * 100:.2f}%)")
+                print(f"  已用时间: {time_elapsed / 3600:.2f} 小时")
+                print(f"  训练速度: {speed:.2f} steps/小时")
+                print(f"  预计剩余: {(self.max_steps - self.step) / speed:.2f} 小时" if speed > 0 else "  预计剩余: 计算中...")
+                print(f"  平均数据加载: {avg_data_time:.3f}秒/step")
+                print(f"  平均训练时间: {avg_train_time:.3f}秒/step")
+                print(f"  数据加载占比: {avg_data_time / (avg_data_time + avg_train_time) * 100:.1f}%")
+                
+                if step_log is not None and 'status' in step_log:
+                    status_info = step_log['status']
+                    if 'lr' in status_info:
+                        print(f"  当前学习率: {status_info['lr']:.2e}")
+                    if 'grad_norm' in status_info:
+                        print(f"  梯度范数: {status_info['grad_norm']:.6f}")
+                
+                print(f"{'='*100}\n")
+                
                 time_last_print = time_elapsed
+                time_data_load = 0.0  # 重置计数器
 
             # Check ddp
             if self.world_size > 1 and self.i_ddpcheck is not None and self.step % self.i_ddpcheck == 0:

@@ -121,10 +121,11 @@ CTWindowSparseSDF Dataset:
 <!-- 
 为了解决int64_t(N) * int64_t(C) * tv::bit_size(algo_desp.dtype_a) / 8 < int_max assert faild. your data exceed int32 range. 报错，加入环境变量 SPCONV_ALGO='native'、 -->
 
-"max_points": 100000  这个值似乎不能太大
+"max_points": 100000  这个值似乎不能太大，否则报CUDA内存非法访问错误（应该是稀疏库OOM了）
+
+如果需要Debug，精确定位错误位置：export CUDA_LAUNCH_BLOCKING=1
 
 ```bash
-export CUDA_LAUNCH_BLOCKING=1
 export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/ct_vqvae_stage1.json \

@@ -27,13 +27,16 @@
             "resolution": 512,
             "window_type": "lung",
             "min_points": 100,
-            "max_points": 500000
+            "max_points": 500000,
+            "cache_data": true,
+            "precompute_sparse": true
         }
     },
     "trainer": {
         "name": "SparseSDF_VQVAETrainer",
         "args": {
             "training_stage": 2,
+            "num_workers": 30,
             "pretrained_vae_path": "./vae_weights/sparse_vae_512.pth",
             "max_steps": 200000,
             "batch_size_per_gpu": 2,
@@ -73,4 +76,3 @@
         }
     }
 }
-

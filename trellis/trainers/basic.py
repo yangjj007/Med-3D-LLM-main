@@ -1,5 +1,6 @@
 import os
 import copy
+import time
 from functools import partial
 from contextlib import nullcontext
 
@@ -351,14 +352,24 @@ class BasicTrainer(Trainer):
         statuses = []
         elastic_controller_logs = []
         zero_grad(self.model_params)
+        
+        # 记录训练各阶段时间
+        forward_time = 0.0
+        backward_time = 0.0
+        
         for i, mb_data in enumerate(data_list):
             ## sync at the end of each batch split
             sync_contexts = [self.training_models[name].no_sync for name in self.training_models] if i != len(data_list) - 1 and self.world_size > 1 else [nullcontext]
             with nested_contexts(*sync_contexts), elastic_controller_context():
+                # Forward pass
+                forward_start = time.time()
                 with amp_context():
                     loss, status = self.training_losses(**mb_data)
                     l = loss['loss'] / len(data_list)
+                forward_time += time.time() - forward_start
+                
                 ## backward
+                backward_start = time.time()
                 if self.fp16_mode == 'amp':
                     self.scaler.scale(l).backward()
                 elif self.fp16_mode == 'inflat_all':
@@ -366,6 +377,8 @@ class BasicTrainer(Trainer):
                     scaled_l.backward()
                 else:
                     l.backward()
+                backward_time += time.time() - backward_start
+            
             ## log
             losses.append(dict_foreach(loss, lambda x: x.item() if isinstance(x, torch.Tensor) else x))
             statuses.append(dict_foreach(status, lambda x: x.item() if isinstance(x, torch.Tensor) else x))
@@ -418,6 +431,12 @@ class BasicTrainer(Trainer):
             step_log['elastic'] = dict_reduce(elastic_controller_logs, lambda x: np.mean(x))
         if self.grad_clip is not None:
             step_log['grad_clip'] = self.grad_clip if isinstance(self.grad_clip, float) else self.grad_clip.log()
+        
+        # 添加时间统计
+        step_log['time_breakdown'] = {
+            'forward': forward_time,
+            'backward': backward_time,
+        }
             
         # Check grad and norm of each param
         if self.log_param_stats:

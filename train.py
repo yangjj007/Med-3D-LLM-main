@@ -78,26 +78,68 @@ def main(local_rank, cfg):
 
     # Seed rngs
     setup_rng(rank)
+    
+    # Print training configuration
+    if rank == 0:
+        print('\n' + '='*100)
+        print('⚙️  训练配置信息')
+        print('='*100)
+        print(f'📁 数据目录: {cfg.data_dir}')
+        print(f'📁 输出目录: {cfg.output_dir}')
+        print(f'📦 数据集: {cfg.dataset.name}')
+        if hasattr(cfg.dataset, 'args'):
+            for key, value in cfg.dataset.args.items():
+                print(f'   - {key}: {value}')
+        print(f'🔢 GPU数量: {cfg.num_gpus}')
+        print(f'🔢 节点数量: {cfg.num_nodes}')
+        print(f'🎯 训练器: {cfg.trainer.name}')
+        if 'training_stage' in cfg.trainer.args:
+            stage = cfg.trainer.args['training_stage']
+            print(f'🎯 训练阶段: Stage {stage}')
+            if stage == 1:
+                print(f'   → 冻结Encoder/Decoder，仅训练Codebook')
+            elif stage == 2:
+                print(f'   → 联合训练Encoder/Decoder/Codebook')
+        if 'loss_type' in cfg.trainer.args:
+            print(f'📊 损失函数: {cfg.trainer.args["loss_type"]}')
+        print('='*100 + '\n')
 
     # Load data
+    if rank == 0:
+        print(f'📂 正在加载数据集...')
     dataset = getattr(datasets, cfg.dataset.name)(cfg.data_dir, **cfg.dataset.args)
+    if rank == 0:
+        print(f'✅ 数据集加载完成')
+        print(f'   - 样本数量: {len(dataset):,}')
+        print(f'   - 数据集类型: {type(dataset).__name__}\n')
 
     # Build model
+    if rank == 0:
+        print(f'🏗️  正在构建模型...')
     model_dict = {
         name: getattr(models, model.name)(**model.args).cuda()
         for name, model in cfg.models.items()
     }
+    if rank == 0:
+        print(f'✅ 模型构建完成\n')
 
     # Model summary
     if rank == 0:
         for name, backbone in model_dict.items():
             model_summary = get_model_summary(backbone)
-            print(f'\n\nBackbone: {name}\n' + model_summary)
+            print(f'\n{"="*100}')
+            print(f'🧠 模型架构: {name}')
+            print(f'{"="*100}')
+            print(model_summary)
             with open(os.path.join(cfg.output_dir, f'{name}_model_summary.txt'), 'w') as fp:
                 print(model_summary, file=fp)
 
     # Build trainer
+    if rank == 0:
+        print(f'\n🎓 正在初始化训练器...')
     trainer = getattr(trainers, cfg.trainer.name)(model_dict, dataset, **cfg.trainer.args, output_dir=cfg.output_dir, load_dir=cfg.load_dir, step=cfg.load_ckpt)
+    if rank == 0:
+        print(f'✅ 训练器初始化完成\n')
 
     # Train
     if not cfg.tryrun:
@@ -136,9 +178,11 @@ if __name__ == '__main__':
     cfg = edict()
     cfg.update(opt.__dict__)
     cfg.update(config)
-    print('\n\nConfig:')
-    print('=' * 80)
-    print(json.dumps(cfg.__dict__, indent=4))
+    print('\n' + '='*100)
+    print('📋 完整配置信息:')
+    print('='*100)
+    print(json.dumps(cfg.__dict__, indent=4, ensure_ascii=False))
+    print('='*100)
 
     # Prepare output directory
     if cfg.node_rank == 0:
@@ -167,16 +211,16 @@ if __name__ == '__main__':
                 break
             except Exception as e:
                 import traceback
-                print('\n' + '='*80)
-                print('TRAINING ERROR - Full Traceback:')
-                print('='*80)
+                print('\n' + '='*100)
+                print('❌ 训练错误 - 完整堆栈跟踪:')
+                print('='*100)
                 traceback.print_exc()
-                print('='*80)
-                print(f'\nError: {e}')
+                print('='*100)
+                print(f'\n错误信息: {e}')
                 if rty + 1 < cfg.auto_retry:
-                    print(f'Retrying ({rty + 1}/{cfg.auto_retry})...\n')
+                    print(f'🔄 正在重试 ({rty + 1}/{cfg.auto_retry})...\n')
                 else:
-                    print(f'\nTraining failed after {cfg.auto_retry} attempts.')
-                    print('Exiting...')
+                    print(f'\n❌ 训练在 {cfg.auto_retry} 次尝试后失败。')
+                    print('退出程序...')
                     sys.exit(1)
             
