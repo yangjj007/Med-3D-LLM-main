@@ -9,7 +9,7 @@ from skimage import measure
 from ...modules import sparse as sp
 from .encoder import SparseSDFEncoder
 from .decoder import SparseSDFDecoder
-from .distributions import DiagonalGaussianDistribution
+# VQVAE不需要DiagonalGaussianDistribution（移除VAE的高斯采样机制）
 
 
 class SparseVectorQuantizer(nn.Module):
@@ -321,28 +321,21 @@ class SparseSDFVQVAE(nn.Module):
         print(f"[DEBUG encode] Encoder output h.shape={h.shape}, h.feats.shape={h.feats.shape}")
         print(f"[DEBUG encode] Encoder output h.coords min: {h.coords.min(0).values}, max: {h.coords.max(0).values}")
         
-        # 获取 mean（替代 VAE 的 posterior.mode()）
-        # encoder 输出的是 2*latent_channels，取前半部分作为 mean
-        print(f"[DEBUG encode] Creating DiagonalGaussianDistribution")
-        print(f"[DEBUG encode] h.feats before DGD - shape: {h.feats.shape}, min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
-        posterior = DiagonalGaussianDistribution(h.feats, feat_dim=1)
-        mean_feats = posterior.mode()  # 使用 mode() 获取 mean，不采样
-        print(f"[DEBUG encode] mean_feats shape: {mean_feats.shape}")
-        print(f"[DEBUG encode] mean_feats min: {mean_feats.min().item():.6f}, max: {mean_feats.max().item():.6f}, mean: {mean_feats.mean().item():.6f}, std: {mean_feats.std().item():.6f}")
-        h_mean = h.replace(mean_feats)
-        print(f"[DEBUG encode] h_mean shape: {h_mean.shape}")
-        print(f"[DEBUG encode] h_mean.coords shape: {h_mean.coords.shape}, h_mean.feats shape: {h_mean.feats.shape}")
+        # VQVAE: 直接使用encoder输出（ShapeLLM方法）
+        # encoder内部输出2*embed_dim，但在forward返回时分割并只返回mean（embed_dim）
+        # 这样保持与VAE架构兼容，便于加载预训练权重
+        print(f"[DEBUG encode] h.feats - shape: {h.feats.shape}, min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}, std: {h.feats.std().item():.6f}")
         
         if only_return_indices:
             # 只返回量化索引（用于 Encode 方法）
             print(f"[DEBUG encode] only_return_indices=True, calling vq...")
-            encoding_indices = self.vq(h_mean, only_return_indices=True)
+            encoding_indices = self.vq(h, only_return_indices=True)
             print(f"[DEBUG encode] encoding_indices shape: {encoding_indices.shape}")
             return encoding_indices
         
         # 量化（替代 VAE 的采样）
         print(f"[DEBUG encode] Calling vq for quantization...")
-        quantized, vq_loss, commitment_loss, _ = self.vq(h_mean)
+        quantized, vq_loss, commitment_loss, _ = self.vq(h)
         print(f"[DEBUG encode] Quantization done")
         print(f"[DEBUG encode] quantized shape: {quantized.shape}")
         print(f"[DEBUG encode] vq_loss: {vq_loss.item()}, commitment_loss: {commitment_loss.item()}")

@@ -62,7 +62,7 @@ def compute_valid_udf(
     except ImportError:
         raise ImportError(
             "udf_ext CUDA extension not found. "
-            "Please compile it from Direct3D's third_party/voxelize directory."
+            "Please compile in the third_party/voxelize directory by runing: pip install ./third_party/voxelize/"
         )
     
     udf = torch.zeros(dim**3, device=vertices.device).int() + 10000000

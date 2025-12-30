@@ -234,19 +234,60 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         print(f"[DEBUG training_losses] recon type: {type(recon)}")
         if hasattr(recon, 'feats'):
             print(f"[DEBUG training_losses] recon.feats shape: {recon.feats.shape}")
+            print(f"[DEBUG training_losses] recon.coords shape: {recon.coords.shape}")
+        print(f"[DEBUG training_losses] Input x.feats shape: {x.feats.shape}")
+        print(f"[DEBUG training_losses] Input x.coords shape: {x.coords.shape}")
         print(f"[DEBUG training_losses] vq_loss: {vq_loss}")
         print(f"[DEBUG training_losses] commitment_loss: {commitment_loss}")
         # =====================
         
-        # Compute reconstruction loss
+        # Align reconstruction with input coordinates (ShapeLLM方法)
+        # Decoder可能生成扩展体素，需要只对输入位置计算损失
+        input_coords = x.coords  # [N_input, 4] (batch, x, y, z)
+        output_coords = recon.coords  # [N_output, 4]
+        
+        print(f"[DEBUG training_losses] Aligning coordinates...")
+        print(f"[DEBUG training_losses] Input coords: {input_coords.shape}, Output coords: {output_coords.shape}")
+        
+        # 构建坐标到索引的映射字典（更高效的方法）
+        # 将输入坐标转换为字符串键
+        input_coord_dict = {}
+        for i, coord in enumerate(input_coords):
+            key = tuple(coord.cpu().tolist())
+            input_coord_dict[key] = i
+        
+        # 找到输出中匹配输入的体素
+        aligned_indices_output = []
+        aligned_indices_input = []
+        for i, coord in enumerate(output_coords):
+            key = tuple(coord.cpu().tolist())
+            if key in input_coord_dict:
+                aligned_indices_output.append(i)
+                aligned_indices_input.append(input_coord_dict[key])
+        
+        print(f"[DEBUG training_losses] Found {len(aligned_indices_output)} matching voxels out of {len(output_coords)} output and {len(input_coords)} input voxels")
+        
+        if len(aligned_indices_output) == 0:
+            raise RuntimeError("No matching voxels found between input and output! This should not happen.")
+        
+        # 提取对齐的特征
+        aligned_indices_output = torch.tensor(aligned_indices_output, device=recon.feats.device)
+        aligned_indices_input = torch.tensor(aligned_indices_input, device=sparse_sdf.device)
+        
+        recon_aligned = recon.feats[aligned_indices_output]
+        target_aligned = sparse_sdf[aligned_indices_input]
+        
+        print(f"[DEBUG training_losses] Aligned recon shape: {recon_aligned.shape}, target shape: {target_aligned.shape}")
+        
+        # Compute reconstruction loss on aligned voxels
         if self.loss_type == 'mse':
-            recon_loss = F.mse_loss(recon.feats, sparse_sdf, reduction='mean')
+            recon_loss = F.mse_loss(recon_aligned, target_aligned, reduction='mean')
         elif self.loss_type == 'l1':
-            recon_loss = F.l1_loss(recon.feats, sparse_sdf, reduction='mean')
+            recon_loss = F.l1_loss(recon_aligned, target_aligned, reduction='mean')
         elif self.loss_type == 'l1_l2':
             # Combined L1 + L2 loss for stage 2
-            recon_loss = 0.5 * F.l1_loss(recon.feats, sparse_sdf, reduction='mean') + \
-                         0.5 * F.mse_loss(recon.feats, sparse_sdf, reduction='mean')
+            recon_loss = 0.5 * F.l1_loss(recon_aligned, target_aligned, reduction='mean') + \
+                         0.5 * F.mse_loss(recon_aligned, target_aligned, reduction='mean')
         else:
             raise ValueError(f'Invalid loss type: {self.loss_type}')
         

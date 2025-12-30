@@ -108,7 +108,8 @@ class SparseSDFEncoder(SparseTransformerBase):
         ])
 
         self.resolution = resolution
-        self.out_layer = sp.SparseLinear(model_channels, 2 * latent_channels)
+        # VQVAE: 输出2*latent_channels保持与VAE架构兼容，但forward只返回mean
+        self.out_layer = sp.SparseLinear(model_channels, latent_channels * 2)
 
         self.initialize_weights()
         if use_fp16:
@@ -145,6 +146,13 @@ class SparseSDFEncoder(SparseTransformerBase):
         print(f"[DEBUG Encoder.forward] After layer_norm, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
         
         h = self.out_layer(h)
+        print(f"[DEBUG Encoder.forward] After out_layer, h.feats.shape: {h.feats.shape}")
         print(f"[DEBUG Encoder.forward] After out_layer, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
         
-        return h
+        # VQVAE: 分割成mean和logvar，但只返回mean（ShapeLLM方法）
+        mean_feats, logvar_feats = torch.chunk(h.feats, 2, dim=-1)
+        print(f"[DEBUG Encoder.forward] After chunk, mean.shape: {mean_feats.shape}, logvar.shape: {logvar_feats.shape}")
+        print(f"[DEBUG Encoder.forward] Returning only mean (logvar discarded)")
+        
+        h_mean = h.replace(mean_feats)
+        return h_mean
