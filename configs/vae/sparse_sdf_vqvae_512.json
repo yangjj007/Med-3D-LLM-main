@@ -33,6 +33,7 @@
         "name": "SparseSDF_VQVAETrainer",
         "args": {
             "max_steps": 500000,
+            "max_epoch": null,
             "batch_size_per_gpu": 2,
             "batch_split": 2,
             "optimizer": {

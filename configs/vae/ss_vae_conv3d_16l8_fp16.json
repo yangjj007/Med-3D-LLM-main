@@ -34,6 +34,7 @@
         "name": "SparseStructureVaeTrainer",
         "args": {
             "max_steps": 1000000,
+            "max_epoch": null,
             "batch_size_per_gpu": 4,
             "batch_split": 1,
             "optimizer": {

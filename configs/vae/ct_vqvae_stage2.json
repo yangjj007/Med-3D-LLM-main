@@ -39,13 +39,14 @@
             "num_workers": 30,
             "pretrained_vae_path": "./vae_weights/sparse_vae_512.pth",
             "max_steps": 200000,
+            "max_epoch": null,
             "batch_size_per_gpu": 2,
             "batch_split": 2,
             "disable_snapshot": false,
             "optimizer": {
                 "name": "AdamW",
                 "args": {
-                    "lr": 0.005,
+                    "lr": 1e-4,
                     "weight_decay": 0.0
                 }
             },

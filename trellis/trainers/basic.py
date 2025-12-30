@@ -202,6 +202,7 @@ class BasicTrainer(Trainer):
         misc_ckpt = torch.load(read_file_dist(os.path.join(load_dir, 'ckpts', f'misc_step{step:07d}.pt')), map_location=torch.device('cpu'), weights_only=False)
         self.optimizer.load_state_dict(misc_ckpt['optimizer'])
         self.step = misc_ckpt['step']
+        self.epoch = misc_ckpt.get('epoch', self.step // self.steps_per_epoch)  # 兼容旧版本checkpoint
         self.data_sampler.load_state_dict(misc_ckpt['data_sampler'])
         if self.fp16_mode == 'amp':
             self.scaler.load_state_dict(misc_ckpt['scaler'])
@@ -243,6 +244,7 @@ class BasicTrainer(Trainer):
         misc_ckpt = {
             'optimizer': self.optimizer.state_dict(),
             'step': self.step,
+            'epoch': self.epoch,
             'data_sampler': self.data_sampler.state_dict(),
         }
         if self.fp16_mode == 'amp':

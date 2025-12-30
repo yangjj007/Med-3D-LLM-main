@@ -56,6 +56,7 @@
         "name": "ImageConditionedSparseFlowMatchingCFGTrainer",
         "args": {
             "max_steps": 1000000,
+            "max_epoch": null,
             "batch_size_per_gpu": 8,
             "batch_split": 4,
             "optimizer": {

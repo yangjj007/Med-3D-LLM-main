@@ -28,6 +28,7 @@ class Trainer:
         load_dir,
         step,
         max_steps,
+        max_epoch=None,
         batch_size=None,
         batch_size_per_gpu=None,
         batch_split=None,
@@ -55,6 +56,7 @@ class Trainer:
         self.dataset = dataset
         self.batch_split = batch_split if batch_split is not None else 1
         self.max_steps = max_steps
+        self.max_epoch = max_epoch
         self.optimizer_config = optimizer
         self.lr_scheduler_config = lr_scheduler
         self.elastic_controller_config = elastic
@@ -96,8 +98,24 @@ class Trainer:
         self.init_models_and_more(**kwargs)
         self.prepare_dataloader(**kwargs)
         
+        # Calculate steps per epoch
+        self.dataset_size = len(self.dataset)
+        self.steps_per_epoch = int(np.ceil(self.dataset_size / self.batch_size))
+        
+        # Calculate max steps from max_epoch if specified
+        if self.max_epoch is not None:
+            max_steps_from_epoch = self.max_epoch * self.steps_per_epoch
+            if self.max_steps is None:
+                self.max_steps = max_steps_from_epoch
+            else:
+                # Use the minimum of max_steps and max_steps_from_epoch
+                self.max_steps = min(self.max_steps, max_steps_from_epoch)
+        elif self.max_steps is None:
+            raise ValueError('Either max_steps or max_epoch must be specified.')
+        
         # Load checkpoint
         self.step = 0
+        self.epoch = 0
         if load_dir is not None and step is not None:
             self.load(load_dir, step)
         elif finetune_ckpt is not None:
@@ -417,11 +435,27 @@ class Trainer:
         if self.is_master:
             print(f"\n{'='*100}")
             print(f"📊 训练循环开始")
-            print(f"  总步数: {self.max_steps:,}")
+            print(f"{'='*100}")
+            print(f"\n📦 数据集信息:")
+            print(f"  数据集大小: {self.dataset_size:,} 样本")
+            print(f"  批大小: {self.batch_size} (每GPU: {self.batch_size_per_gpu}, 世界大小: {self.world_size})")
+            print(f"  每个 Epoch 步数: {self.steps_per_epoch:,} steps")
+            
+            print(f"\n🎯 训练目标:")
+            print(f"  最大步数: {self.max_steps:,} steps")
+            if self.max_epoch is not None:
+                print(f"  最大 Epoch: {self.max_epoch}")
+                total_epochs = self.max_steps / self.steps_per_epoch
+                print(f"  将训练约 {total_epochs:.2f} 个 epoch")
+            else:
+                total_epochs = self.max_steps / self.steps_per_epoch
+                print(f"  将训练约 {total_epochs:.2f} 个 epoch")
+            print(f"  总计将处理约 {self.max_steps * self.batch_size:,} 个样本次数")
+            
+            print(f"\n🔄 训练状态:")
             print(f"  起始步数: {self.step:,}")
+            print(f"  起始 Epoch: {self.epoch}")
             print(f"  剩余步数: {self.max_steps - self.step:,}")
-            print(f"  批大小: {self.batch_size} (每GPU: {self.batch_size_per_gpu})")
-            print(f"  数据集大小: {len(self.dataset):,} 样本")
             print(f"{'='*100}\n")
         
         while self.step < self.max_steps:
@@ -443,6 +477,10 @@ class Trainer:
             time_elapsed += step_time
 
             self.step += 1
+            
+            # Update epoch counter
+            self.epoch = self.step // self.steps_per_epoch
+            steps_in_epoch = self.step % self.steps_per_epoch
 
             # 详细的步骤级打印（每个step都打印关键信息）
             if self.is_master:
@@ -462,7 +500,7 @@ class Trainer:
                     loss_str = "Loss: N/A"
                 
                 # 每个step打印简要信息
-                print(f"[Step {self.step:>6}/{self.max_steps}] {loss_str} | "
+                print(f"[Epoch {self.epoch} | Step {self.step:>6}/{self.max_steps} ({steps_in_epoch}/{self.steps_per_epoch})] {loss_str} | "
                       f"时间: {step_time:.3f}s (数据: {data_load_time:.3f}s, 训练: {forward_backward_time:.3f}s)", 
                       flush=True)
             
@@ -474,9 +512,11 @@ class Trainer:
                 avg_train_time = (time_elapsed - time_last_print - time_data_load) / self.i_print
                 
                 print(f"\n{'='*100}")
-                print(f"📈 训练进度汇总 [Step {self.step:,}]")
+                print(f"📈 训练进度汇总 [Epoch {self.epoch} | Step {self.step:,}]")
                 print(f"{'='*100}")
-                print(f"  进度: {self.step}/{self.max_steps} ({self.step / self.max_steps * 100:.2f}%)")
+                print(f"  Step 进度: {self.step}/{self.max_steps} ({self.step / self.max_steps * 100:.2f}%)")
+                print(f"  Epoch 进度: {self.epoch}.{steps_in_epoch} / {self.max_steps / self.steps_per_epoch:.2f} epochs")
+                print(f"  已处理样本次数: {self.step * self.batch_size:,}")
                 print(f"  已用时间: {time_elapsed / 3600:.2f} 小时")
                 print(f"  训练速度: {speed:.2f} steps/小时")
                 print(f"  预计剩余: {(self.max_steps - self.step) / speed:.2f} 小时" if speed > 0 else "  预计剩余: 计算中...")
@@ -509,7 +549,7 @@ class Trainer:
 
                 # Log time
                 log[-1][1]['time'] = {
-                    'step': time_end - time_start,
+                    'step': step_time,
                     'elapsed': time_elapsed,
                 }
 
