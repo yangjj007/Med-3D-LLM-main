@@ -50,7 +50,13 @@
                     "weight_decay": 0.0
                 }
             },
-            "lr_scheduler": null,
+            "lr_scheduler": {
+                "name": "CosineAnnealingLR",
+                "args": {
+                    "T_max": 100000,
+                    "eta_min": 5e-5
+                }
+            },
             "ema_rate": [0.9999],
             "fp16_mode": "inflat_all",
             "fp16_scale_growth": 0.001,

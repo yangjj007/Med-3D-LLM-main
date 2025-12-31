@@ -245,23 +245,78 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         Returns:
             Tuple of (loss_dict, status_dict)
         """
+        print(f"\n{'='*100}")
+        print(f"[DEBUG training_losses] 开始损失计算 - Step {self.step}")
+        print(f"{'='*100}")
+        
+        # 输入数据检查
+        print(f"[DEBUG training_losses] 输入数据形状:")
+        print(f"  sparse_sdf.shape: {sparse_sdf.shape}, dtype: {sparse_sdf.dtype}")
+        print(f"  sparse_index.shape: {sparse_index.shape}, dtype: {sparse_index.dtype}")
+        print(f"  batch_idx.shape: {batch_idx.shape}, dtype: {batch_idx.dtype}")
+        print(f"[DEBUG training_losses] 输入数据统计:")
+        print(f"  sparse_sdf - min: {sparse_sdf.min().item():.6f}, max: {sparse_sdf.max().item():.6f}, mean: {sparse_sdf.mean().item():.6f}")
+        print(f"  sparse_index - min: {sparse_index.min().item()}, max: {sparse_index.max().item()}")
+        print(f"  batch_idx - unique: {torch.unique(batch_idx).tolist()}")
+        
         # Construct sparse tensor input
         coords = torch.cat([batch_idx.unsqueeze(-1), sparse_index], dim=-1).int()
         x = sp.SparseTensor(sparse_sdf, coords)
+        print(f"[DEBUG training_losses] 构建SparseTensor: shape={x.shape}, feats.shape={x.feats.shape}")
         
         # Forward pass through VQVAE
         vqvae = self.training_models['vqvae']
+        print(f"[DEBUG training_losses] 调用VQVAE forward...")
+        print(f"[DEBUG training_losses] VQVAE训练模式: {vqvae.training}")
+        
+        # 检查模型参数是否正常
+        if hasattr(vqvae, 'module'):
+            vqvae_module = vqvae.module
+        else:
+            vqvae_module = vqvae
+        
+        # 检查encoder参数
+        encoder_requires_grad = any(p.requires_grad for p in vqvae_module.encoder.parameters())
+        decoder_requires_grad = any(p.requires_grad for p in vqvae_module.decoder.parameters())
+        vq_requires_grad = any(p.requires_grad for p in vqvae_module.vq.parameters())
+        
+        print(f"[DEBUG training_losses] 参数训练状态:")
+        print(f"  encoder requires_grad: {encoder_requires_grad}")
+        print(f"  decoder requires_grad: {decoder_requires_grad}")
+        print(f"  vq requires_grad: {vq_requires_grad}")
+        
+        # 检查VQ codebook权重
+        vq_embeddings = vqvae_module.vq.embeddings.weight
+        print(f"[DEBUG training_losses] VQ Codebook统计:")
+        print(f"  shape: {vq_embeddings.shape}")
+        print(f"  min: {vq_embeddings.min().item():.6f}, max: {vq_embeddings.max().item():.6f}")
+        print(f"  mean: {vq_embeddings.mean().item():.6f}, std: {vq_embeddings.std().item():.6f}")
+        print(f"  requires_grad: {vq_embeddings.requires_grad}")
+        
         outputs = vqvae(x)
+        print(f"[DEBUG training_losses] VQVAE forward完成")
         
         # Extract outputs from dictionary
         recon = outputs['reconst_x']
         vq_loss = outputs['vq_loss']
         commitment_loss = outputs['commitment_loss']
         
+        print(f"[DEBUG training_losses] VQVAE输出:")
+        print(f"  recon.shape: {recon.shape}, recon.feats.shape: {recon.feats.shape}")
+        print(f"  recon.feats - min: {recon.feats.min().item():.6f}, max: {recon.feats.max().item():.6f}, mean: {recon.feats.mean().item():.6f}")
+        print(f"  vq_loss: {vq_loss.item():.6f} (type: {type(vq_loss)})")
+        print(f"  commitment_loss: {commitment_loss.item():.6f} (type: {type(commitment_loss)})")
+        print(f"  vq_loss requires_grad: {vq_loss.requires_grad}")
+        print(f"  commitment_loss requires_grad: {commitment_loss.requires_grad}")
+        
         # Align reconstruction with input coordinates (ShapeLLM方法)
         # Decoder可能生成扩展体素，需要只对输入位置计算损失
         input_coords = x.coords  # [N_input, 4] (batch, x, y, z)
         output_coords = recon.coords  # [N_output, 4]
+        
+        print(f"[DEBUG training_losses] 坐标对齐:")
+        print(f"  input_coords.shape: {input_coords.shape}")
+        print(f"  output_coords.shape: {output_coords.shape}")
         
         # 构建坐标到索引的映射字典（更高效的方法）
         # 将输入坐标转换为字符串键
@@ -282,12 +337,21 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         if len(aligned_indices_output) == 0:
             raise RuntimeError("❌ 没有找到输入输出之间匹配的体素！这不应该发生。")
         
+        print(f"  对齐的体素数: {len(aligned_indices_output)} / {len(input_coords)} ({len(aligned_indices_output)/len(input_coords)*100:.2f}%)")
+        
         # 提取对齐的特征
         aligned_indices_output = torch.tensor(aligned_indices_output, device=recon.feats.device)
         aligned_indices_input = torch.tensor(aligned_indices_input, device=sparse_sdf.device)
         
         recon_aligned = recon.feats[aligned_indices_output]
         target_aligned = sparse_sdf[aligned_indices_input]
+        
+        print(f"[DEBUG training_losses] 对齐后的特征:")
+        print(f"  recon_aligned.shape: {recon_aligned.shape}")
+        print(f"  target_aligned.shape: {target_aligned.shape}")
+        print(f"  recon_aligned - min: {recon_aligned.min().item():.6f}, max: {recon_aligned.max().item():.6f}, mean: {recon_aligned.mean().item():.6f}")
+        print(f"  target_aligned - min: {target_aligned.min().item():.6f}, max: {target_aligned.max().item():.6f}, mean: {target_aligned.mean().item():.6f}")
+        print(f"  recon_aligned requires_grad: {recon_aligned.requires_grad}")
         
         # Compute reconstruction loss on aligned voxels
         if self.loss_type == 'mse':
@@ -301,8 +365,20 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         else:
             raise ValueError(f'Invalid loss type: {self.loss_type}')
         
+        print(f"[DEBUG training_losses] 损失计算 (loss_type={self.loss_type}):")
+        print(f"  recon_loss: {recon_loss.item():.6f}")
+        print(f"  recon_loss requires_grad: {recon_loss.requires_grad}")
+        print(f"  lambda_vq: {self.lambda_vq}")
+        print(f"  lambda_commitment: {self.lambda_commitment}")
+        
         # Total loss
         total_loss = recon_loss + self.lambda_vq * vq_loss + self.lambda_commitment * commitment_loss
+        
+        print(f"[DEBUG training_losses] 总损失:")
+        print(f"  total_loss: {total_loss.item():.6f}")
+        print(f"  total_loss requires_grad: {total_loss.requires_grad}")
+        print(f"  计算: {recon_loss.item():.6f} + {self.lambda_vq}*{vq_loss.item():.6f} + {self.lambda_commitment}*{commitment_loss.item():.6f}")
+        print(f"{'='*100}\n")
         
         # Loss dictionary
         terms = edict(

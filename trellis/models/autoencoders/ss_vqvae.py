@@ -24,7 +24,9 @@ class SparseVectorQuantizer(nn.Module):
         self.beta = beta
         
         self.embeddings = nn.Embedding(self.num_embeddings, self.embedding_dim)
-        self.embeddings.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
+        # self.embeddings.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
+        self.embeddings.weight.data.normal_(mean=0.0, std=1.0)  # 推荐
+    
 
     def forward(self, z: sp.SparseTensor, only_return_indices: bool = False):
         """
@@ -35,45 +37,35 @@ class SparseVectorQuantizer(nn.Module):
             如果 only_return_indices=True: 返回 indices 的 SparseTensor
             否则: 返回 (quantized, vq_loss, commitment_loss, encoding_indices)
         """
-        print(f"[DEBUG VQ.forward] Input z.shape: {z.shape}, z.feats.shape: {z.feats.shape}")
-        print(f"[DEBUG VQ.forward] z.feats min: {z.feats.min().item():.6f}, max: {z.feats.max().item():.6f}, mean: {z.feats.mean().item():.6f}")
-        print(f"[DEBUG VQ.forward] z.feats std: {z.feats.std().item():.6f}")
-        print(f"[DEBUG VQ.forward] Codebook weight min: {self.embeddings.weight.min().item():.6f}, max: {self.embeddings.weight.max().item():.6f}")
+        print(f"\n[DEBUG VQ] Input z.feats: shape={z.feats.shape}, min={z.feats.min().item():.6f}, max={z.feats.max().item():.6f}, mean={z.feats.mean().item():.6f}, std={z.feats.std().item():.6f}")
+        print(f"[DEBUG VQ] Codebook: min={self.embeddings.weight.min().item():.6f}, max={self.embeddings.weight.max().item():.6f}, mean={self.embeddings.weight.mean().item():.6f}, std={self.embeddings.weight.std().item():.6f}")
+        print(f"[DEBUG VQ] Codebook requires_grad: {self.embeddings.weight.requires_grad}")
         
         # z.feats: [N, embedding_dim]
         z_flatten = z.feats  # [N, embedding_dim]
         
         # 计算距离并找到最近的 codebook entry
-        print(f"[DEBUG VQ.forward] Computing distances...")
         distances = torch.cdist(z_flatten, self.embeddings.weight)  # [N, num_embeddings]
-        print(f"[DEBUG VQ.forward] distances.shape: {distances.shape}")
-        print(f"[DEBUG VQ.forward] distances min: {distances.min().item():.6f}, max: {distances.max().item():.6f}, mean: {distances.mean().item():.6f}")
-        
-        # 检查第一个样本的距离分布
-        if len(distances) > 0:
-            first_dists = distances[0]
-            print(f"[DEBUG VQ.forward] First sample distances - min: {first_dists.min().item():.6f}, max: {first_dists.max().item():.6f}")
-            print(f"[DEBUG VQ.forward] First sample top-5 closest indices: {torch.argsort(first_dists)[:5].tolist()}")
-            print(f"[DEBUG VQ.forward] First sample top-5 closest distances: {first_dists[torch.argsort(first_dists)[:5]].tolist()}")
+        print(f"[DEBUG VQ] Distances: min={distances.min().item():.6f}, max={distances.max().item():.6f}, mean={distances.mean().item():.6f}")
         
         encoding_indices = torch.argmin(distances, dim=1)  # [N]
-        print(f"[DEBUG VQ.forward] encoding_indices.shape: {encoding_indices.shape}")
-        print(f"[DEBUG VQ.forward] encoding_indices min: {encoding_indices.min().item()}, max: {encoding_indices.max().item()}")
-        print(f"[DEBUG VQ.forward] encoding_indices unique values: {len(torch.unique(encoding_indices))}")
-        print(f"[DEBUG VQ.forward] encoding_indices value counts (top 10): {torch.bincount(encoding_indices).sort(descending=True).values[:10].tolist()}")
+        print(f"[DEBUG VQ] Encoding indices: unique codes used={len(torch.unique(encoding_indices))}/{self.num_embeddings}")
         
         if only_return_indices:
             # 返回 indices 作为 SparseTensor，保持原始坐标
             result = z.replace(encoding_indices.unsqueeze(-1).float())
-            print(f"[DEBUG VQ.forward] Returning indices only, result.shape: {result.shape}, result.feats.shape: {result.feats.shape}")
             return result
         
         # 量化
         quantized_feats = self.embeddings(encoding_indices)  # [N, embedding_dim]
+        print(f"[DEBUG VQ] Quantized feats: min={quantized_feats.min().item():.6f}, max={quantized_feats.max().item():.6f}, mean={quantized_feats.mean().item():.6f}")
         
         # 计算损失
         commitment_loss = F.mse_loss(z_flatten, quantized_feats.detach())
         vq_loss = F.mse_loss(quantized_feats, z_flatten.detach())
+        
+        print(f"[DEBUG VQ] VQ Loss: {vq_loss.item():.6f}, Commitment Loss: {commitment_loss.item():.6f}")
+        print(f"[DEBUG VQ] VQ Loss requires_grad: {vq_loss.requires_grad}, Commitment Loss requires_grad: {commitment_loss.requires_grad}")
         
         # Straight-through estimator
         quantized_feats = z_flatten + (quantized_feats - z_flatten).detach()
@@ -81,6 +73,8 @@ class SparseVectorQuantizer(nn.Module):
         # 创建新的 SparseTensor
         quantized = z.replace(quantized_feats)
         encoding_indices_st = z.replace(encoding_indices.unsqueeze(-1).float())
+        
+        print(f"[DEBUG VQ] Output quantized feats: min={quantized.feats.min().item():.6f}, max={quantized.feats.max().item():.6f}, requires_grad={quantized.feats.requires_grad}\n")
         
         return quantized, vq_loss, commitment_loss, encoding_indices_st
 
@@ -216,22 +210,14 @@ class SparseSDFVQVAE(nn.Module):
         """
         训练时的完整前向传播
         """
-        # ===== DEBUG: 检查 forward 接收的 batch =====
-        print(f"\n[DEBUG forward] batch type: {type(batch)}")
-        print(f"[DEBUG forward] batch class: {batch.__class__.__name__}")
-        if isinstance(batch, dict):
-            print(f"[DEBUG forward] batch is dict, keys: {batch.keys()}")
-        elif hasattr(batch, 'feats'):
-            print(f"[DEBUG forward] batch is SparseTensor")
-            print(f"[DEBUG forward] batch.shape: {batch.shape}")
-            print(f"[DEBUG forward] batch.feats.shape: {batch.feats.shape}")
-            print(f"[DEBUG forward] batch.coords.shape: {batch.coords.shape}")
-        print("=" * 80)
-        # ===== DEBUG END =====
-        
         z, vq_loss, commitment_loss = self.encode(batch)
 
+        print(f"[DEBUG forward] Calling decoder...")
         reconst_x = self.decoder(z)
+        print(f"[DEBUG forward] Decoder output: shape={reconst_x.shape}, feats.shape={reconst_x.feats.shape}")
+        print(f"[DEBUG forward] Decoder output feats: min={reconst_x.feats.min().item():.6f}, max={reconst_x.feats.max().item():.6f}, mean={reconst_x.feats.mean().item():.6f}")
+        print(f"[DEBUG forward] Decoder output requires_grad: {reconst_x.feats.requires_grad}")
+        
         outputs = {
             'reconst_x': reconst_x, 
             'vq_loss': vq_loss,
@@ -251,94 +237,39 @@ class SparseSDFVQVAE(nn.Module):
             如果 only_return_indices=True: 返回 encoding_indices
             否则: 返回 (z, vq_loss, commitment_loss)
         """
-        # ===== DEBUG: 详细检查 batch 类型和内容 =====
-        print(f"\n[DEBUG encode] batch type: {type(batch)}")
-        print(f"[DEBUG encode] batch class name: {batch.__class__.__name__}")
-        
         # 判断 batch 的类型并处理
         if hasattr(batch, 'feats') and hasattr(batch, 'coords'):
             # batch 是 SparseTensor（训练时的情况）
-            print(f"[DEBUG encode] batch is SparseTensor (training mode)")
-            print(f"[DEBUG encode] batch.shape: {batch.shape}")
-            print(f"[DEBUG encode] batch.feats.shape: {batch.feats.shape}")
-            print(f"[DEBUG encode] batch.coords.shape: {batch.coords.shape}")
-            
-            # 直接使用 SparseTensor
             x = batch
-            
+            factor = None
         elif isinstance(batch, dict):
             # batch 是字典（推理时的情况）
-            print(f"[DEBUG encode] batch is dict (inference mode)")
-            print(f"[DEBUG encode] batch keys: {batch.keys()}")
-            
-            # 从字典中提取数据并构建 SparseTensor
             feat, xyz, batch_idx = batch['sparse_sdf'], batch['sparse_index'], batch['batch_idx']
-            print(f"[DEBUG encode] feat shape: {feat.shape}, dtype: {feat.dtype}")
-            print(f"[DEBUG encode] xyz shape: {xyz.shape}, dtype: {xyz.dtype}")
-            print(f"[DEBUG encode] batch_idx shape: {batch_idx.shape}, dtype: {batch_idx.dtype}")
             
             if feat.ndim == 1:
                 feat = feat.unsqueeze(-1)
-                print(f"[DEBUG encode] feat expanded to shape: {feat.shape}")
             
             coords = torch.cat([batch_idx.unsqueeze(-1), xyz], dim=-1).int()
-            print(f"[DEBUG encode] coords shape: {coords.shape}, dtype: {coords.dtype}")
-            
             x = sp.SparseTensor(feat, coords)
-            print(f"[DEBUG encode] Created SparseTensor from dict")
-            
+            factor = batch.get('factor', None)
         else:
-            print(f"[DEBUG encode] ERROR: Unknown batch type!")
-            print(f"[DEBUG encode] batch attributes: {dir(batch)}")
-            
-            # 打印调用栈
-            import traceback
-            print(f"[DEBUG encode] Call stack:")
-            for line in traceback.format_stack()[:-1]:
-                print(line.strip())
-            print("=" * 80)
-            
             raise TypeError(f"batch must be either SparseTensor or dict, got {type(batch)}")
         
-        print("=" * 80)
-        # ===== DEBUG END =====
+        print(f"[DEBUG encode] Input x.feats: shape={x.feats.shape}, min={x.feats.min().item():.6f}, max={x.feats.max().item():.6f}, mean={x.feats.mean().item():.6f}, std={x.feats.std().item():.6f}")
+        print(f"[DEBUG encode] Encoder training: {self.encoder.training}")
         
-        # 获取 factor 参数（如果有）
-        factor = None
-        if isinstance(batch, dict):
-            factor = batch.get('factor', None)
-        
-        print(f"[DEBUG encode] About to call encoder...")
-        print(f"[DEBUG encode] Input x.shape={x.shape}, x.feats.shape={x.feats.shape}, x.coords.shape={x.coords.shape}")
-        print(f"[DEBUG encode] Input x.feats min: {x.feats.min().item():.6f}, max: {x.feats.max().item():.6f}, mean: {x.feats.mean().item():.6f}")
-        print(f"[DEBUG encode] Input x.feats std: {x.feats.std().item():.6f}")
-        print(f"[DEBUG encode] Input x.coords min: {x.coords.min(0).values}, max: {x.coords.max(0).values}")
-        print(f"[DEBUG encode] Input x.dtype: {x.dtype}, x.feats.dtype: {x.feats.dtype}")
-        print(f"[DEBUG encode] Encoder training mode: {self.encoder.training}")
-        
-        print(f"[DEBUG encode] Calling encoder with factor={factor}")
         h = self.encoder(x, factor)
-        print(f"[DEBUG encode] Encoder output h.shape={h.shape}, h.feats.shape={h.feats.shape}")
-        print(f"[DEBUG encode] Encoder output h.coords min: {h.coords.min(0).values}, max: {h.coords.max(0).values}")
-        
-        # VQVAE: 直接使用encoder输出（ShapeLLM方法）
-        # encoder内部输出2*embed_dim，但在forward返回时分割并只返回mean（embed_dim）
-        # 这样保持与VAE架构兼容，便于加载预训练权重
-        print(f"[DEBUG encode] h.feats - shape: {h.feats.shape}, min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}, std: {h.feats.std().item():.6f}")
+        print(f"[DEBUG encode] Encoder output h.feats: shape={h.feats.shape}, min={h.feats.min().item():.6f}, max={h.feats.max().item():.6f}, mean={h.feats.mean().item():.6f}, std={h.feats.std().item():.6f}")
+        print(f"[DEBUG encode] h.feats requires_grad: {h.feats.requires_grad}")
         
         if only_return_indices:
             # 只返回量化索引（用于 Encode 方法）
-            print(f"[DEBUG encode] only_return_indices=True, calling vq...")
             encoding_indices = self.vq(h, only_return_indices=True)
-            print(f"[DEBUG encode] encoding_indices shape: {encoding_indices.shape}")
             return encoding_indices
         
         # 量化（替代 VAE 的采样）
-        print(f"[DEBUG encode] Calling vq for quantization...")
         quantized, vq_loss, commitment_loss, _ = self.vq(h)
-        print(f"[DEBUG encode] Quantization done")
-        print(f"[DEBUG encode] quantized shape: {quantized.shape}")
-        print(f"[DEBUG encode] vq_loss: {vq_loss.item()}, commitment_loss: {commitment_loss.item()}")
+        print(f"[DEBUG encode] Quantization results: vq_loss={vq_loss.item():.6f}, commitment_loss={commitment_loss.item():.6f}")
 
         return quantized, vq_loss, commitment_loss
     
@@ -350,21 +281,7 @@ class SparseSDFVQVAE(nn.Module):
         Returns:
             encoding_indices: SparseTensor，包含量化后的 indices
         """
-        # ===== DEBUG: 在 Encode 方法入口检查 batch =====
-        print(f"\n[DEBUG Encode] Entering Encode method")
-        print(f"[DEBUG Encode] batch type: {type(batch)}")
-        print(f"[DEBUG Encode] batch class: {batch.__class__.__name__}")
-        if isinstance(batch, dict):
-            print(f"[DEBUG Encode] batch is dict, keys: {batch.keys()}")
-        else:
-            print(f"[DEBUG Encode] batch is NOT dict!")
-        print("=" * 80)
-        # ===== DEBUG END =====
-        
         encoding_indices = self.encode(batch, only_return_indices=True)
-        print(f"DEBUG Encode: Indices max: {encoding_indices.feats.max()}, min: {encoding_indices.feats.min()}")
-        # 确保 max 值没有超过你的 codebook_size
-
         return encoding_indices
     
     def Decode(self, encoding_indices: sp.SparseTensor):
@@ -375,41 +292,20 @@ class SparseSDFVQVAE(nn.Module):
         Returns:
             recon: 重建的 SparseTensor
         """
-        print(f"[DEBUG Decode] encoding_indices type: {type(encoding_indices)}")
-        print(f"[DEBUG Decode] encoding_indices.shape: {encoding_indices.shape}")
-        print(f"[DEBUG Decode] encoding_indices.feats.shape: {encoding_indices.feats.shape}")
-        print(f"[DEBUG Decode] encoding_indices.coords.shape: {encoding_indices.coords.shape}")
-        print(f"[DEBUG Decode] encoding_indices.feats dtype: {encoding_indices.feats.dtype}")
-        print(f"[DEBUG Decode] encoding_indices.coords dtype: {encoding_indices.coords.dtype}")
-        
         # 从 indices 获取 embedding
         indices = encoding_indices.feats.long().squeeze(-1)  # [N]
-        print(f"[DEBUG Decode] After squeeze, indices.shape: {indices.shape}")
-        print(f"[DEBUG Decode] indices min: {indices.min().item()}, max: {indices.max().item()}, unique count: {len(torch.unique(indices))}")
-        print(f"[DEBUG Decode] First 10 indices: {indices[:10].tolist() if len(indices) >= 10 else indices.tolist()}")
-        print(f"[DEBUG Decode] VQ codebook size: {self.vq.embeddings.num_embeddings}")
-        print(f"[DEBUG Decode] VQ embedding dim: {self.vq.embeddings.embedding_dim}")
         
         # 检查索引是否在有效范围内
         if indices.max() >= self.vq.embeddings.num_embeddings:
             print(f"[ERROR Decode] Index out of range! max index: {indices.max().item()}, codebook size: {self.vq.embeddings.num_embeddings}")
         
         quantized_feats = self.vq.embeddings(indices)  # [N, latent_channels]
-        print(f"[DEBUG Decode] quantized_feats.shape: {quantized_feats.shape}")
-        print(f"[DEBUG Decode] quantized_feats min: {quantized_feats.min().item():.4f}, max: {quantized_feats.max().item():.4f}, mean: {quantized_feats.mean().item():.4f}")
         
         # 创建 quantized SparseTensor
         quantized = encoding_indices.replace(quantized_feats)
-        print(f"[DEBUG Decode] quantized SparseTensor created")
-        print(f"[DEBUG Decode] quantized.shape: {quantized.shape}")
-        print(f"[DEBUG Decode] quantized.feats.shape: {quantized.feats.shape}")
-        print(f"[DEBUG Decode] quantized.coords.shape: {quantized.coords.shape}")
-        print(f"[DEBUG Decode] quantized.coords min: {quantized.coords.min(0).values}, max: {quantized.coords.max(0).values}")
         
         # 解码
-        print(f"[DEBUG Decode] Calling decoder...")
         recon = self.decoder(quantized)
-        print(f"[DEBUG Decode] Decoder returned successfully")
         return recon
 
     def decode_mesh(self,
