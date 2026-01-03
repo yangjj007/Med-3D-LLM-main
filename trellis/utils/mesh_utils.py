@@ -7,6 +7,7 @@ import torch
 import numpy as np
 import trimesh
 from typing import Dict, Union, Tuple
+from skimage import measure
 
 
 def normalize_mesh(mesh: trimesh.Trimesh, scale: float = 0.95) -> trimesh.Trimesh:
@@ -123,18 +124,26 @@ def mesh2sparse_sdf(
 
 def dense_voxel_to_sparse_sdf(
     voxel_grid: np.ndarray,
-    resolution: int = 512
+    resolution: int = 512,
+    threshold_factor: float = 4.0,
+    marching_cubes_level: float = 0.5
 ) -> Dict[str, np.ndarray]:
     """
     Convert dense 3D voxel array to sparse SDF representation.
     
+    This function uses Marching Cubes to extract mesh from voxel grid,
+    then computes UDF to generate sparse SDF representation with only
+    points near the surface.
+    
     Args:
         voxel_grid: Dense 3D binary voxel array [H, W, D]
         resolution: Target resolution (will resize if different)
+        threshold_factor: UDF threshold factor for sparse extraction (default: 4.0)
+        marching_cubes_level: Threshold for marching cubes (default: 0.5 for binary voxels)
     
     Returns:
         Dictionary containing:
-            - sparse_sdf: SDF values [N, 1] (binary: 0 or 1)
+            - sparse_sdf: SDF values [N, 1] with actual distance information
             - sparse_index: 3D coordinates [N, 3]
             - resolution: Grid resolution
     """
@@ -155,13 +164,65 @@ def dense_voxel_to_sparse_sdf(
         )
         voxel_grid = (voxel_grid > 0.5).astype(np.float32)
     
-    # Extract sparse coordinates
-    sparse_index = np.argwhere(voxel_grid > 0.5).astype(np.int32)  # [N, 3]
-    sparse_sdf = np.ones((len(sparse_index), 1), dtype=np.float32)
+    # Check if CUDA is available
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for dense_voxel_to_sparse_sdf. Please use a GPU.")
     
+    # Step 1: Voxel → Mesh using Marching Cubes
+    try:
+        vertices, faces, _, _ = measure.marching_cubes(
+            voxel_grid, 
+            level=marching_cubes_level, 
+            method="lewiner"
+        )
+    except Exception as e:
+        raise RuntimeError(f"Marching Cubes failed: {str(e)}. The voxel grid may be empty or invalid.")
+    
+    # Check if mesh is valid
+    if len(vertices) == 0 or len(faces) == 0:
+        raise ValueError("Marching Cubes produced empty mesh. The voxel grid may contain no occupied voxels.")
+    
+    # Step 2: Normalize vertices to [-0.5, 0.5] range
+    vertices = vertices / resolution - 0.5
+    
+    # Step 3: Convert to torch tensors on CUDA
+    vertices_cuda = torch.Tensor(vertices).float().cuda() * 0.5
+    faces_cuda = torch.Tensor(faces).int().cuda()
+    
+    # Step 4: Mesh → SDF using compute_valid_udf
+    udf = torch.zeros(resolution**3, device='cuda').int() + 10000000
+    
+    try:
+        import udf_ext
+        udf_ext.compute_valid_udf(
+            vertices_cuda, 
+            faces_cuda, 
+            udf, 
+            faces_cuda.shape[0], 
+            resolution, 
+            threshold_factor
+        )
+    except ImportError:
+        raise ImportError(
+            "udf_ext CUDA extension not found. "
+            "Please compile in the third_party/voxelize directory by running: "
+            "cd third_party/voxelize && pip install -e . --no-build-isolation"
+        )
+    
+    # Convert UDF to float and reshape
+    sdf = udf.float() / 10000000.0
+    sdf = sdf.reshape(resolution, resolution, resolution)
+    
+    # Step 5: Extract sparse representation (only points near surface)
+    threshold = threshold_factor / resolution
+    sparse_mask = sdf < threshold
+    sparse_indices = sparse_mask.nonzero(as_tuple=False)  # [N, 3]
+    sparse_sdf_values = sdf[sparse_mask].unsqueeze(-1)  # [N, 1]
+    
+    # Step 6: Convert to numpy and return
     result = {
-        'sparse_sdf': sparse_sdf,
-        'sparse_index': sparse_index,
+        'sparse_sdf': sparse_sdf_values.cpu().numpy().astype(np.float32),
+        'sparse_index': sparse_indices.cpu().numpy().astype(np.int32),
         'resolution': resolution,
     }
     
