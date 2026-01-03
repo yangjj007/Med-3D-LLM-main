@@ -131,7 +131,7 @@ python train.py \
     --config configs/vae/ct_vqvae_stage1.json \
     --output_dir outputs/ct_vqvae_lung_stage1 \
     --data_dir ./processed_dataset \
-    --num_gpus 2 > train.log 2>&1
+    --num_gpus 1 > stage1_train.log 2>&1
 ```
 
 训练日志示例：
@@ -155,13 +155,14 @@ Step 2000: loss=0.198 recon=0.165 vq=0.023 commitment=0.010
 ### 步骤4：阶段2训练 - 联合微调
 
 ```bash
+export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/ct_vqvae_stage2.json \
     --output_dir outputs/ct_vqvae_lung_stage2 \
     --load_dir outputs/ct_vqvae_lung_stage1 \
     --ckpt latest \
-    --data_dir /path/to/processed_dataset \
-    --num_gpus 1
+    --data_dir ./processed_dataset \
+    --num_gpus 1 > stage2_train.log 2>&1
 ```
 
 训练日志示例：
