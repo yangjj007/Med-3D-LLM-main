@@ -47,7 +47,7 @@ WINDOW_CONFIGS = {
 }
 
 # 空气的HU值（用于填充）
-AIR_HU_VALUE = -1000
+AIR_HU_VALUE = -2000
 
 # 默认目标分辨率
 DEFAULT_RESOLUTION = 512

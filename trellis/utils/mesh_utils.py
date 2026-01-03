@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Mesh processing utilities for sparse SDF generation.
-Adapted from Direct3D-S2 for integration with Trellis framework.
+Mesh utilities for sparse SDF generation from Direct3D.
 """
 
 import torch
@@ -62,7 +61,7 @@ def compute_valid_udf(
     except ImportError:
         raise ImportError(
             "udf_ext CUDA extension not found. "
-            "Please compile in the third_party/voxelize directory by runing: pip install ./third_party/voxelize/"
+            "Please compile in the third_party/voxelize directory by runing: cd third_party/voxelize && pip install -e . --no-build-isolation"
         )
     
     udf = torch.zeros(dim**3, device=vertices.device).int() + 10000000
@@ -169,7 +168,7 @@ def dense_voxel_to_sparse_sdf(
     return result
 
 
-def mesh2latent_index(
+def mesh2index(
     mesh: trimesh.Trimesh,
     size: int = 1024,
     factor: int = 8
@@ -198,3 +197,6 @@ def mesh2latent_index(
     
     return latent_index
 
+
+# Alias for backward compatibility
+mesh2latent_index = mesh2index

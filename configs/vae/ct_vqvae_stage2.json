@@ -44,7 +44,6 @@
             "batch_size_per_gpu": 1,
             "batch_split": 1,
             "disable_snapshot": true,
-            "chunk_size": 4,
             "optimizer": {
                 "name": "AdamW",
                 "args": {
