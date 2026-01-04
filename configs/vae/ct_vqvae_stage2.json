@@ -18,7 +18,7 @@
                 "use_checkpoint": true,
                 "qk_rms_norm": false,
                 "representation_config": null,
-                "chunk_size": 4
+                "chunk_size": 1
             }
         }
     },
