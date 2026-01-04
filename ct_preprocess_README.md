@@ -120,8 +120,8 @@ all_datasets/
 
 ```bash
 bash scripts/prepare_ct_recursive.sh \
-    /path/to/all_datasets \
-    ./processed_all \
+    ./med_dataset \
+    ./processed_dataset \
     ./organ_labels.json \
     8 \
     5
@@ -160,37 +160,10 @@ python dataset_toolkits/process_m3d_seg_format.py \
     --num_workers 8
 ```
 
-#### 方法4：使用Python API（高级）
+### 4. 预计算SDF
 
-```python
-# NIfTI格式
-from dataset_toolkits.process_medical_ct import process_dataset
-metadata = process_dataset(
-    data_root='/path/to/nifti',
-    output_dir='./output',
-    organ_mapping_file='./organ_labels.json',
-    num_workers=8
-)
 
-# M3D-Seg格式
-from dataset_toolkits.process_m3d_seg_format import process_m3d_seg_dataset
-metadata = process_m3d_seg_dataset(
-    dataset_root='/path/to/m3d_dataset',
-    output_dir='./output',
-    num_workers=8
-)
-
-# 递归处理
-from dataset_toolkits.process_ct_recursive import process_recursive
-process_recursive(
-    root_dir='/path/to/all_datasets',
-    output_base_dir='./processed_all',
-    num_workers=8,
-    max_depth=5
-)
-```
-
-### 4. 输出结果
+### 5. 输出结果
 
 处理完成后，输出目录结构如下：
 

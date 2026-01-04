@@ -13,8 +13,15 @@
 **使用方法：**
 
 ```bash
+# 默认处理所有窗口类型
 python scripts/precompute_ct_window_sdf.py \
-    --data_root /path/to/your/processed_ct \
+    --data_root ./processed_dataset \
+    --resolution 512 \
+    --max_workers 4
+
+# 或指定单个窗口类型
+python scripts/precompute_ct_window_sdf.py \
+    --data_root ./processed_dataset \
     --window_type lung \
     --resolution 512 \
     --max_workers 4
@@ -22,7 +29,7 @@ python scripts/precompute_ct_window_sdf.py \
 
 **参数说明：**
 - `--data_root`: 数据根目录（包含processed子目录）
-- `--window_type`: 窗口类型（lung, bone, soft_tissue, brain）
+- `--window_type`: 窗口类型（lung, bone, soft_tissue, brain, all），**默认all（处理所有类型）**
 - `--resolution`: 目标分辨率（默认512）
 - `--threshold_factor`: UDF阈值因子（默认4.0）
 - `--max_workers`: 并行处理的worker数量（默认4）
@@ -87,7 +94,13 @@ python scripts/test_sdf_loading.py \
 在训练之前，必须先运行预计算脚本：
 
 ```bash
-# 对lung窗口数据预计算SDF
+# 默认对所有窗口类型预计算SDF（推荐）
+python scripts/precompute_ct_window_sdf.py \
+    --data_root /path/to/your/processed_ct \
+    --resolution 512 \
+    --max_workers 4
+
+# 或只对特定窗口类型（如lung）预计算
 python scripts/precompute_ct_window_sdf.py \
     --data_root /path/to/your/processed_ct \
     --window_type lung \
@@ -175,7 +188,17 @@ cd third_party/voxelize
 pip install -e . --no-build-isolation
 ```
 
-### 问题4：Marching Cubes失败
+### 问题4：CUDA多进程错误
+
+**错误信息：** `Cannot re-initialize CUDA in forked subprocess`
+
+**原因：** Windows系统下multiprocessing默认使用fork方式，与CUDA不兼容
+
+**解决：** 已在脚本中自动修复，使用spawn启动方式。如果仍有问题，可以尝试：
+- 使用 `--max_workers 1` 单进程模式（较慢但稳定）
+- 确保在主进程中没有提前初始化CUDA
+
+### 问题5：Marching Cubes失败
 
 **原因：** 窗口数据太稀疏或全为空
 

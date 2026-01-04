@@ -10,7 +10,16 @@ import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 import torch
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# 设置multiprocessing启动方法为spawn，避免CUDA fork问题
+# 必须在主进程开始时设置
+try:
+    multiprocessing.set_start_method('spawn')
+except RuntimeError:
+    # 如果已经设置过，忽略错误
+    pass
 
 # 添加项目路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -96,9 +105,8 @@ def main():
     parser = argparse.ArgumentParser(description='预计算CT窗口数据的SDF表示')
     parser.add_argument('--data_root', type=str, required=True,
                         help='数据根目录（包含processed目录）')
-    parser.add_argument('--window_type', type=str, default='lung',
-                        choices=list(WINDOW_CONFIGS.keys()),
-                        help='窗口类型')
+    parser.add_argument('--window_type', type=str, default='all',
+                        help='窗口类型（lung, bone, soft_tissue, brain, all）')
     parser.add_argument('--resolution', type=int, default=512,
                         help='目标分辨率')
     parser.add_argument('--threshold_factor', type=float, default=4.0,
@@ -110,14 +118,44 @@ def main():
     
     args = parser.parse_args()
     
+    # 检查window_type是否有效
+    valid_types = list(WINDOW_CONFIGS.keys()) + ['all']
+    if args.window_type not in valid_types:
+        print(f"❌ 错误: 无效的window_type '{args.window_type}'")
+        print(f"可选值: {', '.join(valid_types)}")
+        return
+    
+    # 如果是'all'，处理所有窗口类型
+    if args.window_type == 'all':
+        window_types = list(WINDOW_CONFIGS.keys())
+        print(f"\n{'='*80}")
+        print(f"将处理所有窗口类型: {', '.join(window_types)}")
+        print(f"{'='*80}\n")
+        
+        for window_type in window_types:
+            print(f"\n{'='*80}")
+            print(f"开始处理窗口类型: {window_type}")
+            print(f"{'='*80}\n")
+            process_window_type(args.data_root, window_type, args.resolution, 
+                              args.threshold_factor, args.max_workers, args.force_recompute)
+        return
+    
+    # 处理单个窗口类型
+    process_window_type(args.data_root, args.window_type, args.resolution,
+                       args.threshold_factor, args.max_workers, args.force_recompute)
+
+
+def process_window_type(data_root, window_type, resolution, threshold_factor, max_workers, force_recompute):
+    """处理单个窗口类型的SDF预计算"""
+    
     print(f"\n{'='*80}")
     print(f"CT窗口SDF预计算")
     print(f"{'='*80}")
-    print(f"数据根目录: {args.data_root}")
-    print(f"窗口类型: {args.window_type}")
-    print(f"分辨率: {args.resolution}")
-    print(f"阈值因子: {args.threshold_factor}")
-    print(f"并行Worker: {args.max_workers}")
+    print(f"数据根目录: {data_root}")
+    print(f"窗口类型: {window_type}")
+    print(f"分辨率: {resolution}")
+    print(f"阈值因子: {threshold_factor}")
+    print(f"并行Worker: {max_workers}")
     print(f"{'='*80}\n")
     
     # 检查CUDA是否可用
@@ -126,7 +164,7 @@ def main():
         return
     
     # 查找所有processed目录
-    processed_dir = os.path.join(args.data_root, 'processed')
+    processed_dir = os.path.join(data_root, 'processed')
     if not os.path.exists(processed_dir):
         print(f"❌ 错误: processed目录不存在: {processed_dir}")
         return
@@ -141,8 +179,8 @@ def main():
     print(f"找到 {len(case_dirs)} 个case目录\n")
     
     # 过滤已经处理过的（如果不强制重新计算）
-    if not args.force_recompute:
-        window_filename = get_window_filename(args.window_type)
+    if not force_recompute:
+        window_filename = get_window_filename(window_type)
         to_process = []
         for case_dir in case_dirs:
             npz_path = os.path.join(
@@ -164,26 +202,26 @@ def main():
     # 并行处理
     results = []
     
-    if args.max_workers == 1:
+    if max_workers == 1:
         # 单进程模式（方便调试）
         for case_dir in tqdm(case_dirs, desc='处理进度'):
             result = process_single_case(
                 case_dir, 
-                args.window_type, 
-                args.resolution, 
-                args.threshold_factor
+                window_type, 
+                resolution, 
+                threshold_factor
             )
             results.append(result)
     else:
         # 多进程模式
-        with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
                     process_single_case,
                     case_dir,
-                    args.window_type,
-                    args.resolution,
-                    args.threshold_factor
+                    window_type,
+                    resolution,
+                    threshold_factor
                 ): case_dir
                 for case_dir in case_dirs
             }
@@ -218,8 +256,8 @@ def main():
     # 保存结果日志
     results_df = pd.DataFrame(results)
     log_path = os.path.join(
-        args.data_root, 
-        f'sdf_precompute_{args.window_type}_log.csv'
+        data_root, 
+        f'sdf_precompute_{window_type}_log.csv'
     )
     results_df.to_csv(log_path, index=False)
     print(f"结果日志已保存: {log_path}")
