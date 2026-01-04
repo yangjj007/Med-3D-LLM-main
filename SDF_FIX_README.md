@@ -37,6 +37,7 @@ python scripts/precompute_ct_window_sdf.py \
 
 **输出：**
 - 将 `windows/*.npy` 文件转换为 `windows/*.npz` 文件
+- 当使用 `--window_type all` 时，**也会处理 `organs/*/` 目录下的所有窗口文件**
 - 生成处理日志CSV文件
 
 ### 2. 修改数据集加载逻辑 ✅
@@ -74,7 +75,7 @@ python scripts/precompute_ct_window_sdf.py \
 
 ```bash
 python scripts/test_sdf_loading.py \
-    --data_root /path/to/your/processed_ct \
+    --data_root ./processed_dataset/0000 \
     --window_type lung \
     --num_samples 5
 ```
@@ -94,15 +95,15 @@ python scripts/test_sdf_loading.py \
 在训练之前，必须先运行预计算脚本：
 
 ```bash
-# 默认对所有窗口类型预计算SDF（推荐）
+# 推荐：默认对所有窗口类型预计算SDF（包括organs目录）
 python scripts/precompute_ct_window_sdf.py \
-    --data_root /path/to/your/processed_ct \
+    --data_root ./processed_dataset/0000 \
     --resolution 512 \
     --max_workers 4
 
-# 或只对特定窗口类型（如lung）预计算
+# 或只对特定窗口类型（如lung）预计算（不包括organs）
 python scripts/precompute_ct_window_sdf.py \
-    --data_root /path/to/your/processed_ct \
+    --data_root ./processed_dataset/0000 \
     --window_type lung \
     --resolution 512 \
     --max_workers 4
@@ -113,6 +114,7 @@ python scripts/precompute_ct_window_sdf.py \
 - 需要安装 `udf_ext` CUDA扩展
 - 处理时间取决于数据量和GPU性能
 - 会在原有 `.npy` 文件旁边生成 `.npz` 文件
+- **使用 `--window_type all` 时会同时处理 `windows/` 和 `organs/` 目录下的所有窗口文件**
 
 ### 步骤2：测试SDF加载（推荐）
 
@@ -235,13 +237,27 @@ graph LR
 - 形状：`[512, 512, 512]`
 - 类型：`float32`
 - 值：0.0 或 1.0（二值化）
+- 位置：`windows/` 或 `organs/器官名/` 目录
 
 **输出（.npz）：**
 - `sparse_sdf`: `[N, 1]` - 距离值（0 到 ~0.008）
 - `sparse_index`: `[N, 3]` - 3D坐标
 - `resolution`: `512`
+- 位置：与输入.npy文件在同一目录
 
 其中N是表面附近的点数（通常是几万到几十万）。
+
+### 器官窗口处理
+
+当使用 `--window_type all` 时：
+- 处理 `case_xxx/windows/*.npy` → `case_xxx/windows/*.npz`（全局窗口）
+- 处理 `case_xxx/organs/肝脏/*.npy` → `case_xxx/organs/肝脏/*.npz`（器官特定窗口）
+- 处理 `case_xxx/organs/肺/*.npy` → `case_xxx/organs/肺/*.npz`
+- 等等...
+
+当使用特定窗口类型时（如 `--window_type lung`）：
+- 仅处理 `case_xxx/windows/lung_*.npy`（全局窗口）
+- 不处理organs目录
 
 ## 相关文件
 

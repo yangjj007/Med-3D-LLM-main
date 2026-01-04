@@ -162,6 +162,35 @@ python dataset_toolkits/process_m3d_seg_format.py \
 
 ### 4. 预计算SDF
 
+#### 将二值化窗口数据转换为真正的SDF表示
+
+```bash
+python scripts/precompute_ct_window_sdf.py \
+    --data_root ./processed_dataset/0000 \
+    --resolution 512 \
+    --max_workers 4
+```
+
+**参数说明：**
+- `--data_root`: 数据根目录（包含processed子目录）
+- `--window_type`: 窗口类型（lung, bone, soft_tissue, brain, all），**默认all（处理所有类型）**
+- `--resolution`: 目标分辨率（默认512）
+- `--threshold_factor`: UDF阈值因子（默认4.0）
+- `--max_workers`: 并行处理的worker数量（默认4）
+- `--force_recompute`: 强制重新计算已存在的SDF文件
+
+**输出：**
+- 将 `windows/*.npy` 文件转换为 `windows/*.npz` 文件
+- 生成处理日志CSV文件
+
+#### 测试SDF加载（可选）
+
+```bash
+python scripts/test_sdf_loading.py \
+    --data_root ./processed_dataset/0000 \
+    --window_type lung \
+    --num_samples 5
+```
 
 ### 5. 输出结果
 
@@ -174,17 +203,22 @@ processed_ct/
 └── processed/
     ├── case_001/
     │   ├── ct_original_512.npy    # 原始CT（适配到512³）
-    │   ├── ct_normalized_512.npy  # 标准化后的CT
-    │   ├── windows/               # 全局窗口二值化结果
+    │   ├── windows/               # 全局窗口二值化和sdf化结果
     │   │   ├── lung_w1500_l-600.npy
     │   │   ├── bone_w1500_l300.npy
     │   │   ├── soft_tissue_w400_l50.npy
     │   │   └── brain_w80_l35.npy
-    │   ├── organs/                # 器官特定窗口结果
+    │   │   ├── lung_w1500_l-600.npz
+    │   │   ├── bone_w1500_l300.npz
+    │   │   ├── soft_tissue_w400_l50.npz
+    │   │   └── brain_w80_l35.npz
+    │   ├── organs/                # 器官特定窗口结果（使用--window_type all自动处理）
     │   │   ├── liver/
-    │   │   │   └── soft_tissue_w400_l50.npy
+    │   │   │   ├── soft_tissue_w400_l50.npy
+    │   │   │   └── soft_tissue_w400_l50.npz
     │   │   ├── lung/
-    │   │   │   └── lung_w1500_l-600.npy
+    │   │   │   ├── lung_w1500_l-600.npy
+    │   │   │   └── lung_w1500_l-600.npz
     │   │   └── ...
     │   ├── masks/                 # 原始分割掩码
     │   │   └── segmentation_masks.npz

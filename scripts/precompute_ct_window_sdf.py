@@ -23,12 +23,12 @@ except RuntimeError:
 
 # 添加项目路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from trellis.utils.mesh_utils import dense_voxel_to_sparse_sdf
+# 仅导入配置，dense_voxel_to_sparse_sdf在子进程中导入避免CUDA初始化
 from dataset_toolkits.ct_preprocessing.config import WINDOW_CONFIGS
 from dataset_toolkits.ct_preprocessing.window_processor import get_window_filename
 
 
-def process_single_case(case_dir, window_type, resolution=512, threshold_factor=4.0):
+def process_single_case(case_dir, window_type, resolution=512, threshold_factor=4.0, organ_subdir=None):
     """
     处理单个case的窗口数据
     
@@ -37,6 +37,7 @@ def process_single_case(case_dir, window_type, resolution=512, threshold_factor=
         window_type: 窗口类型
         resolution: 目标分辨率
         threshold_factor: UDF阈值因子
+        organ_subdir: 器官子目录（如'liver', 'lung'等），None表示处理全局窗口
     
     Returns:
         处理结果字典
@@ -44,25 +45,42 @@ def process_single_case(case_dir, window_type, resolution=512, threshold_factor=
     case_id = os.path.basename(case_dir)
     
     try:
+        # 延迟导入，避免在主进程中初始化CUDA
+        import sys
+        import os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from trellis.utils.mesh_utils import dense_voxel_to_sparse_sdf
+        from dataset_toolkits.ct_preprocessing.window_processor import get_window_filename
+        
         # 获取窗口文件名
         window_filename = get_window_filename(window_type)
-        window_path = os.path.join(case_dir, 'windows', window_filename)
+        
+        # 根据是否指定器官子目录，确定窗口文件路径
+        if organ_subdir:
+            window_path = os.path.join(case_dir, 'organs', organ_subdir, window_filename)
+            location = f'organs/{organ_subdir}'
+        else:
+            window_path = os.path.join(case_dir, 'windows', window_filename)
+            location = 'windows'
         
         # 检查文件是否存在
         if not os.path.exists(window_path):
             return {
                 'case_id': case_id,
+                'location': location,
                 'success': False,
                 'error': f'Window file not found: {window_path}'
             }
         
         # 加载二值化窗口数据
+        import numpy as np
         window_data = np.load(window_path)
         
         # 检查数据是否为空
         if window_data.sum() < 100:
             return {
                 'case_id': case_id,
+                'location': location,
                 'success': False,
                 'error': f'Window data too sparse (< 100 voxels)'
             }
@@ -81,11 +99,12 @@ def process_single_case(case_dir, window_type, resolution=512, threshold_factor=
             output_path,
             sparse_sdf=sdf_result['sparse_sdf'],
             sparse_index=sdf_result['sparse_index'],
-            resolution=sdf_result['resolution']
+            resolution=np.array(sdf_result['resolution'])
         )
         
         return {
             'case_id': case_id,
+            'location': location,
             'success': True,
             'num_points': len(sdf_result['sparse_index']),
             'output_path': output_path
@@ -95,6 +114,7 @@ def process_single_case(case_dir, window_type, resolution=512, threshold_factor=
         import traceback
         return {
             'case_id': case_id,
+            'location': organ_subdir if organ_subdir else 'windows',
             'success': False,
             'error': f'{type(e).__name__}: {str(e)}',
             'traceback': traceback.format_exc()
@@ -125,11 +145,12 @@ def main():
         print(f"可选值: {', '.join(valid_types)}")
         return
     
-    # 如果是'all'，处理所有窗口类型
+    # 如果是'all'，处理所有窗口类型（包括organs）
     if args.window_type == 'all':
         window_types = list(WINDOW_CONFIGS.keys())
         print(f"\n{'='*80}")
         print(f"将处理所有窗口类型: {', '.join(window_types)}")
+        print(f"包含organs目录下的器官特定窗口")
         print(f"{'='*80}\n")
         
         for window_type in window_types:
@@ -137,16 +158,28 @@ def main():
             print(f"开始处理窗口类型: {window_type}")
             print(f"{'='*80}\n")
             process_window_type(args.data_root, window_type, args.resolution, 
-                              args.threshold_factor, args.max_workers, args.force_recompute)
+                              args.threshold_factor, args.max_workers, args.force_recompute,
+                              include_organs=True)  # all模式下包含organs
         return
     
-    # 处理单个窗口类型
+    # 处理单个窗口类型（不包含organs）
     process_window_type(args.data_root, args.window_type, args.resolution,
-                       args.threshold_factor, args.max_workers, args.force_recompute)
+                       args.threshold_factor, args.max_workers, args.force_recompute,
+                       include_organs=False)
 
 
-def process_window_type(data_root, window_type, resolution, threshold_factor, max_workers, force_recompute):
-    """处理单个窗口类型的SDF预计算"""
+def process_window_type(data_root, window_type, resolution, threshold_factor, max_workers, force_recompute, include_organs=False):
+    """处理单个窗口类型的SDF预计算
+    
+    Args:
+        data_root: 数据根目录
+        window_type: 窗口类型
+        resolution: 分辨率
+        threshold_factor: 阈值因子
+        max_workers: worker数量
+        force_recompute: 是否强制重新计算
+        include_organs: 是否包含organs目录下的窗口
+    """
     
     print(f"\n{'='*80}")
     print(f"CT窗口SDF预计算")
@@ -156,6 +189,7 @@ def process_window_type(data_root, window_type, resolution, threshold_factor, ma
     print(f"分辨率: {resolution}")
     print(f"阈值因子: {threshold_factor}")
     print(f"并行Worker: {max_workers}")
+    print(f"包含器官窗口: {'是' if include_organs else '否'}")
     print(f"{'='*80}\n")
     
     # 检查CUDA是否可用
@@ -176,27 +210,47 @@ def process_window_type(data_root, window_type, resolution, threshold_factor, ma
         if os.path.isdir(os.path.join(processed_dir, d))
     ]
     
-    print(f"找到 {len(case_dirs)} 个case目录\n")
+    print(f"找到 {len(case_dirs)} 个case目录")
     
-    # 过滤已经处理过的（如果不强制重新计算）
-    if not force_recompute:
-        window_filename = get_window_filename(window_type)
-        to_process = []
-        for case_dir in case_dirs:
-            npz_path = os.path.join(
-                case_dir, 'windows', 
-                window_filename.replace('.npy', '.npz')
-            )
-            if not os.path.exists(npz_path):
-                to_process.append(case_dir)
+    # 构建任务列表 (case_dir, organ_subdir)
+    # organ_subdir=None 表示全局窗口，否则为器官特定窗口
+    tasks = []
+    window_filename = get_window_filename(window_type)
+    
+    for case_dir in case_dirs:
+        # 1. 添加全局窗口任务
+        global_window_path = os.path.join(case_dir, 'windows', window_filename)
+        global_npz_path = global_window_path.replace('.npy', '.npz')
         
-        print(f"跳过 {len(case_dirs) - len(to_process)} 个已处理的case")
-        case_dirs = to_process
+        if os.path.exists(global_window_path):
+            if force_recompute or not os.path.exists(global_npz_path):
+                tasks.append((case_dir, None))  # None表示全局窗口
+        
+        # 2. 添加器官特定窗口任务（如果启用）
+        if include_organs:
+            organs_dir = os.path.join(case_dir, 'organs')
+            if os.path.exists(organs_dir):
+                # 遍历所有器官子目录
+                for organ_name in os.listdir(organs_dir):
+                    organ_path = os.path.join(organs_dir, organ_name)
+                    if os.path.isdir(organ_path):
+                        organ_window_path = os.path.join(organ_path, window_filename)
+                        organ_npz_path = organ_window_path.replace('.npy', '.npz')
+                        
+                        if os.path.exists(organ_window_path):
+                            if force_recompute or not os.path.exists(organ_npz_path):
+                                tasks.append((case_dir, organ_name))
     
-    print(f"需要处理 {len(case_dirs)} 个case\n")
+    print(f"共收集到 {len(tasks)} 个待处理任务")
+    if include_organs:
+        global_tasks = sum(1 for _, organ in tasks if organ is None)
+        organ_tasks = sum(1 for _, organ in tasks if organ is not None)
+        print(f"  - 全局窗口: {global_tasks}")
+        print(f"  - 器官窗口: {organ_tasks}")
+    print()
     
-    if len(case_dirs) == 0:
-        print("✅ 所有case已处理完成！")
+    if len(tasks) == 0:
+        print("✅ 所有任务已处理完成！")
         return
     
     # 并行处理
@@ -204,12 +258,13 @@ def process_window_type(data_root, window_type, resolution, threshold_factor, ma
     
     if max_workers == 1:
         # 单进程模式（方便调试）
-        for case_dir in tqdm(case_dirs, desc='处理进度'):
+        for case_dir, organ_subdir in tqdm(tasks, desc='处理进度'):
             result = process_single_case(
                 case_dir, 
                 window_type, 
                 resolution, 
-                threshold_factor
+                threshold_factor,
+                organ_subdir
             )
             results.append(result)
     else:
@@ -221,9 +276,10 @@ def process_window_type(data_root, window_type, resolution, threshold_factor, ma
                     case_dir,
                     window_type,
                     resolution,
-                    threshold_factor
-                ): case_dir
-                for case_dir in case_dirs
+                    threshold_factor,
+                    organ_subdir
+                ): (case_dir, organ_subdir)
+                for case_dir, organ_subdir in tasks
             }
             
             for future in tqdm(as_completed(futures), total=len(futures), desc='处理进度'):
@@ -249,7 +305,8 @@ def process_window_type(data_root, window_type, resolution, threshold_factor, ma
         print(f"\n失败的case:")
         for r in results:
             if not r['success']:
-                print(f"  - {r['case_id']}: {r['error']}")
+                location_info = f" [{r['location']}]" if 'location' in r else ""
+                print(f"  - {r['case_id']}{location_info}: {r['error']}")
     
     print(f"{'='*80}\n")
     
