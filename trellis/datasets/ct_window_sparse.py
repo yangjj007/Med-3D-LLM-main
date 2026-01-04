@@ -153,15 +153,21 @@ class CTWindowSparseSDF(Dataset):
         for case_dir in case_dirs:
             case_id = os.path.basename(case_dir)
             
-            # Check if window file exists
-            window_path = os.path.join(
+            # Check if window file exists (.npy or .npz)
+            window_path_npy = os.path.join(
                 case_dir, 
                 'windows', 
                 self.window_filename
             )
+            window_path_npz = window_path_npy.replace('.npy', '.npz')
             
-            if not os.path.exists(window_path):
-                print(f"  Skipping {case_id}: window file not found at {window_path}")
+            # 优先使用.npz文件（预计算的SDF），如果不存在则尝试.npy
+            if os.path.exists(window_path_npz):
+                window_path = window_path_npz
+            elif os.path.exists(window_path_npy):
+                window_path = window_path_npy
+            else:
+                print(f"  Skipping {case_id}: window file not found (tried {window_path_npy} and {window_path_npz})")
                 continue
             
             # Add to instances
@@ -195,14 +201,19 @@ class CTWindowSparseSDF(Dataset):
         """
         try:
             instance = self.instances[index]
+            window_path = instance['window_path']
             
-            # 加载预计算的SDF文件（.npz格式）
-            sdf_path = instance['window_path'].replace('.npy', '.npz')
+            # 确定SDF文件路径
+            if window_path.endswith('.npz'):
+                sdf_path = window_path  # 直接使用npz文件
+            else:
+                sdf_path = window_path.replace('.npy', '.npz')  # 从npy路径推导npz路径
             
             if not os.path.exists(sdf_path):
                 raise FileNotFoundError(
                     f"预计算的SDF文件不存在: {sdf_path}\n"
-                    f"请先运行: python scripts/precompute_ct_window_sdf.py --data_root <your_data_root>"
+                    f"请先运行: python scripts/precompute_ct_window_sdf.py --data_root <your_data_root>\n"
+                    f"或者使用 --compute_sdf 参数在预处理时生成SDF文件"
                 )
             
             # 加载SDF数据
