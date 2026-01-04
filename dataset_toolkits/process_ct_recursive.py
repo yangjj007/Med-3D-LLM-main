@@ -16,6 +16,15 @@ import pandas as pd
 from pathlib import Path
 from typing import List, Dict, Tuple
 import time
+import multiprocessing
+
+# 设置multiprocessing启动方法为spawn，避免CUDA fork问题
+# 在多进程中使用CUDA时必须使用spawn模式
+try:
+    multiprocessing.set_start_method('spawn')
+except RuntimeError:
+    # 如果已经设置过，忽略错误
+    pass
 
 # 导入处理模块
 from process_medical_ct import process_dataset as process_nifti_dataset, scan_nifti_directory

@@ -33,6 +33,15 @@ from tqdm import tqdm
 import glob
 from scipy import sparse
 import ast
+import multiprocessing
+
+# 设置multiprocessing启动方法为spawn，避免CUDA fork问题
+# 在多进程中使用CUDA时必须使用spawn模式
+try:
+    multiprocessing.set_start_method('spawn')
+except RuntimeError:
+    # 如果已经设置过，忽略错误
+    pass
 
 # 导入预处理模块
 from ct_preprocessing import (
