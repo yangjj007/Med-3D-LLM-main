@@ -57,8 +57,6 @@ class CTWindowSparseSDF(Dataset):
         window_type: str = 'lung',
         min_points: int = 100,
         max_points: int = 500000,
-        cache_data: bool = True,  # 新增：是否缓存数据到内存
-        precompute_sparse: bool = True,  # 新增：是否预计算稀疏索引
     ):
         super().__init__()
         
@@ -66,9 +64,7 @@ class CTWindowSparseSDF(Dataset):
         self.window_type = window_type
         self.min_points = min_points
         self.max_points = max_points
-        self.value_range = (0, 1)  # For visualization - binary window values
-        self.cache_data = cache_data
-        self.precompute_sparse = precompute_sparse
+        self.value_range = (0, 1)  # For visualization - SDF distance values
         
         # Validate window type
         if window_type not in WINDOW_CONFIGS:
@@ -86,27 +82,12 @@ class CTWindowSparseSDF(Dataset):
         self.metadata = {}
         self._discover_datasets()
         
-        # 缓存机制
-        self._cache = {} if cache_data else None
-        self._sparse_cache = {} if precompute_sparse else None
-        
         print(f"\nCTWindowSparseSDF Dataset:")
         print(f"  Window type: {window_type}")
         print(f"  Resolution: {resolution}")
         print(f"  Total instances: {len(self.instances)}")
         print(f"  Min points: {min_points}, Max points: {max_points}")
-        print(f"  Cache enabled: {cache_data}")
-        print(f"  Precompute sparse: {precompute_sparse}")
-        
-        # 预加载所有数据到内存（如果数据集不大）
-        if cache_data and len(self.instances) <= 100:  # 只在数据集较小时全部缓存
-            print(f"  Preloading all {len(self.instances)} instances to memory...")
-            import time
-            start_time = time.time()
-            for idx in range(len(self.instances)):
-                self._load_window_data(idx)
-            elapsed = time.time() - start_time
-            print(f"  Preloading completed in {elapsed:.2f}s")
+        print(f"  使用预计算的SDF文件 (.npz格式)")
     
     def _discover_datasets(self):
         """
@@ -200,50 +181,6 @@ class CTWindowSparseSDF(Dataset):
     def __len__(self):
         return len(self.instances)
     
-    def _load_window_data(self, index: int):
-        """
-        加载窗口数据，使用内存映射或缓存。
-        """
-        # 检查缓存
-        if self._cache is not None and index in self._cache:
-            return self._cache[index]
-        
-        instance = self.instances[index]
-        
-        # 使用mmap_mode加速加载（不立即加载到内存）
-        if self._cache is None:
-            window_data = np.load(instance['window_path'], mmap_mode='r')
-        else:
-            window_data = np.load(instance['window_path'])
-            self._cache[index] = window_data
-        
-        return window_data
-    
-    def _get_sparse_indices(self, index: int, window_data: np.ndarray):
-        """
-        获取稀疏索引，使用缓存。
-        """
-        # 检查稀疏索引缓存
-        if self._sparse_cache is not None:
-            if index in self._sparse_cache:
-                return self._sparse_cache[index]
-        
-        # 计算稀疏索引 - 优化的方法
-        # 使用nonzero比argwhere快
-        indices = np.stack(np.nonzero(window_data), axis=1)
-        
-        # 提取值
-        if len(indices) > 0:
-            values = window_data[indices[:, 0], indices[:, 1], indices[:, 2]]
-        else:
-            values = np.array([], dtype=window_data.dtype)
-        
-        # 缓存结果
-        if self._sparse_cache is not None:
-            self._sparse_cache[index] = (indices, values)
-        
-        return indices, values
-    
     def __getitem__(self, index: int) -> Dict[str, Any]:
         """
         Load and convert a single instance to sparse format.
@@ -253,34 +190,44 @@ class CTWindowSparseSDF(Dataset):
         
         Returns:
             Dictionary containing:
-                - sparse_sdf: Tensor[N, 1] - Binary values (0 or 1)
+                - sparse_sdf: Tensor[N, 1] - SDF distance values (not binary!)
                 - sparse_index: Tensor[N, 3] - 3D coordinates
         """
         try:
-            # 加载窗口数据（可能从缓存）
-            window_data = self._load_window_data(index)
+            instance = self.instances[index]
             
-            # 获取稀疏表示（可能从缓存）
-            indices, values = self._get_sparse_indices(index, window_data)
+            # 加载预计算的SDF文件（.npz格式）
+            sdf_path = instance['window_path'].replace('.npy', '.npz')
+            
+            if not os.path.exists(sdf_path):
+                raise FileNotFoundError(
+                    f"预计算的SDF文件不存在: {sdf_path}\n"
+                    f"请先运行: python scripts/precompute_ct_window_sdf.py --data_root <your_data_root>"
+                )
+            
+            # 加载SDF数据
+            sdf_data = np.load(sdf_path)
+            sparse_sdf = sdf_data['sparse_sdf']  # [N, 1] - 距离值
+            sparse_index = sdf_data['sparse_index']  # [N, 3] - 3D坐标
             
             # 检查最小点数要求
-            if len(indices) < self.min_points:
+            if len(sparse_index) < self.min_points:
                 # 返回随机有效实例
                 return self.__getitem__(np.random.randint(0, len(self)))
             
             # 如果点数过多，进行子采样
-            if self.max_points is not None and len(indices) > self.max_points:
+            if self.max_points is not None and len(sparse_index) > self.max_points:
                 subsample_indices = np.random.choice(
-                    len(indices), 
+                    len(sparse_index), 
                     self.max_points, 
                     replace=False
                 )
-                indices = indices[subsample_indices]
-                values = values[subsample_indices]
+                sparse_sdf = sparse_sdf[subsample_indices]
+                sparse_index = sparse_index[subsample_indices]
             
-            # 转换为张量（这个操作很快）
-            sparse_sdf = torch.from_numpy(values.copy()).float().unsqueeze(-1)  # [N, 1]
-            sparse_index = torch.from_numpy(indices.copy()).long()  # [N, 3]
+            # 转换为张量
+            sparse_sdf = torch.from_numpy(sparse_sdf.copy()).float()  # [N, 1]
+            sparse_index = torch.from_numpy(sparse_index.copy()).long()  # [N, 3]
             
             return {
                 'sparse_sdf': sparse_sdf,
