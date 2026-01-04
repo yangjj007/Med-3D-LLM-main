@@ -5,9 +5,15 @@ SDF处理器模块
 """
 
 import os
+import sys
 import numpy as np
 from typing import Dict, Optional, Tuple
 import torch
+
+# 添加项目根目录到Python路径
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 
 def convert_window_to_sdf(window_data: np.ndarray,
@@ -27,6 +33,8 @@ def convert_window_to_sdf(window_data: np.ndarray,
     try:
         from trellis.utils.mesh_utils import dense_voxel_to_sparse_sdf
     except ImportError:
+        import traceback
+        traceback.print_exc()
         raise ImportError(
             "TRELLIS not available. Cannot convert to SDF. "
             "Please install TRELLIS or skip SDF conversion."
@@ -208,7 +216,7 @@ def check_trellis_available() -> bool:
         return True
     except ImportError:
         print("Trellis mesh util import error: TRELLIS not available. ")
-        raise
+        traceback.print_exc()
         return False
 
 
