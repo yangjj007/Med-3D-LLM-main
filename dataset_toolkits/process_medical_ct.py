@@ -29,7 +29,7 @@ try:
     from monai.transforms import Compose, LoadImaged, Orientationd, EnsureChannelFirstd
     MONAI_AVAILABLE = True
 except ImportError:
-    print("Warning: MONAI not available. Install with: pip install monai nibabel")
+    print("Warning: MONAI not available. Install would change torch version, please be careful: pip install monai nibabel")
     MONAI_AVAILABLE = False
 
 # 导入预处理模块
@@ -627,7 +627,7 @@ def main():
     # 检查依赖
     if not MONAI_AVAILABLE:
         print("错误: 需要安装MONAI")
-        print("请运行: pip install monai nibabel")
+        print("请运行: pip install monai nibabel, but it would change torch version, please be careful")
         sys.exit(1)
     
     # 处理数据集

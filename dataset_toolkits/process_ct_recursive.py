@@ -171,12 +171,15 @@ def process_single_dataset(dataset_info: Dict[str, str],
         elif dataset_type == 'm3d_seg':
             # 处理M3D-Seg格式
             print("使用M3D-Seg处理流程...")
-            # M3D-Seg格式处理暂时不支持SDF（需要单独实现）
             metadata = process_m3d_seg_dataset(
                 dataset_root=dataset_path,
                 output_dir=output_dir,
                 default_resolution=default_resolution,
-                num_workers=num_workers
+                num_workers=num_workers,
+                compute_sdf=compute_sdf,
+                sdf_resolution=sdf_resolution,
+                sdf_threshold_factor=sdf_threshold_factor,
+                replace_npy=replace_npy
             )
         
         else:
