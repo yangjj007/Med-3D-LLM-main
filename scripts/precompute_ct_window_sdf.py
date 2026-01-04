@@ -42,7 +42,6 @@ def process_single_case(case_dir, window_type, resolution=512, threshold_factor=
     Returns:
         处理结果字典
     """
-    case_id = os.path.basename(case_dir)
     
     try:
         # 延迟导入，避免在主进程中初始化CUDA
@@ -54,6 +53,8 @@ def process_single_case(case_dir, window_type, resolution=512, threshold_factor=
         
         # 获取窗口文件名
         window_filename = get_window_filename(window_type)
+        
+        case_id = os.path.basename(case_dir)
         
         # 根据是否指定器官子目录，确定窗口文件路径
         if organ_subdir:
