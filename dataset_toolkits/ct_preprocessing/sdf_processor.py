@@ -207,6 +207,8 @@ def check_trellis_available() -> bool:
         from trellis.utils.mesh_utils import dense_voxel_to_sparse_sdf
         return True
     except ImportError:
+        print("Trellis mesh util import error: TRELLIS not available. ")
+        raise
         return False
 
 

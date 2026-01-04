@@ -456,9 +456,9 @@ def process_dataset(data_root: str,
         if not check_cuda_available():
             print("\n⚠️  警告: CUDA不可用，SDF计算需要GPU支持")
             compute_sdf = False
-        elif not check_trellis_available():
-            print("\n⚠️  警告: TRELLIS不可用，跳过SDF计算")
-            compute_sdf = False
+        # elif not check_trellis_available():
+        #     print("\n⚠️  警告: TRELLIS不可用，跳过SDF计算")
+        #     compute_sdf = False
         else:
             print(f"\n✓ SDF计算已启用 (分辨率={sdf_resolution}, 替换NPY={replace_npy})")
     
