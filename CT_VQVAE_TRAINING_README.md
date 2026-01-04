@@ -134,24 +134,6 @@ python train.py \
     --num_gpus 1 > stage1_train.log 2>&1
 ```
 
-训练日志示例：
-```
-Loading pretrained VAE from: ./pretrained_weights/direct3d_vae.pth
-Successfully loaded pretrained VAE weights
-
-================================================================================
-[Stage 1] Encoder and Decoder frozen, training Codebook only
-================================================================================
-Total parameters: 125,829,120
-Trainable parameters: 262,144
-Frozen parameters: 125,566,976
-================================================================================
-
-Step 1000: loss=0.245 recon=0.198 vq=0.032 commitment=0.015
-Step 2000: loss=0.198 recon=0.165 vq=0.023 commitment=0.010
-...
-```
-
 ### 步骤4：阶段2训练 - 联合微调
 
 ```bash

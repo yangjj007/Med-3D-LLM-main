@@ -3,7 +3,7 @@
 # 自动扫描大文件夹中的所有数据集并处理
 
 if [ $# -lt 2 ]; then
-    echo "用法: bash scripts/prepare_ct_recursive.sh <root_dir> <output_dir> [organ_labels.json] [num_workers] [max_depth]"
+    echo "用法: bash scripts/prepare_ct_recursive.sh <root_dir> <output_dir> [organ_labels.json] [num_workers] [max_depth] [--compute_sdf] [--replace_npy]"
     echo ""
     echo "参数:"
     echo "  root_dir       : 根目录（包含多个数据集）"
@@ -11,6 +11,8 @@ if [ $# -lt 2 ]; then
     echo "  organ_labels   : 器官标签映射JSON文件（可选，用于NIfTI格式）"
     echo "  num_workers    : 并行进程数（可选，默认4）"
     echo "  max_depth      : 最大递归深度（可选，默认5）"
+    echo "  --compute_sdf  : 计算窗口数据的SDF表示（需要CUDA和TRELLIS）"
+    echo "  --replace_npy  : 用NPZ文件替换原NPY文件"
     echo ""
     echo "示例:"
     echo "  # 处理包含多个数据集的大文件夹"
@@ -18,12 +20,15 @@ if [ $# -lt 2 ]; then
     echo "       /path/to/all_datasets \\"
     echo "       ./processed_all"
     echo ""
-    echo "  # 指定器官映射和并行数"
+    echo "  # 指定器官映射和并行数，并启用SDF计算"
     echo "  bash scripts/prepare_ct_recursive.sh \\"
     echo "       /path/to/all_datasets \\"
     echo "       ./processed_all \\"
     echo "       ./organ_mapping.json \\"
-    echo "       8"
+    echo "       8 \\"
+    echo "       5 \\"
+    echo "       --compute_sdf \\"
+    echo "       --replace_npy"
     echo ""
     echo "支持的数据格式:"
     echo "  1. NIfTI格式:"
@@ -52,6 +57,22 @@ ORGAN_LABELS=${3:-""}
 NUM_WORKERS=${4:-4}
 MAX_DEPTH=${5:-5}
 
+# 解析额外标志参数
+COMPUTE_SDF=""
+REPLACE_NPY=""
+shift 5 2>/dev/null || true  # 跳过前5个位置参数
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --compute_sdf)
+            COMPUTE_SDF="--compute_sdf"
+            ;;
+        --replace_npy)
+            REPLACE_NPY="--replace_npy"
+            ;;
+    esac
+    shift
+done
+
 echo "=========================================="
 echo "   CT数据递归预处理"
 echo "=========================================="
@@ -60,6 +81,8 @@ echo "输出目录: $OUTPUT_DIR"
 echo "器官标签: ${ORGAN_LABELS:-未指定}"
 echo "并行进程数: $NUM_WORKERS"
 echo "最大递归深度: $MAX_DEPTH"
+echo "计算SDF: ${COMPUTE_SDF:-否}"
+echo "替换NPY: ${REPLACE_NPY:-否}"
 echo "=========================================="
 echo ""
 
@@ -82,6 +105,15 @@ CMD="python dataset_toolkits/process_ct_recursive.py \
 # 如果指定了器官标签，添加参数
 if [ -n "$ORGAN_LABELS" ] && [ -f "$ORGAN_LABELS" ]; then
     CMD="$CMD --organ_labels \"$ORGAN_LABELS\""
+fi
+
+# 添加SDF相关参数
+if [ -n "$COMPUTE_SDF" ]; then
+    CMD="$CMD $COMPUTE_SDF"
+fi
+
+if [ -n "$REPLACE_NPY" ]; then
+    CMD="$CMD $REPLACE_NPY"
 fi
 
 echo "执行命令:"

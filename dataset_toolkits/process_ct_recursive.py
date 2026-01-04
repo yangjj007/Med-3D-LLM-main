@@ -115,7 +115,11 @@ def process_single_dataset(dataset_info: Dict[str, str],
                           output_base_dir: str,
                           default_resolution: int,
                           num_workers: int,
-                          organ_mapping_file: str = None) -> Dict:
+                          organ_mapping_file: str = None,
+                          compute_sdf: bool = False,
+                          sdf_resolution: int = 512,
+                          sdf_threshold_factor: float = 4.0,
+                          replace_npy: bool = False) -> Dict:
     """
     处理单个数据集
     
@@ -125,6 +129,10 @@ def process_single_dataset(dataset_info: Dict[str, str],
         default_resolution: 默认分辨率
         num_workers: 并行进程数
         organ_mapping_file: 器官映射文件（NIfTI格式需要）
+        compute_sdf: 是否计算SDF
+        sdf_resolution: SDF分辨率
+        sdf_threshold_factor: SDF阈值因子
+        replace_npy: 是否替换NPY文件
     
     Returns:
         处理结果信息
@@ -153,12 +161,17 @@ def process_single_dataset(dataset_info: Dict[str, str],
                 output_dir=output_dir,
                 organ_mapping_file=organ_mapping_file,
                 default_resolution=default_resolution,
-                num_workers=num_workers
+                num_workers=num_workers,
+                compute_sdf=compute_sdf,
+                sdf_resolution=sdf_resolution,
+                sdf_threshold_factor=sdf_threshold_factor,
+                replace_npy=replace_npy
             )
             
         elif dataset_type == 'm3d_seg':
             # 处理M3D-Seg格式
             print("使用M3D-Seg处理流程...")
+            # M3D-Seg格式处理暂时不支持SDF（需要单独实现）
             metadata = process_m3d_seg_dataset(
                 dataset_root=dataset_path,
                 output_dir=output_dir,
@@ -211,7 +224,11 @@ def process_recursive(root_dir: str,
                      default_resolution: int = 512,
                      num_workers: int = 4,
                      organ_mapping_file: str = None,
-                     max_depth: int = 5):
+                     max_depth: int = 5,
+                     compute_sdf: bool = False,
+                     sdf_resolution: int = 512,
+                     sdf_threshold_factor: float = 4.0,
+                     replace_npy: bool = False):
     """
     递归处理所有数据集
     
@@ -222,6 +239,10 @@ def process_recursive(root_dir: str,
         num_workers: 并行进程数
         organ_mapping_file: 器官映射文件
         max_depth: 最大递归深度
+        compute_sdf: 是否计算SDF
+        sdf_resolution: SDF分辨率
+        sdf_threshold_factor: SDF阈值因子
+        replace_npy: 是否替换NPY文件
     """
     print("=" * 80)
     print("CT数据递归预处理")
@@ -264,7 +285,11 @@ def process_recursive(root_dir: str,
             output_base_dir=output_base_dir,
             default_resolution=default_resolution,
             num_workers=num_workers,
-            organ_mapping_file=organ_mapping_file
+            organ_mapping_file=organ_mapping_file,
+            compute_sdf=compute_sdf,
+            sdf_resolution=sdf_resolution,
+            sdf_threshold_factor=sdf_threshold_factor,
+            replace_npy=replace_npy
         )
         
         results.append(result)
@@ -365,6 +390,14 @@ def main():
                        help='并行进程数（默认: 4）')
     parser.add_argument('--max_depth', type=int, default=5,
                        help='最大递归深度（默认: 5）')
+    parser.add_argument('--compute_sdf', action='store_true',
+                       help='计算窗口数据的SDF表示（需要CUDA和TRELLIS）')
+    parser.add_argument('--sdf_resolution', type=int, default=512,
+                       help='SDF目标分辨率（默认: 512）')
+    parser.add_argument('--sdf_threshold_factor', type=float, default=4.0,
+                       help='SDF阈值因子（默认: 4.0）')
+    parser.add_argument('--replace_npy', action='store_true',
+                       help='用NPZ文件替换原NPY文件')
     
     args = parser.parse_args()
     
@@ -380,7 +413,11 @@ def main():
         default_resolution=args.default_resolution,
         num_workers=args.num_workers,
         organ_mapping_file=args.organ_labels,
-        max_depth=args.max_depth
+        max_depth=args.max_depth,
+        compute_sdf=args.compute_sdf,
+        sdf_resolution=args.sdf_resolution,
+        sdf_threshold_factor=args.sdf_threshold_factor,
+        replace_npy=args.replace_npy
     )
     
     print("\n全部完成！")

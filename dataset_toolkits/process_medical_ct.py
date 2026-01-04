@@ -44,7 +44,10 @@ from ct_preprocessing import (
     get_organs_present,
     validate_segmentation,
     compute_organ_statistics,
-    get_window_filename
+    get_window_filename,
+    save_window_results,
+    check_cuda_available,
+    check_trellis_available
 )
 
 
@@ -143,7 +146,11 @@ def process_single_case(case_info: Dict,
                        output_dir: str,
                        organ_mapping: Optional[Dict] = None,
                        default_resolution: int = DEFAULT_RESOLUTION,
-                       save_intermediate: bool = True) -> Dict:
+                       save_intermediate: bool = True,
+                       compute_sdf: bool = False,
+                       sdf_resolution: int = 512,
+                       sdf_threshold_factor: float = 4.0,
+                       replace_npy: bool = False) -> Dict:
     """
     处理单个CT病例
     
@@ -158,6 +165,10 @@ def process_single_case(case_info: Dict,
         organ_mapping: 器官标签映射配置
         default_resolution: 默认目标分辨率
         save_intermediate: 是否保存中间结果
+        compute_sdf: 是否计算SDF
+        sdf_resolution: SDF分辨率
+        sdf_threshold_factor: SDF阈值因子
+        replace_npy: 是否用NPZ替换NPY文件
     
     Returns:
         处理结果元信息字典
@@ -211,14 +222,31 @@ def process_single_case(case_info: Dict,
     
     # 步骤3: 全局窗口处理（直接在原始CT上进行二值化）
     print(f"  3. 全局窗口处理（基于原始HU值）...")
-    global_windows = process_all_windows(ct_adapted, binarize=True)
+    if compute_sdf:
+        print(f"     - 同时计算SDF (分辨率={sdf_resolution}, 阈值因子={sdf_threshold_factor})")
     
-    for window_name, binary_array in global_windows.items():
-        window_filename = get_window_filename(window_name)
-        window_path = os.path.join(case_output_dir, 'windows', window_filename)
-        np.save(window_path, binary_array)
-        positive_ratio = np.sum(binary_array) / binary_array.size
-        print(f"     {window_name}: {positive_ratio:.2%} 正值")
+    global_windows = process_all_windows(
+        ct_adapted, 
+        binarize=True,
+        compute_sdf=compute_sdf,
+        sdf_resolution=sdf_resolution,
+        sdf_threshold_factor=sdf_threshold_factor
+    )
+    
+    # 保存窗口结果
+    windows_dir = os.path.join(case_output_dir, 'windows')
+    saved_paths = save_window_results(global_windows, windows_dir, replace_npy=replace_npy)
+    
+    for window_name, result in global_windows.items():
+        if isinstance(result, dict) and 'binary' in result:
+            binary_array = result['binary']
+            sdf_points = len(result['sdf']['sparse_index']) if 'sdf' in result else 0
+            positive_ratio = np.sum(binary_array) / binary_array.size
+            print(f"     {window_name}: {positive_ratio:.2%} 正值, SDF点数: {sdf_points}")
+        else:
+            binary_array = result
+            positive_ratio = np.sum(binary_array) / binary_array.size
+            print(f"     {window_name}: {positive_ratio:.2%} 正值")
     
     # 步骤4: 器官特定窗口处理
     organs_info = []
@@ -375,7 +403,11 @@ def process_dataset(data_root: str,
                    organ_mapping_file: Optional[str] = None,
                    default_resolution: int = DEFAULT_RESOLUTION,
                    num_workers: int = 1,
-                   max_cases: Optional[int] = None) -> pd.DataFrame:
+                   max_cases: Optional[int] = None,
+                   compute_sdf: bool = False,
+                   sdf_resolution: int = 512,
+                   sdf_threshold_factor: float = 4.0,
+                   replace_npy: bool = False) -> pd.DataFrame:
     """
     处理整个数据集
     
@@ -386,6 +418,10 @@ def process_dataset(data_root: str,
         default_resolution: 默认分辨率
         num_workers: 并行工作进程数
         max_cases: 最大处理病例数（用于测试）
+        compute_sdf: 是否计算SDF
+        sdf_resolution: SDF分辨率
+        sdf_threshold_factor: SDF阈值因子
+        replace_npy: 是否用NPZ替换NPY文件
     
     Returns:
         元数据DataFrame
@@ -393,6 +429,17 @@ def process_dataset(data_root: str,
     print("=" * 70)
     print("CT数据预处理")
     print("=" * 70)
+    
+    # 检查SDF依赖
+    if compute_sdf:
+        if not check_cuda_available():
+            print("\n⚠️  警告: CUDA不可用，SDF计算需要GPU支持")
+            compute_sdf = False
+        elif not check_trellis_available():
+            print("\n⚠️  警告: TRELLIS不可用，跳过SDF计算")
+            compute_sdf = False
+        else:
+            print(f"\n✓ SDF计算已启用 (分辨率={sdf_resolution}, 替换NPY={replace_npy})")
     
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
@@ -429,7 +476,12 @@ def process_dataset(data_root: str,
                     case_info,
                     output_dir,
                     organ_mapping,
-                    default_resolution
+                    default_resolution,
+                    save_intermediate=True,
+                    compute_sdf=compute_sdf,
+                    sdf_resolution=sdf_resolution,
+                    sdf_threshold_factor=sdf_threshold_factor,
+                    replace_npy=replace_npy
                 )
                 metadata_list.append(info)
             except Exception as e:
@@ -444,7 +496,12 @@ def process_dataset(data_root: str,
                     case_info,
                     output_dir,
                     organ_mapping,
-                    default_resolution
+                    default_resolution,
+                    True,  # save_intermediate
+                    compute_sdf,
+                    sdf_resolution,
+                    sdf_threshold_factor,
+                    replace_npy
                 )
                 futures.append((future, case_info['case_id']))
             
@@ -535,6 +592,14 @@ def main():
                        help='并行工作进程数（默认: 4）')
     parser.add_argument('--max_cases', type=int, default=None,
                        help='最大处理病例数（用于测试，默认: 处理全部）')
+    parser.add_argument('--compute_sdf', action='store_true',
+                       help='计算窗口数据的SDF表示（需要CUDA和TRELLIS）')
+    parser.add_argument('--sdf_resolution', type=int, default=512,
+                       help='SDF目标分辨率（默认: 512）')
+    parser.add_argument('--sdf_threshold_factor', type=float, default=4.0,
+                       help='SDF阈值因子（默认: 4.0）')
+    parser.add_argument('--replace_npy', action='store_true',
+                       help='用NPZ文件替换原NPY文件')
     
     args = parser.parse_args()
     
@@ -551,7 +616,11 @@ def main():
         organ_mapping_file=args.organ_labels,
         default_resolution=args.default_resolution,
         num_workers=args.num_workers,
-        max_cases=args.max_cases
+        max_cases=args.max_cases,
+        compute_sdf=args.compute_sdf,
+        sdf_resolution=args.sdf_resolution,
+        sdf_threshold_factor=args.sdf_threshold_factor,
+        replace_npy=args.replace_npy
     )
     
     print("\n全部完成！")

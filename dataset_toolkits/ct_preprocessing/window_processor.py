@@ -4,8 +4,9 @@
 提供CT窗宽/窗位的二值化处理功能，用于突出显示特定组织类型。
 """
 
+import os
 import numpy as np
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 from .config import WINDOW_CONFIGS, get_window_config, get_all_window_names
 
 
@@ -73,7 +74,10 @@ def apply_window_scaling(ct_array: np.ndarray,
 
 def process_all_windows(ct_array: np.ndarray,
                        window_configs: Optional[Dict] = None,
-                       binarize: bool = True) -> Dict[str, np.ndarray]:
+                       binarize: bool = True,
+                       compute_sdf: bool = False,
+                       sdf_resolution: int = 512,
+                       sdf_threshold_factor: float = 4.0) -> Dict[str, Union[np.ndarray, Dict]]:
     """
     对所有预定义窗口进行处理
     
@@ -81,9 +85,12 @@ def process_all_windows(ct_array: np.ndarray,
         ct_array: 输入CT数组
         window_configs: 窗口配置字典。如果为None，使用默认配置
         binarize: 是否进行二值化。如果False，进行归一化缩放
+        compute_sdf: 是否计算SDF（需要CUDA和TRELLIS）
+        sdf_resolution: SDF分辨率
+        sdf_threshold_factor: SDF阈值因子
     
     Returns:
-        字典，key为窗口名称，value为处理后的数组
+        字典，key为窗口名称，value为处理后的数组或SDF结果
     """
     if window_configs is None:
         window_configs = WINDOW_CONFIGS
@@ -103,7 +110,25 @@ def process_all_windows(ct_array: np.ndarray,
                 ct_array, window_level, window_width
             )
         
-        results[window_name] = processed
+        # 如果需要计算SDF
+        if compute_sdf and binarize:
+            try:
+                from .sdf_processor import convert_window_to_sdf
+                sdf_result = convert_window_to_sdf(
+                    processed,
+                    resolution=sdf_resolution,
+                    threshold_factor=sdf_threshold_factor
+                )
+                results[window_name] = {
+                    'binary': processed,
+                    'sdf': sdf_result
+                }
+            except Exception as e:
+                # 如果SDF计算失败，仍返回二值化结果
+                print(f"Warning: SDF computation failed for {window_name}: {e}")
+                results[window_name] = processed
+        else:
+            results[window_name] = processed
     
     return results
 
@@ -187,16 +212,22 @@ def compute_window_statistics(ct_array: np.ndarray,
 
 
 def batch_process_windows(ct_arrays: list,
-                         window_names: Optional[list] = None) -> list:
+                         window_names: Optional[list] = None,
+                         compute_sdf: bool = False,
+                         sdf_resolution: int = 512,
+                         sdf_threshold_factor: float = 4.0) -> list:
     """
     批量处理多个CT数组的窗口
     
     Args:
         ct_arrays: CT数组列表
         window_names: 要处理的窗口名称列表。如果为None，处理所有窗口
+        compute_sdf: 是否计算SDF
+        sdf_resolution: SDF分辨率
+        sdf_threshold_factor: SDF阈值因子
     
     Returns:
-        结果列表，每个元素是一个字典 {window_name: binary_array}
+        结果列表，每个元素是一个字典 {window_name: binary_array或sdf_result}
     """
     if window_names is None:
         window_names = get_all_window_names()
@@ -212,10 +243,74 @@ def batch_process_windows(ct_arrays: list,
                 config['window_level'],
                 config['window_width']
             )
-            window_results[window_name] = binary
+            
+            # 如果需要计算SDF
+            if compute_sdf:
+                try:
+                    from .sdf_processor import convert_window_to_sdf
+                    sdf_result = convert_window_to_sdf(
+                        binary,
+                        resolution=sdf_resolution,
+                        threshold_factor=sdf_threshold_factor
+                    )
+                    window_results[window_name] = {
+                        'binary': binary,
+                        'sdf': sdf_result
+                    }
+                except Exception as e:
+                    print(f"Warning: SDF computation failed for {window_name}: {e}")
+                    window_results[window_name] = binary
+            else:
+                window_results[window_name] = binary
+                
         results.append(window_results)
     
     return results
+
+
+def save_window_results(window_results: Dict[str, Union[np.ndarray, Dict]],
+                       output_dir: str,
+                       replace_npy: bool = False) -> Dict[str, str]:
+    """
+    保存窗口处理结果
+    
+    Args:
+        window_results: 窗口处理结果字典
+        output_dir: 输出目录
+        replace_npy: 如果有SDF结果，是否删除NPY文件
+    
+    Returns:
+        保存文件路径的字典
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    saved_paths = {}
+    
+    for window_name, result in window_results.items():
+        filename = get_window_filename(window_name)
+        
+        # 如果结果包含SDF
+        if isinstance(result, dict) and 'sdf' in result:
+            # 先保存二值化结果为npy
+            npy_path = os.path.join(output_dir, filename)
+            np.save(npy_path, result['binary'])
+            
+            # 保存SDF结果为npz
+            from .sdf_processor import save_sdf_result
+            npz_path = npy_path.replace('.npy', '.npz')
+            save_sdf_result(
+                result['sdf'],
+                npz_path,
+                replace_source=replace_npy,
+                source_path=npy_path if replace_npy else None
+            )
+            saved_paths[window_name] = npz_path
+        else:
+            # 只保存二值化结果
+            npy_path = os.path.join(output_dir, filename)
+            np.save(npy_path, result)
+            saved_paths[window_name] = npy_path
+    
+    return saved_paths
 
 
 if __name__ == '__main__':

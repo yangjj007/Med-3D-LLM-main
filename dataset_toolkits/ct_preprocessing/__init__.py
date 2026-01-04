@@ -26,7 +26,8 @@ from .resolution_adapter import (
 from .window_processor import (
     apply_window_binarization,
     process_all_windows,
-    get_window_filename
+    get_window_filename,
+    save_window_results
 )
 
 from .organ_extractor import (
@@ -36,6 +37,16 @@ from .organ_extractor import (
     get_organs_present,
     validate_segmentation,
     compute_organ_statistics
+)
+
+from .sdf_processor import (
+    convert_window_to_sdf,
+    save_sdf_result,
+    load_sdf_result,
+    process_window_to_sdf,
+    batch_process_windows_to_sdf,
+    check_cuda_available,
+    check_trellis_available
 )
 
 __all__ = [
@@ -56,6 +67,7 @@ __all__ = [
     'apply_window_binarization',
     'process_all_windows',
     'get_window_filename',
+    'save_window_results',
     
     # Organ extractor
     'extract_organ_with_window',
@@ -64,6 +76,15 @@ __all__ = [
     'get_organs_present',
     'validate_segmentation',
     'compute_organ_statistics',
+    
+    # SDF processor
+    'convert_window_to_sdf',
+    'save_sdf_result',
+    'load_sdf_result',
+    'process_window_to_sdf',
+    'batch_process_windows_to_sdf',
+    'check_cuda_available',
+    'check_trellis_available',
 ]
 
 __version__ = '1.0.0'

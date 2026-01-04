@@ -4,20 +4,24 @@
 
 # 用法检查
 if [ $# -lt 2 ]; then
-    echo "用法: bash scripts/prepare_medical_ct_dataset.sh <nifti_root> <output_dir> [organ_labels.json] [num_workers]"
+    echo "用法: bash scripts/prepare_medical_ct_dataset.sh <nifti_root> <output_dir> [organ_labels.json] [num_workers] [--compute_sdf] [--replace_npy]"
     echo ""
     echo "参数:"
     echo "  nifti_root      : NIfTI数据根目录（包含imagesTr和labelsTr）"
     echo "  output_dir      : 输出目录"
     echo "  organ_labels    : 器官标签映射JSON文件（可选）"
     echo "  num_workers     : 并行进程数（可选，默认4）"
+    echo "  --compute_sdf   : 计算窗口数据的SDF表示（需要CUDA和TRELLIS）"
+    echo "  --replace_npy   : 用NPZ文件替换原NPY文件"
     echo ""
     echo "示例:"
     echo "  bash scripts/prepare_medical_ct_dataset.sh \\"
     echo "       ./data/3Dircad \\"
     echo "       ./data/processed_ct \\"
     echo "       ./dataset_toolkits/ct_preprocessing/organ_mapping_example.json \\"
-    echo "       8"
+    echo "       8 \\"
+    echo "       --compute_sdf \\"
+    echo "       --replace_npy"
     exit 1
 fi
 
@@ -28,6 +32,22 @@ ORGAN_LABELS=${3:-""}
 NUM_WORKERS=${4:-4}
 DEFAULT_RESOLUTION=512
 
+# 解析额外标志参数
+COMPUTE_SDF=""
+REPLACE_NPY=""
+shift 4 2>/dev/null || true  # 跳过前4个位置参数
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --compute_sdf)
+            COMPUTE_SDF="--compute_sdf"
+            ;;
+        --replace_npy)
+            REPLACE_NPY="--replace_npy"
+            ;;
+    esac
+    shift
+done
+
 echo "=========================================="
 echo "   CT数据集预处理流程"
 echo "=========================================="
@@ -36,6 +56,8 @@ echo "输出目录: $OUTPUT_DIR"
 echo "器官标签映射: ${ORGAN_LABELS:-未指定}"
 echo "并行进程数: $NUM_WORKERS"
 echo "默认分辨率: ${DEFAULT_RESOLUTION}³"
+echo "计算SDF: ${COMPUTE_SDF:-否}"
+echo "替换NPY: ${REPLACE_NPY:-否}"
 echo "=========================================="
 echo ""
 
@@ -74,6 +96,15 @@ CMD="python dataset_toolkits/process_medical_ct.py \
 if [ -n "$ORGAN_LABELS" ] && [ -f "$ORGAN_LABELS" ]; then
     CMD="$CMD --organ_labels \"$ORGAN_LABELS\""
     echo "使用器官标签映射: $ORGAN_LABELS"
+fi
+
+# 添加SDF相关参数
+if [ -n "$COMPUTE_SDF" ]; then
+    CMD="$CMD $COMPUTE_SDF"
+fi
+
+if [ -n "$REPLACE_NPY" ]; then
+    CMD="$CMD $REPLACE_NPY"
 fi
 
 echo "执行命令:"

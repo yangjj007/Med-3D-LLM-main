@@ -28,7 +28,24 @@ from dataset_toolkits.ct_preprocessing.config import WINDOW_CONFIGS
 from dataset_toolkits.ct_preprocessing.window_processor import get_window_filename
 
 
-def process_single_case(case_dir, window_type, resolution=512, threshold_factor=4.0, organ_subdir=None):
+# 全局变量，用于在worker进程中缓存导入的函数
+_sdf_converter = None
+
+
+def _init_worker():
+    """
+    Worker进程初始化函数
+    在每个worker进程启动时调用一次，避免频繁导入
+    """
+    global _sdf_converter
+    import sys
+    import os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+    from trellis.utils.mesh_utils import dense_voxel_to_sparse_sdf
+    _sdf_converter = dense_voxel_to_sparse_sdf
+
+
+def process_single_case(case_dir, window_type, resolution=512, threshold_factor=4.0, organ_subdir=None, replace_npy=False):
     """
     处理单个case的窗口数据
     
@@ -38,17 +55,21 @@ def process_single_case(case_dir, window_type, resolution=512, threshold_factor=
         resolution: 目标分辨率
         threshold_factor: UDF阈值因子
         organ_subdir: 器官子目录（如'liver', 'lung'等），None表示处理全局窗口
+        replace_npy: 是否用npz文件替换原npy文件
     
     Returns:
         处理结果字典
     """
     
     try:
-        # 延迟导入，避免在主进程中初始化CUDA
+        # 使用全局缓存的SDF转换器，避免重复导入
+        global _sdf_converter
+        if _sdf_converter is None:
+            _init_worker()
+        
         import sys
         import os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-        from trellis.utils.mesh_utils import dense_voxel_to_sparse_sdf
         from dataset_toolkits.ct_preprocessing.window_processor import get_window_filename
         
         # 获取窗口文件名
@@ -86,15 +107,15 @@ def process_single_case(case_dir, window_type, resolution=512, threshold_factor=
                 'error': f'Window data too sparse (< 100 voxels)'
             }
         
-        # 转换为SDF
-        sdf_result = dense_voxel_to_sparse_sdf(
+        # 转换为SDF (使用全局缓存的转换器)
+        sdf_result = _sdf_converter(
             window_data,
             resolution=resolution,
             threshold_factor=threshold_factor,
             marching_cubes_level=0.5
         )
         
-        # 保存为npz文件（直接替换原文件，改扩展名为.npz）
+        # 保存为npz文件
         output_path = window_path.replace('.npy', '.npz')
         np.savez_compressed(
             output_path,
@@ -102,6 +123,10 @@ def process_single_case(case_dir, window_type, resolution=512, threshold_factor=
             sparse_index=sdf_result['sparse_index'],
             resolution=np.array(sdf_result['resolution'])
         )
+        
+        # 如果指定替换，删除原npy文件
+        if replace_npy and os.path.exists(window_path):
+            os.remove(window_path)
         
         return {
             'case_id': case_id,
@@ -136,6 +161,8 @@ def main():
                         help='并行处理的worker数量')
     parser.add_argument('--force_recompute', action='store_true',
                         help='强制重新计算已存在的SDF文件')
+    parser.add_argument('--replace_npy', action='store_true',
+                        help='用npz文件替换原npy文件')
     
     args = parser.parse_args()
     
@@ -160,16 +187,16 @@ def main():
             print(f"{'='*80}\n")
             process_window_type(args.data_root, window_type, args.resolution, 
                               args.threshold_factor, args.max_workers, args.force_recompute,
-                              include_organs=True)  # all模式下包含organs
+                              args.replace_npy, include_organs=True)  # all模式下包含organs
         return
     
     # 处理单个窗口类型（不包含organs）
     process_window_type(args.data_root, args.window_type, args.resolution,
                        args.threshold_factor, args.max_workers, args.force_recompute,
-                       include_organs=False)
+                       args.replace_npy, include_organs=False)
 
 
-def process_window_type(data_root, window_type, resolution, threshold_factor, max_workers, force_recompute, include_organs=False):
+def process_window_type(data_root, window_type, resolution, threshold_factor, max_workers, force_recompute, replace_npy, include_organs=False):
     """处理单个窗口类型的SDF预计算
     
     Args:
@@ -179,6 +206,7 @@ def process_window_type(data_root, window_type, resolution, threshold_factor, ma
         threshold_factor: 阈值因子
         max_workers: worker数量
         force_recompute: 是否强制重新计算
+        replace_npy: 是否替换原npy文件
         include_organs: 是否包含organs目录下的窗口
     """
     
@@ -190,6 +218,7 @@ def process_window_type(data_root, window_type, resolution, threshold_factor, ma
     print(f"分辨率: {resolution}")
     print(f"阈值因子: {threshold_factor}")
     print(f"并行Worker: {max_workers}")
+    print(f"替换NPY文件: {'是' if replace_npy else '否'}")
     print(f"包含器官窗口: {'是' if include_organs else '否'}")
     print(f"{'='*80}\n")
     
@@ -259,18 +288,20 @@ def process_window_type(data_root, window_type, resolution, threshold_factor, ma
     
     if max_workers == 1:
         # 单进程模式（方便调试）
+        _init_worker()  # 初始化单进程模式下的worker
         for case_dir, organ_subdir in tqdm(tasks, desc='处理进度'):
             result = process_single_case(
                 case_dir, 
                 window_type, 
                 resolution, 
                 threshold_factor,
-                organ_subdir
+                organ_subdir,
+                replace_npy
             )
             results.append(result)
     else:
-        # 多进程模式
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # 多进程模式 - 使用初始化器，避免频繁创建/销毁进程和重复导入
+        with ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker) as executor:
             futures = {
                 executor.submit(
                     process_single_case,
@@ -278,7 +309,8 @@ def process_window_type(data_root, window_type, resolution, threshold_factor, ma
                     window_type,
                     resolution,
                     threshold_factor,
-                    organ_subdir
+                    organ_subdir,
+                    replace_npy
                 ): (case_dir, organ_subdir)
                 for case_dir, organ_subdir in tasks
             }
