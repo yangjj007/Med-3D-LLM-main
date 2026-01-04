@@ -99,8 +99,9 @@ def mesh2sparse_sdf(
         mesh = normalize_mesh(mesh, scale=scale)
     
     # Convert to torch tensors on GPU
-    vertices = torch.Tensor(mesh.vertices).float().cuda() * 0.5
-    faces = torch.Tensor(mesh.faces).int().cuda()
+    # Use torch.from_numpy with copy to ensure contiguous arrays
+    vertices = torch.from_numpy(np.array(mesh.vertices, copy=True)).float().cuda() * 0.5
+    faces = torch.from_numpy(np.array(mesh.faces, copy=True)).int().cuda()
     
     # Compute UDF
     threshold = threshold_factor
@@ -186,8 +187,9 @@ def dense_voxel_to_sparse_sdf(
     vertices = vertices / resolution - 0.5
     
     # Step 3: Convert to torch tensors on CUDA
-    vertices_cuda = torch.Tensor(vertices).float().cuda() * 0.5
-    faces_cuda = torch.Tensor(faces).int().cuda()
+    # Make copies to avoid negative stride issues with numpy arrays from Marching Cubes
+    vertices_cuda = torch.from_numpy(vertices.copy()).float().cuda() * 0.5
+    faces_cuda = torch.from_numpy(faces.copy()).int().cuda()
     
     # Step 4: Mesh → SDF using compute_valid_udf
     udf = torch.zeros(resolution**3, device='cuda').int() + 10000000
@@ -246,8 +248,9 @@ def mesh2index(
     Returns:
         Unique latent indices [N, 4] where first column is batch index (0)
     """
-    vertices = torch.Tensor(mesh.vertices).float().cuda() * 0.5
-    faces = torch.Tensor(mesh.faces).int().cuda()
+    # Use torch.from_numpy with copy to ensure contiguous arrays
+    vertices = torch.from_numpy(np.array(mesh.vertices, copy=True)).float().cuda() * 0.5
+    faces = torch.from_numpy(np.array(mesh.faces, copy=True)).int().cuda()
     
     sdf = compute_valid_udf(vertices, faces, dim=size, threshold=4.0)
     sdf = sdf.reshape(size, size, size).unsqueeze(0)

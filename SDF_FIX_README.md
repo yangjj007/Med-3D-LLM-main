@@ -15,13 +15,13 @@
 ```bash
 # 默认处理所有窗口类型
 python scripts/precompute_ct_window_sdf.py \
-    --data_root ./processed_dataset \
+    --data_root ./processed_dataset/0000 \
     --resolution 512 \
     --max_workers 4
 
 # 或指定单个窗口类型
 python scripts/precompute_ct_window_sdf.py \
-    --data_root ./processed_dataset \
+    --data_root ./processed_dataset/0000 \
     --window_type lung \
     --resolution 512 \
     --max_workers 4
@@ -198,7 +198,15 @@ pip install -e . --no-build-isolation
 - 使用 `--max_workers 1` 单进程模式（较慢但稳定）
 - 确保在主进程中没有提前初始化CUDA
 
-### 问题5：Marching Cubes失败
+### 问题5：Negative stride错误
+
+**错误信息：** `At least one stride in the given numpy array is negative`
+
+**原因：** Marching Cubes算法返回的numpy数组可能有负stride，PyTorch不支持
+
+**解决：** 已在 `mesh_utils.py` 中自动修复，使用 `.copy()` 确保数组连续性
+
+### 问题6：Marching Cubes失败
 
 **原因：** 窗口数据太稀疏或全为空
 
