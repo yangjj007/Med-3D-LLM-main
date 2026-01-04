@@ -269,7 +269,10 @@ def process_single_case(case_info: Dict,
             ct_adapted, 
             seg_adapted, 
             organ_mapping,
-            save_global_windows=False
+            save_global_windows=False,
+            compute_sdf=compute_sdf,
+            sdf_resolution=sdf_resolution,
+            sdf_threshold_factor=sdf_threshold_factor
         )
         
         # 保存器官特定数据
@@ -278,11 +281,29 @@ def process_single_case(case_info: Dict,
             os.makedirs(organ_dir, exist_ok=True)
             
             # 保存窗口结果
-            for window_filename, binary_array in organ_data.items():
+            for window_filename, window_result in organ_data.items():
                 if window_filename == 'mask' or window_filename in ['label', 'window_used']:
                     continue
-                window_path = os.path.join(organ_dir, window_filename + '.npy')
-                np.save(window_path, binary_array)
+                
+                # 检查是否包含SDF结果
+                if isinstance(window_result, dict) and 'sdf' in window_result:
+                    # 保存二值化结果
+                    npy_path = os.path.join(organ_dir, window_filename + '.npy')
+                    np.save(npy_path, window_result['binary'])
+                    
+                    # 保存SDF结果
+                    from ct_preprocessing.sdf_processor import save_sdf_result
+                    npz_path = os.path.join(organ_dir, window_filename + '.npz')
+                    save_sdf_result(
+                        window_result['sdf'],
+                        npz_path,
+                        replace_source=replace_npy,
+                        source_path=npy_path if replace_npy else None
+                    )
+                else:
+                    # 只有二值化结果
+                    window_path = os.path.join(organ_dir, window_filename + '.npy')
+                    np.save(window_path, window_result)
             
             # 计算统计信息
             organ_label = organ_data['label']

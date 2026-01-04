@@ -97,7 +97,10 @@ def extract_organ_with_window(ct_array: np.ndarray,
 def process_all_organs(ct_array: np.ndarray,
                       segmentation_array: np.ndarray,
                       organ_mapping: Dict,
-                      save_global_windows: bool = True) -> Dict[str, Dict[str, np.ndarray]]:
+                      save_global_windows: bool = True,
+                      compute_sdf: bool = False,
+                      sdf_resolution: int = 512,
+                      sdf_threshold_factor: float = 4.0) -> Dict[str, Dict[str, np.ndarray]]:
     """
     处理所有器官在所有适用窗口下的数据
     
@@ -106,19 +109,22 @@ def process_all_organs(ct_array: np.ndarray,
         segmentation_array: 分割标签数组
         organ_mapping: 器官映射配置
         save_global_windows: 是否也保存全局窗口（不限定器官区域）
+        compute_sdf: 是否计算SDF
+        sdf_resolution: SDF分辨率
+        sdf_threshold_factor: SDF阈值因子
     
     Returns:
         嵌套字典结构:
         {
             'organs': {
                 'liver': {
-                    'soft_tissue_w400_l50': binary_array,
+                    'soft_tissue_w400_l50': binary_array 或 {'binary': ..., 'sdf': ...},
                     'mask': organ_mask
                 },
                 ...
             },
             'global_windows': {  # 如果save_global_windows=True
-                'lung_w1500_l-600': binary_array,
+                'lung_w1500_l-600': binary_array 或 {'binary': ..., 'sdf': ...},
                 ...
             }
         }
@@ -172,11 +178,32 @@ def process_all_organs(ct_array: np.ndarray,
             window_config
         )
         
+        # 如果需要计算SDF
+        window_result = organ_window
+        if compute_sdf:
+            try:
+                from .sdf_processor import convert_window_to_sdf
+                # 检查数据是否太稀疏
+                if organ_window.sum() >= 100:
+                    sdf_result = convert_window_to_sdf(
+                        organ_window,
+                        resolution=sdf_resolution,
+                        threshold_factor=sdf_threshold_factor
+                    )
+                    window_result = {
+                        'binary': organ_window,
+                        'sdf': sdf_result
+                    }
+                else:
+                    print(f"     警告: {organ_name} 数据太稀疏 (< 100 voxels)，跳过SDF计算")
+            except Exception as e:
+                print(f"     警告: {organ_name} SDF计算失败: {e}")
+        
         # 保存结果
         window_filename = f"{window_name}_w{int(window_config['window_width'])}_l{int(window_config['window_level'])}"
         
         results['organs'][organ_name] = {
-            window_filename: organ_window,
+            window_filename: window_result,
             'mask': organ_mask,
             'label': organ_label,
             'window_used': window_name
@@ -190,8 +217,27 @@ def process_all_organs(ct_array: np.ndarray,
                 window_config['window_level'],
                 window_config['window_width']
             )
+            
+            # 如果需要计算SDF
+            window_result = window_binary
+            if compute_sdf:
+                try:
+                    from .sdf_processor import convert_window_to_sdf
+                    if window_binary.sum() >= 100:
+                        sdf_result = convert_window_to_sdf(
+                            window_binary,
+                            resolution=sdf_resolution,
+                            threshold_factor=sdf_threshold_factor
+                        )
+                        window_result = {
+                            'binary': window_binary,
+                            'sdf': sdf_result
+                        }
+                except Exception as e:
+                    print(f"     警告: {window_name} SDF计算失败: {e}")
+            
             window_filename = f"{window_name}_w{int(window_config['window_width'])}_l{int(window_config['window_level'])}"
-            results['global_windows'][window_filename] = window_binary
+            results['global_windows'][window_filename] = window_result
     
     return results
 

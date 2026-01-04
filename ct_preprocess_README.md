@@ -135,6 +135,8 @@ bash scripts/prepare_ct_recursive.sh \
 - 第3个参数：器官标签映射JSON（可选，用于NIfTI格式）
 - 第4个参数：并行进程数（可选，默认4）
 - 第5个参数：最大递归深度（可选，默认5）
+- 第6个参数：是否预计算SDF
+- 第7个参数：是否用SDF替代体素网格
 
 特点：
 - 🔍 自动递归扫描所有子文件夹
@@ -164,7 +166,28 @@ python dataset_toolkits/process_m3d_seg_format.py \
 
 ### 4. 预计算SDF
 
-#### 将二值化窗口数据转换为真正的SDF表示
+#### 方法A：在预处理时同时计算SDF（推荐）
+
+使用 `--compute_sdf` 参数，在预处理时直接生成 SDF 文件：
+
+```bash
+bash scripts/prepare_ct_recursive.sh \
+    ./med_dataset \
+    ./processed_dataset \
+    ./organ_labels.json \
+    8 \
+    5 \
+    --compute_sdf \
+    --replace_npy
+```
+
+**✨ 新特性（已修复）：**
+- ✅ 同时生成全局窗口（`windows/`）和器官窗口（`organs/`）的 SDF 文件
+- ✅ 支持 `--replace_npy` 参数，用 `.npz` 文件替换 `.npy` 文件以节省空间
+
+#### 方法B：后处理转换为SDF表示
+
+如果已经完成预处理，可以使用独立脚本转换：
 
 ```bash
 python scripts/precompute_ct_window_sdf.py \
@@ -180,9 +203,11 @@ python scripts/precompute_ct_window_sdf.py \
 - `--threshold_factor`: UDF阈值因子（默认4.0）
 - `--max_workers`: 并行处理的worker数量（默认4）
 - `--force_recompute`: 强制重新计算已存在的SDF文件
+- `--replace_npy`: 用npz文件替换原npy文件
 
 **输出：**
 - 将 `windows/*.npy` 文件转换为 `windows/*.npz` 文件
+- 将 `organs/*/​*.npy` 文件转换为 `organs/*/​*.npz` 文件
 - 生成处理日志CSV文件
 
 #### 测试SDF加载（可选）
