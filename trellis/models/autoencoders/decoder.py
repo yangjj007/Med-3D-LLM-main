@@ -120,9 +120,9 @@ class SparseSDFDecoder(SparseTransformerBase):
 
     def initialize_weights(self) -> None:
         super().initialize_weights()
-        # Zero-out output layers:
-        nn.init.constant_(self.out_layer.weight, 0)
-        nn.init.constant_(self.out_layer.bias, 0)
+        # # Zero-out output layers:
+        # nn.init.constant_(self.out_layer.weight, 0)
+        # nn.init.constant_(self.out_layer.bias, 0)
 
     def convert_to_fp16(self) -> None:
         """
