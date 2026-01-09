@@ -28,7 +28,7 @@
             "resolution": 512,
             "window_type": "lung",
             "min_points": 100,
-            "max_points": 100000
+            "max_points": 1000000
         }
     },
     "trainer": {
@@ -39,7 +39,7 @@
             "pretrained_vae_path": "./outputs/ct_vqvae_lung_stage1/ckpts/vqvae_step0000002.pth",
             "max_steps": 100000,
             "max_epoch": 1,
-            "batch_size_per_gpu": 1,
+            "batch_size_per_gpu": 16,
             "batch_split": 1,
             "disable_snapshot": true,
             "optimizer": {

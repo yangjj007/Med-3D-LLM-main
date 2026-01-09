@@ -141,10 +141,14 @@ export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/ct_vqvae_stage2.json \
     --output_dir outputs/ct_vqvae_lung_stage2 \
-    --load_dir outputs/ct_vqvae_lung_stage1 \
-    --ckpt latest \
     --data_dir ./processed_dataset \
     --num_gpus 1 > stage2_train.log 2>&1
+```
+
+可选参数，或者config中配置阶段一训练权重：
+```bash
+    --load_dir outputs/ct_vqvae_lung_stage1 \
+    --ckpt latest \
 ```
 
 训练日志示例：
