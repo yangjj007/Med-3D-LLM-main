@@ -68,33 +68,7 @@ bash scripts/prepare_ct_recursive.sh \
 
 ## 快速开始
 
-### 步骤1：测试数据加载
-
-首先验证数据集能够正确加载：
-
-```bash
-python tests/test_ct_dataset.py \
-    --data_root /path/to/processed_dataset \
-    --window_type lung \
-    --all_windows
-```
-
-预期输出：
-```
-================================================================================
-CT Window Sparse Dataset Test Suite
-================================================================================
-
-CTWindowSparseSDF Dataset:
-  Window type: lung
-  Resolution: 512
-  Total instances: 150
-  Min points: 100, Max points: 500000
-
-✓ All tests passed
-```
-
-### 步骤2：配置训练参数
+### 步骤1：配置训练参数
 
 #### 阶段1配置 (`configs/vae/ct_vqvae_stage1.json`)
 
@@ -117,7 +91,7 @@ CTWindowSparseSDF Dataset:
 - `loss_type`: "l1_l2"（组合损失）
 - `max_steps`: 200000
 
-### 步骤3：阶段1训练 - 冻结VAE，训练码本
+### 步骤2：阶段1训练 - 冻结VAE，训练码本
 <!-- 
 为了解决int64_t(N) * int64_t(C) * tv::bit_size(algo_desp.dtype_a) / 8 < int_max assert faild. your data exceed int32 range. 报错，加入环境变量 SPCONV_ALGO='native'、 -->
 
@@ -134,7 +108,7 @@ python train.py \
     --num_gpus 1 > stage1_train.log 2>&1
 ```
 
-### 步骤4：阶段2训练 - 联合微调
+### 步骤3：阶段2训练 - 联合微调
 
 ```bash
 export ATTN_BACKEND=xformers
