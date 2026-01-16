@@ -89,6 +89,91 @@ class CTWindowSparseSDF(Dataset):
         print(f"  Min points: {min_points}, Max points: {max_points}")
         print(f"  使用预计算的SDF文件 (.npz格式)")
     
+    def _find_mask_mode_sdf(self, case_dir: str) -> Dict[str, str]:
+        """
+        在masks/文件夹中查找SDF文件（支持--use_mask模式）
+        
+        Args:
+            case_dir: case目录路径
+            
+        Returns:
+            字典，键为label_id，值为SDF文件路径；如果未找到返回空字典
+        """
+        import json
+        
+        masks_dir = os.path.join(case_dir, 'masks')
+        if not os.path.exists(masks_dir):
+            return {}
+        
+        # 检查info.json确认是use_mask模式
+        info_path = os.path.join(case_dir, 'info.json')
+        if os.path.exists(info_path):
+            try:
+                with open(info_path, 'r') as f:
+                    info = json.load(f)
+                    if not info.get('use_mask', False):
+                        return {}
+            except:
+                pass
+        
+        # 查找organ_labels.json
+        organ_labels_path = os.path.join(masks_dir, 'organ_labels.json')
+        if not os.path.exists(organ_labels_path):
+            # 如果没有organ_labels.json，尝试直接查找所有*_sdf.npz文件
+            sdf_files = glob.glob(os.path.join(masks_dir, '*_sdf.npz'))
+            if sdf_files:
+                result = {}
+                for sdf_path in sdf_files:
+                    filename = os.path.basename(sdf_path)
+                    # 提取标签ID（如1_sdf.npz -> 1）
+                    label_id = filename.split('_sdf.npz')[0]
+                    result[label_id] = sdf_path
+                return result
+            return {}
+        
+        # 读取标签映射
+        try:
+            with open(organ_labels_path, 'r') as f:
+                label_info = json.load(f)
+                label_to_name = label_info.get('label_to_name', {})
+        except:
+            return {}
+        
+        # 查找所有标签的SDF文件
+        result = {}
+        for label_id in label_to_name.keys():
+            sdf_path = os.path.join(masks_dir, f"{label_id}_sdf.npz")
+            if os.path.exists(sdf_path):
+                result[label_id] = sdf_path
+        
+        return result
+    
+    def _find_window_mode_sdf(self, case_dir: str) -> str:
+        """
+        在windows/文件夹中查找SDF文件（标准窗口模式）
+        
+        Args:
+            case_dir: case目录路径
+            
+        Returns:
+            SDF文件路径，如果未找到返回None
+        """
+        # Check if window file exists (.npy or .npz)
+        window_path_npy = os.path.join(
+            case_dir, 
+            'windows', 
+            self.window_filename
+        )
+        window_path_npz = window_path_npy.replace('.npy', '.npz')
+        
+        # 优先使用.npz文件（预计算的SDF），如果不存在则尝试.npy
+        if os.path.exists(window_path_npz):
+            return window_path_npz
+        elif os.path.exists(window_path_npy):
+            return window_path_npy
+        else:
+            return None
+    
     def _discover_datasets(self):
         """
         Recursively discover all processed datasets.
@@ -153,36 +238,51 @@ class CTWindowSparseSDF(Dataset):
         for case_dir in case_dirs:
             case_id = os.path.basename(case_dir)
             
-            # Check if window file exists (.npy or .npz)
-            window_path_npy = os.path.join(
-                case_dir, 
-                'windows', 
-                self.window_filename
-            )
-            window_path_npz = window_path_npy.replace('.npy', '.npz')
+            # 首先检查是否使用mask模式（优先在masks/文件夹中查找）
+            mask_sdf_paths = self._find_mask_mode_sdf(case_dir)
             
-            # 优先使用.npz文件（预计算的SDF），如果不存在则尝试.npy
-            if os.path.exists(window_path_npz):
-                window_path = window_path_npz
-            elif os.path.exists(window_path_npy):
-                window_path = window_path_npy
-            else:
-                print(f"  Skipping {case_id}: window file not found (tried {window_path_npy} and {window_path_npz})")
+            # 如果找到mask模式的数据，将每个标签作为独立实例
+            if mask_sdf_paths:
+                for label_id, sdf_path in mask_sdf_paths.items():
+                    self.instances.append({
+                        'dataset_root': parent_dir,
+                        'case_id': f"{case_id}_label{label_id}",
+                        'case_dir': case_dir,
+                        'window_path': sdf_path,
+                        'mode': 'mask',
+                        'label_id': label_id
+                    })
+                
+                # Store metadata if available
+                if metadata_df is not None and 'case_id' in metadata_df.columns:
+                    case_metadata = metadata_df[metadata_df['case_id'] == case_id]
+                    if not case_metadata.empty:
+                        base_metadata = case_metadata.iloc[0].to_dict()
+                        for label_id in mask_sdf_paths.keys():
+                            self.metadata[f"{case_id}_label{label_id}"] = base_metadata.copy()
                 continue
             
-            # Add to instances
-            self.instances.append({
-                'dataset_root': parent_dir,
-                'case_id': case_id,
-                'case_dir': case_dir,
-                'window_path': window_path
-            })
+            # 如果没有找到mask模式的数据，尝试在windows/文件夹查找
+            window_path = self._find_window_mode_sdf(case_dir)
+            if window_path is not None:
+                # Add to instances
+                self.instances.append({
+                    'dataset_root': parent_dir,
+                    'case_id': case_id,
+                    'case_dir': case_dir,
+                    'window_path': window_path,
+                    'mode': 'window'
+                })
+                
+                # Store metadata if available
+                if metadata_df is not None and 'case_id' in metadata_df.columns:
+                    case_metadata = metadata_df[metadata_df['case_id'] == case_id]
+                    if not case_metadata.empty:
+                        self.metadata[case_id] = case_metadata.iloc[0].to_dict()
+                continue
             
-            # Store metadata if available
-            if metadata_df is not None and 'case_id' in metadata_df.columns:
-                case_metadata = metadata_df[metadata_df['case_id'] == case_id]
-                if not case_metadata.empty:
-                    self.metadata[case_id] = case_metadata.iloc[0].to_dict()
+            # 如果两种模式都没找到，跳过
+            print(f"  Skipping {case_id}: SDF file not found in masks/ or windows/")
     
     def __len__(self):
         return len(self.instances)
