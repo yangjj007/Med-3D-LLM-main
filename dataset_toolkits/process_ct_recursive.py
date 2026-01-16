@@ -128,7 +128,8 @@ def process_single_dataset(dataset_info: Dict[str, str],
                           compute_sdf: bool = False,
                           sdf_resolution: int = 512,
                           sdf_threshold_factor: float = 4.0,
-                          replace_npy: bool = False) -> Dict:
+                          replace_npy: bool = False,
+                          use_mask: bool = False) -> Dict:
     """
     处理单个数据集
     
@@ -142,6 +143,7 @@ def process_single_dataset(dataset_info: Dict[str, str],
         sdf_resolution: SDF分辨率
         sdf_threshold_factor: SDF阈值因子
         replace_npy: 是否替换NPY文件
+        use_mask: 是否使用掩码模式（跳过窗位窗宽处理）
     
     Returns:
         处理结果信息
@@ -174,7 +176,8 @@ def process_single_dataset(dataset_info: Dict[str, str],
                 compute_sdf=compute_sdf,
                 sdf_resolution=sdf_resolution,
                 sdf_threshold_factor=sdf_threshold_factor,
-                replace_npy=replace_npy
+                replace_npy=replace_npy,
+                use_mask=use_mask
             )
             
         elif dataset_type == 'm3d_seg':
@@ -188,7 +191,8 @@ def process_single_dataset(dataset_info: Dict[str, str],
                 compute_sdf=compute_sdf,
                 sdf_resolution=sdf_resolution,
                 sdf_threshold_factor=sdf_threshold_factor,
-                replace_npy=replace_npy
+                replace_npy=replace_npy,
+                use_mask=use_mask
             )
         
         else:
@@ -240,7 +244,8 @@ def process_recursive(root_dir: str,
                      compute_sdf: bool = False,
                      sdf_resolution: int = 512,
                      sdf_threshold_factor: float = 4.0,
-                     replace_npy: bool = False):
+                     replace_npy: bool = False,
+                     use_mask: bool = False):
     """
     递归处理所有数据集
     
@@ -255,6 +260,7 @@ def process_recursive(root_dir: str,
         sdf_resolution: SDF分辨率
         sdf_threshold_factor: SDF阈值因子
         replace_npy: 是否替换NPY文件
+        use_mask: 是否使用掩码模式（跳过窗位窗宽处理）
     """
     print("=" * 80)
     print("CT数据递归预处理")
@@ -301,7 +307,8 @@ def process_recursive(root_dir: str,
             compute_sdf=compute_sdf,
             sdf_resolution=sdf_resolution,
             sdf_threshold_factor=sdf_threshold_factor,
-            replace_npy=replace_npy
+            replace_npy=replace_npy,
+            use_mask=use_mask
         )
         
         results.append(result)
@@ -410,6 +417,8 @@ def main():
                        help='SDF阈值因子（默认: 4.0）')
     parser.add_argument('--replace_npy', action='store_true',
                        help='用NPZ文件替换原NPY文件')
+    parser.add_argument('--use_mask', action='store_true',
+                       help='直接使用分割掩码生成二值化体素网格，跳过窗位窗宽处理')
     
     args = parser.parse_args()
     
@@ -429,7 +438,8 @@ def main():
         compute_sdf=args.compute_sdf,
         sdf_resolution=args.sdf_resolution,
         sdf_threshold_factor=args.sdf_threshold_factor,
-        replace_npy=args.replace_npy
+        replace_npy=args.replace_npy,
+        use_mask=args.use_mask
     )
     
     print("\n全部完成！")

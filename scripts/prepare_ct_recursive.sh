@@ -3,35 +3,51 @@
 # 自动扫描大文件夹中的所有数据集并处理
 
 if [ $# -lt 2 ]; then
-    echo "用法: bash scripts/prepare_ct_recursive.sh <root_dir> <output_dir> [organ_labels.json] [num_workers] [max_depth] [--compute_sdf] [--replace_npy]"
+    echo "用法: bash scripts/prepare_ct_recursive.sh <root_dir> <output_dir> [organ_labels.json] [num_workers] [max_depth] [--compute_sdf] [--replace_npy] [--use_mask]"
     echo ""
     echo "参数:"
     echo "  root_dir       : 根目录（包含多个数据集）"
     echo "  output_dir     : 输出基础目录"
-    echo "  organ_labels   : 器官标签映射JSON文件（可选，用于NIfTI格式）"
+    echo "  organ_labels   : 器官标签映射JSON文件（可选，仅用于NIfTI格式）"
+    echo "                  注意：M3D-Seg格式会自动从数据集JSON中读取标签，无需此参数"
     echo "  num_workers    : 并行进程数（可选，默认4）"
     echo "  max_depth      : 最大递归深度（可选，默认5）"
     echo "  --compute_sdf  : 计算窗口数据的SDF表示（需要CUDA和TRELLIS）"
     echo "  --replace_npy  : 用NPZ文件替换原NPY文件"
+    echo "  --use_mask     : 直接使用分割掩码生成二值化体素网格，跳过窗位窗宽处理"
     echo ""
     echo "示例:"
-    echo "  # 处理包含多个数据集的大文件夹"
+    echo "  # 处理M3D-Seg格式（自动读取数据集自带的标签信息）"
     echo "  bash scripts/prepare_ct_recursive.sh \\"
-    echo "       /path/to/all_datasets \\"
-    echo "       ./processed_all"
-    echo ""
-    echo "  # 指定器官映射和并行数，并启用SDF计算"
-    echo "  bash scripts/prepare_ct_recursive.sh \\"
-    echo "       /path/to/all_datasets \\"
-    echo "       ./processed_all \\"
-    echo "       ./organ_mapping.json \\"
+    echo "       /path/to/M3D_Seg \\"
+    echo "       ./processed_m3d_seg \\"
+    echo "       \"\" \\"
     echo "       8 \\"
     echo "       5 \\"
     echo "       --compute_sdf \\"
     echo "       --replace_npy"
     echo ""
+    echo "  # 使用掩码模式（跳过窗位窗宽，直接从掩码提取器官）"
+    echo "  bash scripts/prepare_ct_recursive.sh \\"
+    echo "       /path/to/datasets \\"
+    echo "       ./processed_masks \\"
+    echo "       ./organ_labels.json \\"
+    echo "       8 \\"
+    echo "       5 \\"
+    echo "       --use_mask \\"
+    echo "       --compute_sdf \\"
+    echo "       --replace_npy"
+    echo ""
+    echo "  # 处理NIfTI格式（需要提供器官映射文件）"
+    echo "  bash scripts/prepare_ct_recursive.sh \\"
+    echo "       /path/to/nifti_datasets \\"
+    echo "       ./processed_nifti \\"
+    echo "       ./organ_labels.json \\"
+    echo "       8 \\"
+    echo "       5"
+    echo ""
     echo "支持的数据格式:"
-    echo "  1. NIfTI格式:"
+    echo "  1. NIfTI格式（需要organ_labels.json）:"
     echo "     your_dataset/"
     echo "     ├── imagesTr/"
     echo "     │   ├── case_001_0000.nii.gz"
@@ -40,9 +56,9 @@ if [ $# -lt 2 ]; then
     echo "         ├── case_001.nii.gz"
     echo "         └── ..."
     echo ""
-    echo "  2. M3D-Seg格式:"
+    echo "  2. M3D-Seg格式（自动从0000.json等文件读取标签）:"
     echo "     dataset_0000/"
-    echo "     ├── 0000.json"
+    echo "     ├── 0000.json        # 包含labels字段"
     echo "     ├── 1/"
     echo "     │   ├── image.npy"
     echo "     │   └── mask_*.npz"
@@ -60,6 +76,7 @@ MAX_DEPTH=${5:-5}
 # 解析额外标志参数
 COMPUTE_SDF=""
 REPLACE_NPY=""
+USE_MASK=""
 shift 5 2>/dev/null || true  # 跳过前5个位置参数
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -68,6 +85,9 @@ while [ $# -gt 0 ]; do
             ;;
         --replace_npy)
             REPLACE_NPY="--replace_npy"
+            ;;
+        --use_mask)
+            USE_MASK="--use_mask"
             ;;
     esac
     shift
@@ -78,9 +98,10 @@ echo "   CT数据递归预处理"
 echo "=========================================="
 echo "根目录: $ROOT_DIR"
 echo "输出目录: $OUTPUT_DIR"
-echo "器官标签: ${ORGAN_LABELS:-未指定}"
+echo "器官标签: ${ORGAN_LABELS:-未指定（M3D-Seg格式会自动读取）}"
 echo "并行进程数: $NUM_WORKERS"
 echo "最大递归深度: $MAX_DEPTH"
+echo "使用掩码模式: ${USE_MASK:-否}"
 echo "计算SDF: ${COMPUTE_SDF:-否}"
 echo "替换NPY: ${REPLACE_NPY:-否}"
 echo "=========================================="
@@ -102,9 +123,12 @@ CMD="python dataset_toolkits/process_ct_recursive.py \
     --num_workers $NUM_WORKERS \
     --max_depth $MAX_DEPTH"
 
-# 如果指定了器官标签，添加参数
+# 如果指定了器官标签，添加参数（仅用于NIfTI格式，M3D-Seg格式会自动读取）
 if [ -n "$ORGAN_LABELS" ] && [ -f "$ORGAN_LABELS" ]; then
     CMD="$CMD --organ_labels \"$ORGAN_LABELS\""
+    echo "注意: organ_labels仅用于NIfTI格式数据集"
+    echo "      M3D-Seg格式会自动从数据集JSON中读取标签信息"
+    echo ""
 fi
 
 # 添加SDF相关参数
@@ -114,6 +138,10 @@ fi
 
 if [ -n "$REPLACE_NPY" ]; then
     CMD="$CMD $REPLACE_NPY"
+fi
+
+if [ -n "$USE_MASK" ]; then
+    CMD="$CMD $USE_MASK"
 fi
 
 echo "执行命令:"

@@ -159,7 +159,8 @@ def process_single_case(case_info: Dict,
                        compute_sdf: bool = False,
                        sdf_resolution: int = 512,
                        sdf_threshold_factor: float = 4.0,
-                       replace_npy: bool = False) -> Dict:
+                       replace_npy: bool = False,
+                       use_mask: bool = False) -> Dict:
     """
     处理单个CT病例
     
@@ -178,6 +179,7 @@ def process_single_case(case_info: Dict,
         sdf_resolution: SDF分辨率
         sdf_threshold_factor: SDF阈值因子
         replace_npy: 是否用NPZ替换NPY文件
+        use_mask: 是否使用掩码模式（跳过窗位窗宽处理）
     
     Returns:
         处理结果元信息字典
@@ -192,7 +194,8 @@ def process_single_case(case_info: Dict,
     # 创建输出目录
     case_output_dir = os.path.join(output_dir, 'processed', case_id)
     os.makedirs(case_output_dir, exist_ok=True)
-    os.makedirs(os.path.join(case_output_dir, 'windows'), exist_ok=True)
+    if not use_mask:
+        os.makedirs(os.path.join(case_output_dir, 'windows'), exist_ok=True)
     
     # 步骤1: 加载NIfTI数据
     print(f"  1. 加载数据...")
@@ -224,124 +227,211 @@ def process_single_case(case_info: Dict,
         seg_adapted = adapt_resolution(seg_array, target_resolution, fill_value=0, mode='constant')
         print(f"     分割标签也已适配")
     
-    # 保存原始适配后的CT
-    ct_original_path = os.path.join(case_output_dir, f'ct_original_{target_resolution}.npy')
-    np.save(ct_original_path, ct_adapted)
-    print(f"     保存原始CT: ct_original_{target_resolution}.npy")
-    
-    # 步骤3: 全局窗口处理（直接在原始CT上进行二值化）
-    print(f"  3. 全局窗口处理（基于原始HU值）...")
-    if compute_sdf:
-        print(f"     - 同时计算SDF (分辨率={sdf_resolution}, 阈值因子={sdf_threshold_factor})")
-    
-    global_windows = process_all_windows(
-        ct_adapted, 
-        binarize=True,
-        compute_sdf=compute_sdf,
-        sdf_resolution=sdf_resolution,
-        sdf_threshold_factor=sdf_threshold_factor
-    )
-    
-    # 保存窗口结果
-    windows_dir = os.path.join(case_output_dir, 'windows')
-    saved_paths = save_window_results(global_windows, windows_dir, replace_npy=replace_npy)
-    
-    for window_name, result in global_windows.items():
-        if isinstance(result, dict) and 'binary' in result:
-            binary_array = result['binary']
-            sdf_points = len(result['sdf']['sparse_index']) if 'sdf' in result else 0
-            positive_ratio = np.sum(binary_array) / binary_array.size
-            print(f"     {window_name}: {positive_ratio:.2%} 正值, SDF点数: {sdf_points}")
-        else:
-            binary_array = result
-            positive_ratio = np.sum(binary_array) / binary_array.size
-            print(f"     {window_name}: {positive_ratio:.2%} 正值")
-    
-    # 步骤4: 器官特定窗口处理
+    # 根据 use_mask 参数选择不同的处理流程
     organs_info = []
-    if seg_adapted is not None and organ_mapping is not None:
-        print(f"  4. 器官特定窗口处理...")
+    global_windows = {}
+    
+    if use_mask:
+        # ===== 掩码模式：直接从分割掩码提取各器官二值化网格 =====
+        print(f"  3. 使用掩码模式（跳过窗位窗宽处理）...")
         
-        # 验证分割数据
-        is_valid, message = validate_segmentation(seg_adapted, ct_adapted)
-        if not is_valid:
-            print(f"     警告: {message}")
+        if seg_adapted is not None and organ_mapping is not None:
+            organ_label_to_name = {}  # 标签值 -> 器官名称的映射
+            masks_dir = os.path.join(case_output_dir, 'masks')
+            os.makedirs(masks_dir, exist_ok=True)
+            
+            # 遍历所有器官
+            organ_labels = organ_mapping.get('organ_labels', {})
+            for label_str, organ_info in organ_labels.items():
+                organ_label = int(label_str)
+                organ_name = organ_info['name']
+                
+                # 提取器官掩码（二值化：1表示器官，0表示背景）
+                organ_binary = (seg_adapted == organ_label).astype(np.uint8)
+                
+                # 检查是否存在该器官
+                if organ_binary.sum() == 0:
+                    continue
+                
+                # 保存标签映射：标签值 -> 器官名称
+                organ_label_to_name[str(organ_label)] = organ_name
+                
+                # 使用标签值作为文件名
+                binary_path = os.path.join(masks_dir, f'{organ_label}_binary.npy')
+                np.save(binary_path, organ_binary)
+                print(f"     保存 {organ_name} (标签{organ_label}): {int(organ_binary.sum())} 体素")
+                
+                # 如果需要计算SDF
+                if compute_sdf:
+                    from ct_preprocessing.sdf_processor import convert_window_to_sdf, save_sdf_result
+                    try:
+                        sdf_result = convert_window_to_sdf(
+                            organ_binary,
+                            resolution=sdf_resolution,
+                            threshold_factor=sdf_threshold_factor
+                        )
+                        sdf_path = os.path.join(masks_dir, f'{organ_label}_sdf.npz')
+                        save_sdf_result(
+                            sdf_result,
+                            sdf_path,
+                            replace_source=replace_npy,
+                            source_path=binary_path if replace_npy else None
+                        )
+                        sdf_points = len(sdf_result['sparse_index'])
+                        print(f"       - SDF点数: {sdf_points}")
+                    except Exception as e:
+                        print(f"       - SDF计算失败: {e}")
+                
+                # 记录器官信息
+                organs_info.append({
+                    'name': organ_name,
+                    'label': organ_label,
+                    'voxel_count': int(organ_binary.sum())
+                })
+            
+            # 保存器官标签映射信息到JSON文件
+            if organ_label_to_name:
+                organ_labels_path = os.path.join(masks_dir, 'organ_labels.json')
+                with open(organ_labels_path, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'label_to_name': organ_label_to_name,
+                        'dataset_name': organ_mapping.get('dataset_name', 'unknown'),
+                        'modality': organ_mapping.get('modality', 'CT'),
+                        'resolution': target_resolution,
+                        'num_organs': len(organ_label_to_name),
+                        'description': '标签值到器官名称的映射'
+                    }, f, indent=2, ensure_ascii=False)
+                print(f"     保存器官标签映射: masks/organ_labels.json")
+            
+            # 保存完整的分割掩码（稀疏格式）
+            mask_shape = seg_adapted.shape
+            seg_flat = seg_adapted.reshape(-1)
+            seg_sparse = sparse.csr_matrix(seg_flat)
+            mask_path = os.path.join(masks_dir, 'segmentation_masks.npz')
+            sparse.save_npz(mask_path, seg_sparse)
+            print(f"     保存分割掩码: masks/segmentation_masks.npz")
         else:
-            print(f"     {message}")
+            print(f"  警告: 掩码模式需要分割标签和器官映射，跳过处理")
+    
+    else:
+        # ===== 原有流程：窗位窗宽处理 =====
+        # 保存原始适配后的CT
+        ct_original_path = os.path.join(case_output_dir, f'ct_original_{target_resolution}.npy')
+        np.save(ct_original_path, ct_adapted)
+        print(f"     保存原始CT: ct_original_{target_resolution}.npy")
         
-        # 获取存在的器官
-        organs_present = get_organs_present(seg_adapted, organ_mapping)
-        print(f"     发现 {len(organs_present)} 个器官")
+        # 步骤3: 全局窗口处理（直接在原始CT上进行二值化）
+        print(f"  3. 全局窗口处理（基于原始HU值）...")
+        if compute_sdf:
+            print(f"     - 同时计算SDF (分辨率={sdf_resolution}, 阈值因子={sdf_threshold_factor})")
         
-        # 处理所有器官
-        organ_results = process_all_organs(
+        global_windows = process_all_windows(
             ct_adapted, 
-            seg_adapted, 
-            organ_mapping,
-            save_global_windows=False,
+            binarize=True,
             compute_sdf=compute_sdf,
             sdf_resolution=sdf_resolution,
             sdf_threshold_factor=sdf_threshold_factor
         )
         
-        # 保存器官特定数据
-        for organ_name, organ_data in organ_results['organs'].items():
-            organ_dir = os.path.join(case_output_dir, 'organs', organ_name)
-            os.makedirs(organ_dir, exist_ok=True)
+        # 保存窗口结果
+        windows_dir = os.path.join(case_output_dir, 'windows')
+        saved_paths = save_window_results(global_windows, windows_dir, replace_npy=replace_npy)
+        
+        for window_name, result in global_windows.items():
+            if isinstance(result, dict) and 'binary' in result:
+                binary_array = result['binary']
+                sdf_points = len(result['sdf']['sparse_index']) if 'sdf' in result else 0
+                positive_ratio = np.sum(binary_array) / binary_array.size
+                print(f"     {window_name}: {positive_ratio:.2%} 正值, SDF点数: {sdf_points}")
+            else:
+                binary_array = result
+                positive_ratio = np.sum(binary_array) / binary_array.size
+                print(f"     {window_name}: {positive_ratio:.2%} 正值")
+        
+        # 步骤4: 器官特定窗口处理
+        if seg_adapted is not None and organ_mapping is not None:
+            print(f"  4. 器官特定窗口处理...")
             
-            # 保存窗口结果
-            for window_filename, window_result in organ_data.items():
-                if window_filename == 'mask' or window_filename in ['label', 'window_used']:
-                    continue
+            # 验证分割数据
+            is_valid, message = validate_segmentation(seg_adapted, ct_adapted)
+            if not is_valid:
+                print(f"     警告: {message}")
+            else:
+                print(f"     {message}")
+            
+            # 获取存在的器官
+            organs_present = get_organs_present(seg_adapted, organ_mapping)
+            print(f"     发现 {len(organs_present)} 个器官")
+            
+            # 处理所有器官
+            organ_results = process_all_organs(
+                ct_adapted, 
+                seg_adapted, 
+                organ_mapping,
+                save_global_windows=False,
+                compute_sdf=compute_sdf,
+                sdf_resolution=sdf_resolution,
+                sdf_threshold_factor=sdf_threshold_factor
+            )
+            
+            # 保存器官特定数据
+            for organ_name, organ_data in organ_results['organs'].items():
+                organ_dir = os.path.join(case_output_dir, 'organs', organ_name)
+                os.makedirs(organ_dir, exist_ok=True)
                 
-                # 检查是否包含SDF结果
-                if isinstance(window_result, dict) and 'sdf' in window_result:
-                    # 保存二值化结果
-                    npy_path = os.path.join(organ_dir, window_filename + '.npy')
-                    np.save(npy_path, window_result['binary'])
+                # 保存窗口结果
+                for window_filename, window_result in organ_data.items():
+                    if window_filename == 'mask' or window_filename in ['label', 'window_used']:
+                        continue
                     
-                    # 保存SDF结果
-                    from ct_preprocessing.sdf_processor import save_sdf_result
-                    npz_path = os.path.join(organ_dir, window_filename + '.npz')
-                    save_sdf_result(
-                        window_result['sdf'],
-                        npz_path,
-                        replace_source=replace_npy,
-                        source_path=npy_path if replace_npy else None
-                    )
-                else:
-                    # 只有二值化结果
-                    window_path = os.path.join(organ_dir, window_filename + '.npy')
-                    np.save(window_path, window_result)
+                    # 检查是否包含SDF结果
+                    if isinstance(window_result, dict) and 'sdf' in window_result:
+                        # 保存二值化结果
+                        npy_path = os.path.join(organ_dir, window_filename + '.npy')
+                        np.save(npy_path, window_result['binary'])
+                        
+                        # 保存SDF结果
+                        from ct_preprocessing.sdf_processor import save_sdf_result
+                        npz_path = os.path.join(organ_dir, window_filename + '.npz')
+                        save_sdf_result(
+                            window_result['sdf'],
+                            npz_path,
+                            replace_source=replace_npy,
+                            source_path=npy_path if replace_npy else None
+                        )
+                    else:
+                        # 只有二值化结果
+                        window_path = os.path.join(organ_dir, window_filename + '.npy')
+                        np.save(window_path, window_result)
+                
+                # 计算统计信息
+                organ_label = organ_data['label']
+                organ_stats = compute_organ_statistics(ct_adapted, seg_adapted, organ_label)
+                organs_info.append({
+                    'name': organ_name,
+                    'label': organ_label,
+                    'window': organ_data['window_used'],
+                    'voxel_count': organ_stats['voxel_count'],
+                    'hu_mean': organ_stats['hu_mean'],
+                    'hu_std': organ_stats['hu_std']
+                })
+                
+                print(f"       {organ_name}: {organ_stats['voxel_count']} 体素")
             
-            # 计算统计信息
-            organ_label = organ_data['label']
-            organ_stats = compute_organ_statistics(ct_adapted, seg_adapted, organ_label)
-            organs_info.append({
-                'name': organ_name,
-                'label': organ_label,
-                'window': organ_data['window_used'],
-                'voxel_count': organ_stats['voxel_count'],
-                'hu_mean': organ_stats['hu_mean'],
-                'hu_std': organ_stats['hu_std']
-            })
+            # 保存分割掩码（稀疏格式）
+            masks_dir = os.path.join(case_output_dir, 'masks')
+            os.makedirs(masks_dir, exist_ok=True)
             
-            print(f"       {organ_name}: {organ_stats['voxel_count']} 体素")
+            # 保存为稀疏矩阵格式
+            mask_shape = seg_adapted.shape
+            seg_flat = seg_adapted.reshape(-1)
+            seg_sparse = sparse.csr_matrix(seg_flat)
+            mask_path = os.path.join(masks_dir, 'segmentation_masks.npz')
+            sparse.save_npz(mask_path, seg_sparse)
+            print(f"     保存分割掩码: masks/segmentation_masks.npz")
         
-        # 保存分割掩码（稀疏格式）
-        masks_dir = os.path.join(case_output_dir, 'masks')
-        os.makedirs(masks_dir, exist_ok=True)
-        
-        # 保存为稀疏矩阵格式
-        mask_shape = seg_adapted.shape
-        seg_flat = seg_adapted.reshape(-1)
-        seg_sparse = sparse.csr_matrix(seg_flat)
-        mask_path = os.path.join(masks_dir, 'segmentation_masks.npz')
-        sparse.save_npz(mask_path, seg_sparse)
-        print(f"     保存分割掩码: masks/segmentation_masks.npz")
-    
-    else:
-        print(f"  4. 跳过器官处理（无分割标签或器官映射）")
+        else:
+            print(f"  4. 跳过器官处理（无分割标签或器官映射）")
     
     # 步骤5: 生成元信息
     processing_time = time.time() - start_time
@@ -366,8 +456,10 @@ def process_single_case(case_info: Dict,
         'windows_processed': list(global_windows.keys()),
         'file_size_mb': round(file_size_mb, 2),
         'processing_time_sec': round(processing_time, 2),
-        'ct_path': f'processed/{case_id}/ct_original_{target_resolution}.npy',
+        'use_mask': use_mask,
+        'ct_path': f'processed/{case_id}/ct_original_{target_resolution}.npy' if not use_mask else None,
         'masks_path': f'processed/{case_id}/masks/segmentation_masks.npz' if seg_array is not None else None,
+        'organ_labels_file': f'processed/{case_id}/masks/organ_labels.json' if use_mask and organs_info else None,
     }
     
     # 保存元信息
@@ -437,7 +529,8 @@ def process_dataset(data_root: str,
                    compute_sdf: bool = False,
                    sdf_resolution: int = 512,
                    sdf_threshold_factor: float = 4.0,
-                   replace_npy: bool = False) -> pd.DataFrame:
+                   replace_npy: bool = False,
+                   use_mask: bool = False) -> pd.DataFrame:
     """
     处理整个数据集
     
@@ -452,6 +545,7 @@ def process_dataset(data_root: str,
         sdf_resolution: SDF分辨率
         sdf_threshold_factor: SDF阈值因子
         replace_npy: 是否用NPZ替换NPY文件
+        use_mask: 是否使用掩码模式（跳过窗位窗宽处理）
     
     Returns:
         元数据DataFrame
@@ -511,7 +605,8 @@ def process_dataset(data_root: str,
                     compute_sdf=compute_sdf,
                     sdf_resolution=sdf_resolution,
                     sdf_threshold_factor=sdf_threshold_factor,
-                    replace_npy=replace_npy
+                    replace_npy=replace_npy,
+                    use_mask=use_mask
                 )
                 metadata_list.append(info)
             except Exception as e:
@@ -531,7 +626,8 @@ def process_dataset(data_root: str,
                     compute_sdf,
                     sdf_resolution,
                     sdf_threshold_factor,
-                    replace_npy
+                    replace_npy,
+                    use_mask
                 )
                 futures.append((future, case_info['case_id']))
             
@@ -630,6 +726,8 @@ def main():
                        help='SDF阈值因子（默认: 4.0）')
     parser.add_argument('--replace_npy', action='store_true',
                        help='用NPZ文件替换原NPY文件')
+    parser.add_argument('--use_mask', action='store_true',
+                       help='直接使用分割掩码生成二值化体素网格，跳过窗位窗宽处理')
     
     args = parser.parse_args()
     
@@ -650,7 +748,8 @@ def main():
         compute_sdf=args.compute_sdf,
         sdf_resolution=args.sdf_resolution,
         sdf_threshold_factor=args.sdf_threshold_factor,
-        replace_npy=args.replace_npy
+        replace_npy=args.replace_npy,
+        use_mask=args.use_mask
     )
     
     print("\n全部完成！")
