@@ -244,6 +244,45 @@ def _infer_window_from_organ_name(organ_name: str) -> str:
     return 'soft_tissue'
 
 
+def _process_m3d_seg_case_safe(case_info: Dict,
+                               output_dir: str,
+                               organ_mapping: Optional[Dict] = None,
+                               default_resolution: int = DEFAULT_RESOLUTION,
+                               compute_sdf: bool = False,
+                               sdf_resolution: int = 512,
+                               sdf_threshold_factor: float = 4.0,
+                               replace_npy: bool = False,
+                               use_mask: bool = False,
+                               skip_existing: bool = True) -> Dict:
+    """
+    安全包装函数，用于多进程处理时捕获详细错误
+    """
+    try:
+        return process_m3d_seg_case(
+            case_info, output_dir, organ_mapping, default_resolution,
+            compute_sdf, sdf_resolution, sdf_threshold_factor,
+            replace_npy, use_mask, skip_existing
+        )
+    except Exception as e:
+        import traceback
+        error_msg = f"错误类型: {type(e).__name__}\n"
+        error_msg += f"错误信息: {str(e)}\n"
+        error_msg += f"堆栈跟踪:\n{traceback.format_exc()}"
+        
+        print(f"\n{'='*70}")
+        print(f"❌ 处理病例失败: {case_info['case_id']}")
+        print(error_msg)
+        print(f"{'='*70}")
+        
+        # 返回错误信息而不是抛出异常
+        return {
+            'case_id': case_info['case_id'],
+            'error': str(e),
+            'error_type': type(e).__name__,
+            'processing_failed': True
+        }
+
+
 def process_m3d_seg_case(case_info: Dict,
                          output_dir: str,
                          organ_mapping: Optional[Dict] = None,
@@ -705,9 +744,16 @@ def process_m3d_seg_dataset(dataset_root: str,
     
     # 处理所有病例
     print(f"\n开始处理（并行进程数: {num_workers}）...")
+    
+    # 内存使用警告
+    if num_workers > 8:
+        print(f"\n⚠️  警告: 并行进程数较高 ({num_workers})，可能导致内存不足")
+        print(f"   建议: 减少到 4-8 个进程以避免进程崩溃")
+    
     print("=" * 70)
     
     metadata_list = []
+    failed_cases = []
     
     if num_workers == 1:
         for case_info in case_list:
@@ -726,13 +772,20 @@ def process_m3d_seg_dataset(dataset_root: str,
                 )
                 metadata_list.append(info)
             except Exception as e:
-                print(f"  ❌ 错误: {case_info['case_id']}: {e}")
+                import traceback
+                error_msg = str(e)
+                failed_cases.append({
+                    'case_id': case_info['case_id'],
+                    'error': error_msg,
+                    'traceback': traceback.format_exc()
+                })
+                print(f"  ❌ 错误: {case_info['case_id']}: {error_msg}")
     else:
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             futures = []
             for case_info in case_list:
                 future = executor.submit(
-                    process_m3d_seg_case,
+                    _process_m3d_seg_case_safe,  # 使用安全包装函数
                     case_info,
                     output_dir,
                     organ_mapping,
@@ -746,12 +799,36 @@ def process_m3d_seg_dataset(dataset_root: str,
                 )
                 futures.append((future, case_info['case_id']))
             
+            failed_cases = []
             for future, case_id in tqdm(futures, desc="处理进度"):
                 try:
-                    info = future.result()
-                    metadata_list.append(info)
+                    # 添加超时机制（每个病例最多30分钟）
+                    info = future.result(timeout=1800)
+                    
+                    # 检查是否处理失败
+                    if info.get('processing_failed', False):
+                        failed_cases.append({
+                            'case_id': case_id,
+                            'error': info.get('error', 'Unknown error')
+                        })
+                        print(f"\n  ⚠️  病例处理失败，已记录: {case_id}")
+                    else:
+                        metadata_list.append(info)
+                        
+                except TimeoutError:
+                    error_msg = f"处理超时（>30分钟）"
+                    failed_cases.append({
+                        'case_id': case_id,
+                        'error': error_msg
+                    })
+                    print(f"\n  ⏱️  超时: {case_id}: {error_msg}")
                 except Exception as e:
-                    print(f"\n  错误: {case_id}: {e}")
+                    error_msg = f"{type(e).__name__}: {str(e)}"
+                    failed_cases.append({
+                        'case_id': case_id,
+                        'error': error_msg
+                    })
+                    print(f"\n  ❌ 错误: {case_id}: {error_msg}")
     
     # 生成元数据
     print("\n" + "=" * 70)
@@ -764,6 +841,27 @@ def process_m3d_seg_dataset(dataset_root: str,
     if skip_existing and skipped_count > 0:
         print(f"  ✓ 跳过已处理: {skipped_count} 个病例")
         print(f"  ✓ 新处理: {processed_count} 个病例")
+    
+    # 报告失败的病例
+    if failed_cases:
+        print(f"\n  ⚠️  处理失败: {len(failed_cases)} 个病例")
+        
+        # 保存失败病例列表
+        failed_log_path = os.path.join(output_dir, 'failed_cases.json')
+        with open(failed_log_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                'total_failed': len(failed_cases),
+                'failed_cases': failed_cases,
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
+            }, f, indent=2, ensure_ascii=False)
+        
+        print(f"  失败病例详情已保存: failed_cases.json")
+        
+        if num_workers > 1:
+            print(f"\n  💡 建议：")
+            print(f"    1. 检查失败病例的数据是否损坏")
+            print(f"    2. 尝试减少并行进程数 (当前: {num_workers}，建议: 4-8)")
+            print(f"    3. 使用 --num_workers 1 单独处理失败的病例")
     
     # 清理临时标记
     for info in metadata_list:
