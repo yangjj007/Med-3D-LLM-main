@@ -30,6 +30,7 @@ import pandas as pd
 from pathlib import Path
 from typing import Dict, Optional, List
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from tqdm import tqdm
 import glob
 from scipy import sparse
@@ -257,11 +258,19 @@ def _process_m3d_seg_case_safe(case_info: Dict,
     """
     安全包装函数，用于多进程处理时捕获详细错误
     """
+    debug_dir = os.path.join(output_dir, 'debug_logs')
+    os.makedirs(debug_dir, exist_ok=True)
+    debug_log_path = os.path.join(debug_dir, f"{case_info['case_id']}.log")
+    fh = None
     try:
+        import faulthandler
+        fh = open(debug_log_path, 'a', encoding='utf-8')
+        faulthandler.enable(file=fh, all_threads=True)
         return process_m3d_seg_case(
             case_info, output_dir, organ_mapping, default_resolution,
             compute_sdf, sdf_resolution, sdf_threshold_factor,
-            replace_npy, use_mask, skip_existing
+            replace_npy, use_mask, skip_existing,
+            debug_dir=debug_dir
         )
     except Exception as e:
         import traceback
@@ -281,6 +290,12 @@ def _process_m3d_seg_case_safe(case_info: Dict,
             'error_type': type(e).__name__,
             'processing_failed': True
         }
+    finally:
+        if fh is not None:
+            try:
+                fh.flush()
+            finally:
+                fh.close()
 
 
 def process_m3d_seg_case(case_info: Dict,
@@ -292,7 +307,8 @@ def process_m3d_seg_case(case_info: Dict,
                          sdf_threshold_factor: float = 4.0,
                          replace_npy: bool = False,
                          use_mask: bool = False,
-                         skip_existing: bool = True) -> Dict:
+                         skip_existing: bool = True,
+                         debug_dir: Optional[str] = None) -> Dict:
     """
     处理M3D-Seg格式的单个病例
     
@@ -313,9 +329,21 @@ def process_m3d_seg_case(case_info: Dict,
     """
     case_id = case_info['case_id']
     case_dir = case_info['case_dir']
+    debug_log_path = None
+
+    def _debug_log(message: str) -> None:
+        if debug_log_path is None:
+            return
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        with open(debug_log_path, 'a', encoding='utf-8') as debug_fh:
+            debug_fh.write(f"[{ts}] {message}\n")
     
     # 创建输出目录
     case_output_dir = os.path.join(output_dir, 'processed', case_id)
+    if debug_dir:
+        os.makedirs(debug_dir, exist_ok=True)
+        debug_log_path = os.path.join(debug_dir, f"{case_id}.log")
+        _debug_log(f"start case_id={case_id} pid={os.getpid()} case_dir={case_dir}")
     
     # 检查是否已处理（断点续传功能）
     if skip_existing:
@@ -431,6 +459,9 @@ def process_m3d_seg_case(case_info: Dict,
                 if compute_sdf:
                     from ct_preprocessing.sdf_processor import convert_window_to_sdf, save_sdf_result
                     try:
+                        _debug_log(f"  开始SDF计算: {organ_name} (标签{organ_label})")
+                        _debug_log(f"    原始shape={organ_binary.shape}, dtype={organ_binary.dtype}, sum={organ_binary.sum()}")
+                        
                         # 确保 organ_binary 是 3D
                         if organ_binary.ndim == 4:
                             if organ_binary.shape[0] == 1:
@@ -440,22 +471,53 @@ def process_m3d_seg_case(case_info: Dict,
                             else:
                                 organ_binary = organ_binary[0]
                         
-                        sdf_result = convert_window_to_sdf(
-                            organ_binary,
-                            resolution=sdf_resolution,
-                            threshold_factor=sdf_threshold_factor
-                        )
-                        sdf_path = os.path.join(masks_dir, f'{organ_label}_sdf.npz')
-                        save_sdf_result(
-                            sdf_result,
-                            sdf_path,
-                            replace_source=replace_npy,
-                            source_path=binary_path if replace_npy else None
-                        )
-                        sdf_points = len(sdf_result['sparse_index'])
-                        print(f"       - SDF点数: {sdf_points}")
+                        _debug_log(f"    处理后shape={organ_binary.shape}")
+                        
+                        # 数据验证
+                        voxel_count = organ_binary.sum()
+                        if voxel_count < 100:
+                            _debug_log(f"    跳过: 体素数太少 ({voxel_count})")
+                            print(f"       - 跳过SDF: 体素数太少 ({voxel_count})")
+                        else:
+                            _debug_log(f"    开始convert_window_to_sdf (体素数={voxel_count})")
+                            
+                            # 检查CUDA内存
+                            import torch
+                            if torch.cuda.is_available():
+                                mem_allocated = torch.cuda.memory_allocated() / 1024**3
+                                mem_reserved = torch.cuda.memory_reserved() / 1024**3
+                                _debug_log(f"    CUDA内存: allocated={mem_allocated:.2f}GB, reserved={mem_reserved:.2f}GB")
+                            
+                            sdf_result = convert_window_to_sdf(
+                                organ_binary,
+                                resolution=sdf_resolution,
+                                threshold_factor=sdf_threshold_factor
+                            )
+                            _debug_log(f"    SDF计算完成")
+                            
+                            sdf_path = os.path.join(masks_dir, f'{organ_label}_sdf.npz')
+                            save_sdf_result(
+                                sdf_result,
+                                sdf_path,
+                                replace_source=replace_npy,
+                                source_path=binary_path if replace_npy else None
+                            )
+                            sdf_points = len(sdf_result['sparse_index'])
+                            _debug_log(f"    SDF已保存: {sdf_points}点")
+                            print(f"       - SDF点数: {sdf_points}")
+                            
+                            # 清理CUDA内存
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                                _debug_log(f"    CUDA缓存已清理")
+                            
                     except Exception as e:
-                        print(f"       - SDF计算失败: {e}")
+                        import traceback
+                        error_trace = traceback.format_exc()
+                        _debug_log(f"    SDF计算失败: {type(e).__name__}: {e}")
+                        _debug_log(f"    错误堆栈:\n{error_trace}")
+                        print(f"       - SDF计算失败: {type(e).__name__}: {e}")
+                        print(f"       - 详细错误见debug日志: {debug_log_path}")
                 
                 # 记录器官信息
                 organs_info.append({

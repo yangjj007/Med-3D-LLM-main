@@ -30,27 +30,85 @@ def convert_window_to_sdf(window_data: np.ndarray,
     Returns:
         包含sparse_sdf, sparse_index, resolution的字典
     """
+    import sys
+    
+    # 打印调试信息到stderr，便于日志捕获
+    debug_info = []
+    def _debug(msg):
+        debug_info.append(msg)
+        print(f"[SDF_DEBUG] {msg}", file=sys.stderr, flush=True)
+    
     try:
+        _debug(f"导入dense_voxel_to_sparse_sdf...")
         from trellis.utils.mesh_utils import dense_voxel_to_sparse_sdf
-    except ImportError:
+        _debug(f"导入成功")
+    except ImportError as e:
         import traceback
-        traceback.print_exc()
+        error_msg = f"TRELLIS导入失败: {e}\n{traceback.format_exc()}"
+        _debug(error_msg)
         raise ImportError(
             "TRELLIS not available. Cannot convert to SDF. "
             "Please install TRELLIS or skip SDF conversion."
-        )
+        ) from e
+    
+    # 数据验证
+    _debug(f"数据验证: shape={window_data.shape}, dtype={window_data.dtype}")
+    _debug(f"  min={window_data.min()}, max={window_data.max()}, sum={window_data.sum()}")
+    
+    if window_data.ndim != 3:
+        raise ValueError(f"Window data必须是3D数组, 当前: {window_data.ndim}D, shape={window_data.shape}")
     
     # 检查数据是否太稀疏
-    if window_data.sum() < 100:
-        raise ValueError(f"Window data too sparse (< 100 voxels)")
+    voxel_count = int(window_data.sum())
+    _debug(f"体素计数: {voxel_count}")
+    if voxel_count < 100:
+        raise ValueError(f"Window data太稀疏 (体素数={voxel_count} < 100)")
     
-    # 转换为SDF
-    sdf_result = dense_voxel_to_sparse_sdf(
-        window_data,
-        resolution=resolution,
-        threshold_factor=threshold_factor,
-        marching_cubes_level=0.5
-    )
+    # CUDA状态检查
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+        mem_allocated = torch.cuda.memory_allocated(device) / 1024**3
+        mem_reserved = torch.cuda.memory_reserved(device) / 1024**3
+        mem_free = (torch.cuda.get_device_properties(device).total_memory - torch.cuda.memory_reserved(device)) / 1024**3
+        _debug(f"CUDA设备 {device}: allocated={mem_allocated:.2f}GB, reserved={mem_reserved:.2f}GB, free={mem_free:.2f}GB")
+        
+        # 如果剩余内存过少，先清理
+        if mem_free < 1.0:
+            _debug("CUDA内存不足，执行清理...")
+            torch.cuda.empty_cache()
+            mem_free_after = (torch.cuda.get_device_properties(device).total_memory - torch.cuda.memory_reserved(device)) / 1024**3
+            _debug(f"清理后可用内存: {mem_free_after:.2f}GB")
+    else:
+        raise RuntimeError("CUDA不可用，SDF计算需要GPU支持")
+    
+    try:
+        # 转换为SDF
+        _debug(f"开始调用dense_voxel_to_sparse_sdf (resolution={resolution}, threshold_factor={threshold_factor})...")
+        sdf_result = dense_voxel_to_sparse_sdf(
+            window_data,
+            resolution=resolution,
+            threshold_factor=threshold_factor,
+            marching_cubes_level=0.5
+        )
+        _debug(f"SDF转换成功: sparse_sdf.shape={sdf_result['sparse_sdf'].shape}, sparse_index.shape={sdf_result['sparse_index'].shape}")
+        
+    except RuntimeError as e:
+        error_msg = f"SDF转换失败 (RuntimeError): {e}"
+        _debug(error_msg)
+        _debug(f"可能原因: CUDA内存溢出、Marching Cubes失败、或数据异常")
+        _debug(f"调试信息汇总:\n" + "\n".join(debug_info))
+        raise RuntimeError(error_msg) from e
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        error_msg = f"SDF转换失败 ({type(e).__name__}): {e}\n{error_trace}"
+        _debug(error_msg)
+        _debug(f"调试信息汇总:\n" + "\n".join(debug_info))
+        raise
+    finally:
+        # 清理CUDA内存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     return sdf_result
 

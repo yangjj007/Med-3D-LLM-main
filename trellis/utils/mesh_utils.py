@@ -149,6 +149,14 @@ def dense_voxel_to_sparse_sdf(
             - resolution: Grid resolution
     """
     import scipy.ndimage as ndimage
+    import sys
+    
+    # 调试函数
+    def _debug(msg):
+        print(f"[MESH_UTILS_DEBUG] {msg}", file=sys.stderr, flush=True)
+    
+    _debug(f"开始dense_voxel_to_sparse_sdf: voxel_grid.shape={voxel_grid.shape}, resolution={resolution}")
+    _debug(f"  voxel_grid统计: dtype={voxel_grid.dtype}, min={voxel_grid.min()}, max={voxel_grid.max()}, sum={voxel_grid.sum()}")
     
     # Ensure correct shape
     if voxel_grid.ndim != 3:
@@ -157,6 +165,7 @@ def dense_voxel_to_sparse_sdf(
     # Resize if needed
     current_res = voxel_grid.shape[0]
     if current_res != resolution:
+        _debug(f"  调整分辨率: {current_res} -> {resolution}")
         zoom_factor = resolution / current_res
         voxel_grid = ndimage.zoom(
             voxel_grid.astype(np.float32),
@@ -164,38 +173,70 @@ def dense_voxel_to_sparse_sdf(
             order=0  # Nearest neighbor for binary data
         )
         voxel_grid = (voxel_grid > 0.5).astype(np.float32)
+        _debug(f"  调整后: shape={voxel_grid.shape}, sum={voxel_grid.sum()}")
     
     # Check if CUDA is available
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for dense_voxel_to_sparse_sdf. Please use a GPU.")
     
+    # CUDA内存检查
+    device = torch.cuda.current_device()
+    mem_before = torch.cuda.memory_allocated(device) / 1024**3
+    _debug(f"  CUDA内存 (开始): {mem_before:.2f}GB")
+    
     # Step 1: Voxel → Mesh using Marching Cubes
+    _debug(f"  步骤1: Marching Cubes (level={marching_cubes_level})")
     try:
         vertices, faces, _, _ = measure.marching_cubes(
             voxel_grid, 
             level=marching_cubes_level, 
             method="lewiner"
         )
+        _debug(f"  Marching Cubes成功: vertices={len(vertices)}, faces={len(faces)}")
     except Exception as e:
-        raise RuntimeError(f"Marching Cubes failed: {str(e)}. The voxel grid may be empty or invalid.")
+        import traceback
+        error_trace = traceback.format_exc()
+        _debug(f"  Marching Cubes失败: {type(e).__name__}: {e}")
+        _debug(f"  错误堆栈:\n{error_trace}")
+        raise RuntimeError(f"Marching Cubes failed: {str(e)}. The voxel grid may be empty or invalid.") from e
     
     # Check if mesh is valid
     if len(vertices) == 0 or len(faces) == 0:
+        _debug(f"  Marching Cubes生成空网格: vertices={len(vertices)}, faces={len(faces)}")
         raise ValueError("Marching Cubes produced empty mesh. The voxel grid may contain no occupied voxels.")
     
     # Step 2: Normalize vertices to [-0.5, 0.5] range
+    _debug(f"  步骤2: 归一化顶点")
     vertices = vertices / resolution - 0.5
+    _debug(f"  顶点范围: min={vertices.min()}, max={vertices.max()}")
     
     # Step 3: Convert to torch tensors on CUDA
-    # Make copies to avoid negative stride issues with numpy arrays from Marching Cubes
-    vertices_cuda = torch.from_numpy(vertices.copy()).float().cuda() * 0.5
-    faces_cuda = torch.from_numpy(faces.copy()).int().cuda()
+    _debug(f"  步骤3: 转换到CUDA")
+    try:
+        # Make copies to avoid negative stride issues with numpy arrays from Marching Cubes
+        vertices_cuda = torch.from_numpy(vertices.copy()).float().cuda() * 0.5
+        faces_cuda = torch.from_numpy(faces.copy()).int().cuda()
+        mem_after_mesh = torch.cuda.memory_allocated(device) / 1024**3
+        _debug(f"  CUDA内存 (网格数据): {mem_after_mesh:.2f}GB (增加 {mem_after_mesh-mem_before:.2f}GB)")
+    except Exception as e:
+        import traceback
+        _debug(f"  CUDA转换失败: {type(e).__name__}: {e}")
+        _debug(f"  错误堆栈:\n{traceback.format_exc()}")
+        raise RuntimeError(f"Failed to move mesh to CUDA: {e}") from e
     
     # Step 4: Mesh → SDF using compute_valid_udf
-    udf = torch.zeros(resolution**3, device='cuda').int() + 10000000
+    _debug(f"  步骤4: 计算UDF (resolution={resolution}, threshold_factor={threshold_factor})")
+    try:
+        udf = torch.zeros(resolution**3, device='cuda').int() + 10000000
+        mem_after_udf_alloc = torch.cuda.memory_allocated(device) / 1024**3
+        _debug(f"  CUDA内存 (UDF分配): {mem_after_udf_alloc:.2f}GB (增加 {mem_after_udf_alloc-mem_after_mesh:.2f}GB)")
+    except Exception as e:
+        _debug(f"  UDF内存分配失败: {type(e).__name__}: {e}")
+        raise RuntimeError(f"Failed to allocate UDF tensor: {e}") from e
     
     try:
         import udf_ext
+        _debug(f"  调用udf_ext.compute_valid_udf...")
         udf_ext.compute_valid_udf(
             vertices_cuda, 
             faces_cuda, 
@@ -204,29 +245,66 @@ def dense_voxel_to_sparse_sdf(
             resolution, 
             threshold_factor
         )
-    except ImportError:
+        _debug(f"  UDF计算完成")
+    except ImportError as e:
+        _debug(f"  udf_ext未安装: {e}")
         raise ImportError(
             "udf_ext CUDA extension not found. "
             "Please compile in the third_party/voxelize directory by running: "
             "cd third_party/voxelize && pip install -e . --no-build-isolation"
-        )
+        ) from e
+    except Exception as e:
+        import traceback
+        _debug(f"  UDF计算失败: {type(e).__name__}: {e}")
+        _debug(f"  错误堆栈:\n{traceback.format_exc()}")
+        raise RuntimeError(f"UDF computation failed: {e}") from e
     
     # Convert UDF to float and reshape
-    sdf = udf.float() / 10000000.0
-    sdf = sdf.reshape(resolution, resolution, resolution)
+    _debug(f"  步骤5: 转换UDF为SDF")
+    try:
+        sdf = udf.float() / 10000000.0
+        sdf = sdf.reshape(resolution, resolution, resolution)
+        _debug(f"  SDF统计: min={sdf.min().item():.6f}, max={sdf.max().item():.6f}, mean={sdf.mean().item():.6f}")
+    except Exception as e:
+        _debug(f"  SDF转换失败: {type(e).__name__}: {e}")
+        raise RuntimeError(f"SDF conversion failed: {e}") from e
     
     # Step 5: Extract sparse representation (only points near surface)
+    _debug(f"  步骤6: 提取稀疏表示")
     threshold = threshold_factor / resolution
+    _debug(f"  阈值: {threshold:.6f}")
     sparse_mask = sdf < threshold
+    sparse_count = sparse_mask.sum().item()
+    _debug(f"  稀疏点数: {sparse_count}")
+    
+    if sparse_count == 0:
+        _debug(f"  警告: 没有点低于阈值")
+        raise ValueError(f"No points found below threshold {threshold:.6f}")
+    
     sparse_indices = sparse_mask.nonzero(as_tuple=False)  # [N, 3]
     sparse_sdf_values = sdf[sparse_mask].unsqueeze(-1)  # [N, 1]
     
     # Step 6: Convert to numpy and return
-    result = {
-        'sparse_sdf': sparse_sdf_values.cpu().numpy().astype(np.float32),
-        'sparse_index': sparse_indices.cpu().numpy().astype(np.int32),
-        'resolution': resolution,
-    }
+    _debug(f"  步骤7: 转换回numpy")
+    try:
+        result = {
+            'sparse_sdf': sparse_sdf_values.cpu().numpy().astype(np.float32),
+            'sparse_index': sparse_indices.cpu().numpy().astype(np.int32),
+            'resolution': resolution,
+        }
+        _debug(f"  完成: sparse_sdf.shape={result['sparse_sdf'].shape}, sparse_index.shape={result['sparse_index'].shape}")
+    except Exception as e:
+        _debug(f"  numpy转换失败: {type(e).__name__}: {e}")
+        raise RuntimeError(f"Failed to convert result to numpy: {e}") from e
+    finally:
+        # 清理CUDA内存
+        try:
+            del udf, sdf, sparse_mask, sparse_indices, sparse_sdf_values, vertices_cuda, faces_cuda
+            torch.cuda.empty_cache()
+            mem_final = torch.cuda.memory_allocated(device) / 1024**3
+            _debug(f"  CUDA内存 (清理后): {mem_final:.2f}GB")
+        except:
+            pass
     
     return result
 
