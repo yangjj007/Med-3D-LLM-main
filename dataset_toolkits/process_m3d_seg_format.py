@@ -304,11 +304,44 @@ def process_m3d_seg_case(case_info: Dict,
     seg_adapted = None
     if seg_array is not None:
         # 处理分割数组维度
+        print(f"     [适配前检查] seg_array形状: {seg_array.shape}, 维度: {seg_array.ndim}")
         if seg_array.ndim == 4:
-            seg_array = seg_array.squeeze()
+            print(f"     [警告] seg_array是4D数据！")
+            print(f"     [分析] 各维度大小: {seg_array.shape}")
+            
+            # 检查是否是 one-hot 编码
+            if seg_array.shape[0] <= 20:  # 假设通道在第一维且不超过20个器官
+                print(f"     [分析] 假设格式为 (C, Z, Y, X)，C={seg_array.shape[0]} 个通道")
+                print(f"     [分析] 检查是否为 one-hot 编码...")
+                
+                # 统计每个通道的体素数
+                channel_sums = [seg_array[i].sum() for i in range(min(5, seg_array.shape[0]))]
+                print(f"     [分析] 前{len(channel_sums)}个通道的非零体素数: {channel_sums}")
+                
+                # 检查是否为 one-hot（每个位置只有一个通道为1）
+                sum_along_channel = seg_array.sum(axis=0)
+                max_overlap = sum_along_channel.max()
+                print(f"     [分析] 通道重叠检查: max={max_overlap} (1.0=完美one-hot)")
+                
+                if max_overlap <= 1.1:
+                    print(f"     [决策] 检测到 one-hot 编码，使用 argmax 转换为标签")
+                    seg_array = np.argmax(seg_array, axis=0).astype(np.uint8)
+                    print(f"     [转换后] 形状: {seg_array.shape}, 唯一标签: {np.unique(seg_array)[:20]}")
+                else:
+                    print(f"     [决策] 不是标准 one-hot，尝试 squeeze")
+                    seg_array = seg_array.squeeze()
+                    if seg_array.ndim == 4:
+                        print(f"     [警告] squeeze 无效，强制取第一个通道")
+                        seg_array = seg_array[0]
+                    print(f"     [转换后] 形状: {seg_array.shape}")
+            else:
+                print(f"     [决策] 通道数异常，尝试 squeeze")
+                seg_array = seg_array.squeeze()
+            
+            print(f"     [最终] seg_array形状: {seg_array.shape}")
         
         seg_adapted = adapt_resolution(seg_array, target_resolution, fill_value=0, mode='constant')
-        print(f"     分割标签已适配")
+        print(f"     分割标签已适配，形状: {seg_adapted.shape}")
     
     # 根据 use_mask 参数选择不同的处理流程
     organs_info = []
@@ -348,6 +381,31 @@ def process_m3d_seg_case(case_info: Dict,
                 if compute_sdf:
                     from ct_preprocessing.sdf_processor import convert_window_to_sdf, save_sdf_result
                     try:
+                        # SDF计算前检查维度
+                        print(f"       [SDF准备] organ_binary形状: {organ_binary.shape}, 维度: {organ_binary.ndim}")
+                        
+                        if organ_binary.ndim != 3:
+                            print(f"       [SDF错误] organ_binary不是3D数据！")
+                            print(f"       [分析] 当前形状: {organ_binary.shape}")
+                            print(f"       [分析] seg_adapted形状: {seg_adapted.shape}")
+                            
+                            if organ_binary.ndim == 4:
+                                print(f"       [分析] 4D数据各通道体素数:")
+                                for i in range(min(5, organ_binary.shape[0])):
+                                    print(f"         - 通道{i}: {organ_binary[i].sum()} 个非零体素")
+                                
+                                # 尝试修复
+                                if organ_binary.shape[0] == 1:
+                                    organ_binary = organ_binary[0]
+                                    print(f"       [修复] 移除第一维，新形状: {organ_binary.shape}")
+                                elif 1 in organ_binary.shape:
+                                    organ_binary = organ_binary.squeeze()
+                                    print(f"       [修复] squeeze后形状: {organ_binary.shape}")
+                                else:
+                                    print(f"       [修复] 强制取第一个通道")
+                                    organ_binary = organ_binary[0]
+                                    print(f"       [修复后] 形状: {organ_binary.shape}")
+                        
                         sdf_result = convert_window_to_sdf(
                             organ_binary,
                             resolution=sdf_resolution,
@@ -364,6 +422,10 @@ def process_m3d_seg_case(case_info: Dict,
                         print(f"       - SDF点数: {sdf_points}")
                     except Exception as e:
                         print(f"       - SDF计算失败: {e}")
+                        print(f"       [错误详情] organ_binary最终形状: {organ_binary.shape}, 维度: {organ_binary.ndim}")
+                        if organ_binary.ndim == 4:
+                            print(f"       [提示] 问题根源：seg_adapted 或 organ_binary 仍然是4D数据")
+                            print(f"       [提示] 请检查 adapt_resolution 和比较操作是否产生了4D数据")
                 
                 # 记录器官信息
                 organs_info.append({

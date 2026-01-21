@@ -202,7 +202,7 @@ bash scripts/prepare_ct_recursive.sh \
     5 \
     --use_mask \
     --compute_sdf \
-    --replace_npy
+    --replace_npy > sdf_preprocess.log 2>&1
 ```
 
 #### 可选参数：--use_mask（掩码模式）
