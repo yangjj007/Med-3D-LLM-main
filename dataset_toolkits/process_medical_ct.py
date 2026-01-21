@@ -332,15 +332,49 @@ def process_single_case(case_info: Dict,
                         
                         # 如果是4维数据，需要处理
                         if organ_binary.ndim == 4:
-                            print(f"         [警告] 检测到4维数据！尝试修复...")
-                            if organ_binary.shape[0] == 1:
-                                organ_binary = organ_binary[0]
-                                print(f"         [修复] 移除第一维，新形状: {organ_binary.shape}")
-                            else:
-                                print(f"         [错误] 第一维大小为{organ_binary.shape[0]}，无法自动处理")
-                                print(f"         [尝试] 使用第一个通道: organ_binary[0]")
+                            print(f"         [警告] 检测到4维数据！开始分析结构...")
+                            print(f"         [分析] 形状: {organ_binary.shape}")
+                            print(f"         [分析] 可能的通道维度提示：维度中较小的值通常是通道数")
+                            # 打印每个维度大小，便于判断通道位置
+                            for idx, dim in enumerate(organ_binary.shape):
+                                print(f"         [分析] 维度{idx}: {dim}")
+
+                            # 计算各维度的候选通道（<=10认为可能是通道）
+                            channel_candidates = [i for i, d in enumerate(organ_binary.shape) if d <= 10]
+                            print(f"         [分析] 候选通道维度(<=10): {channel_candidates}")
+
+                            # 输出每个候选通道的非零体素数，帮助判断是否one-hot
+                            for ch_dim in channel_candidates:
+                                # 统计该维度每个“通道”的体素数
+                                channel_counts = []
+                                for ch in range(organ_binary.shape[ch_dim]):
+                                    if ch_dim == 0:
+                                        channel_counts.append(int(organ_binary[ch].sum()))
+                                    elif ch_dim == 1:
+                                        channel_counts.append(int(organ_binary[:, ch].sum()))
+                                    elif ch_dim == 2:
+                                        channel_counts.append(int(organ_binary[:, :, ch].sum()))
+                                    else:
+                                        channel_counts.append(int(organ_binary[:, :, :, ch].sum()))
+                                print(f"         [分析] 维度{ch_dim}各通道体素数: {channel_counts}")
+
+                            # 尝试自动处理：优先移除尺寸为1的维度
+                            if 1 in organ_binary.shape:
+                                squeeze_axis = organ_binary.shape.index(1)
+                                organ_binary = np.squeeze(organ_binary, axis=squeeze_axis)
+                                print(f"         [修复] 移除尺寸为1的维度{ squeeze_axis }，新形状: {organ_binary.shape}")
+                            elif organ_binary.shape[0] <= 10:
+                                # 通道在第0维，尝试取第一个通道
+                                print(f"         [尝试] 假设通道在第0维，使用第一个通道 organ_binary[0]")
                                 organ_binary = organ_binary[0]
                                 print(f"         [修复] 新形状: {organ_binary.shape}")
+                            elif organ_binary.shape[-1] <= 10:
+                                # 通道在最后一维，尝试取第一个通道
+                                print(f"         [尝试] 假设通道在最后一维，使用第一个通道 organ_binary[..., 0]")
+                                organ_binary = organ_binary[..., 0]
+                                print(f"         [修复] 新形状: {organ_binary.shape}")
+                            else:
+                                print(f"         [错误] 无法自动确定通道维度，请人工检查数据格式")
                         
                         sdf_result = convert_window_to_sdf(
                             organ_binary,
