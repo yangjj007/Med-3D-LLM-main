@@ -24,6 +24,7 @@ import sys
 import json
 import time
 import argparse
+import re
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -106,7 +107,13 @@ def load_m3d_seg_case(case_dir: str) -> tuple:
     
     # 从文件名解析形状
     mask_filename = os.path.basename(mask_file)
-    shape_str = mask_filename.split('.')[-2].split('_')[-1]
+    # 提取括号中的形状信息
+    # 文件名格式: mask_(3, 512, 512, 633).npz
+    shape_match = re.search(r'\([\d,\s]+\)', mask_filename)
+    if not shape_match:
+        print(f"  警告: 无法从文件名解析mask形状: {mask_filename}")
+        return ct_array, None, None
+    shape_str = shape_match.group(0)
     mask_shape = ast.literal_eval(shape_str)
     
     # 加载稀疏矩阵
