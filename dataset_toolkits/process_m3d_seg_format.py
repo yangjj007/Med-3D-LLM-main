@@ -252,7 +252,8 @@ def process_m3d_seg_case(case_info: Dict,
                          sdf_resolution: int = 512,
                          sdf_threshold_factor: float = 4.0,
                          replace_npy: bool = False,
-                         use_mask: bool = False) -> Dict:
+                         use_mask: bool = False,
+                         skip_existing: bool = True) -> Dict:
     """
     处理M3D-Seg格式的单个病例
     
@@ -266,6 +267,7 @@ def process_m3d_seg_case(case_info: Dict,
         sdf_threshold_factor: SDF阈值因子
         replace_npy: 是否用NPZ替换NPY文件
         use_mask: 是否使用掩码模式（跳过窗位窗宽处理）
+        skip_existing: 是否跳过已处理的病例
     
     Returns:
         处理结果信息
@@ -273,11 +275,26 @@ def process_m3d_seg_case(case_info: Dict,
     case_id = case_info['case_id']
     case_dir = case_info['case_dir']
     
+    # 创建输出目录
+    case_output_dir = os.path.join(output_dir, 'processed', case_id)
+    
+    # 检查是否已处理（断点续传功能）
+    if skip_existing:
+        info_path = os.path.join(case_output_dir, 'info.json')
+        if os.path.exists(info_path):
+            try:
+                with open(info_path, 'r', encoding='utf-8') as f:
+                    existing_info = json.load(f)
+                print(f"\n⏭️  跳过已处理病例: {case_id} (耗时: {existing_info.get('processing_time_sec', 0):.2f}秒)")
+                # 添加标记表示这是跳过的病例
+                existing_info['_skipped'] = True
+                return existing_info
+            except Exception as e:
+                print(f"\n⚠️  警告: 读取已有info.json失败: {e}，将重新处理病例: {case_id}")
+    
     print(f"\n处理病例: {case_id}")
     start_time = time.time()
     
-    # 创建输出目录
-    case_output_dir = os.path.join(output_dir, 'processed', case_id)
     os.makedirs(case_output_dir, exist_ok=True)
     if not use_mask:
         os.makedirs(os.path.join(case_output_dir, 'windows'), exist_ok=True)
@@ -623,7 +640,8 @@ def process_m3d_seg_dataset(dataset_root: str,
                             sdf_resolution: int = 512,
                             sdf_threshold_factor: float = 4.0,
                             replace_npy: bool = False,
-                            use_mask: bool = False) -> pd.DataFrame:
+                            use_mask: bool = False,
+                            skip_existing: bool = True) -> pd.DataFrame:
     """
     处理完整的M3D-Seg数据集
     
@@ -637,6 +655,7 @@ def process_m3d_seg_dataset(dataset_root: str,
         sdf_threshold_factor: SDF阈值因子
         replace_npy: 是否用NPZ替换NPY文件
         use_mask: 是否使用掩码模式（跳过窗位窗宽处理）
+        skip_existing: 是否跳过已处理的病例（断点续传）
     
     Returns:
         元数据DataFrame
@@ -672,6 +691,18 @@ def process_m3d_seg_dataset(dataset_root: str,
         print(f"  数据集: {organ_mapping['dataset_name']}")
         print(f"  器官数: {len(organ_mapping['organ_labels'])}")
     
+    # 检查已处理的病例数量（用于断点续传统计）
+    if skip_existing:
+        existing_count = 0
+        for case_info in case_list:
+            info_path = os.path.join(output_dir, 'processed', case_info['case_id'], 'info.json')
+            if os.path.exists(info_path):
+                existing_count += 1
+        
+        if existing_count > 0:
+            print(f"\n✓ 断点续传: 发现 {existing_count} 个已处理病例，将跳过")
+            print(f"  待处理: {len(case_list) - existing_count} 个病例")
+    
     # 处理所有病例
     print(f"\n开始处理（并行进程数: {num_workers}）...")
     print("=" * 70)
@@ -690,11 +721,12 @@ def process_m3d_seg_dataset(dataset_root: str,
                     sdf_resolution,
                     sdf_threshold_factor,
                     replace_npy,
-                    use_mask
+                    use_mask,
+                    skip_existing
                 )
                 metadata_list.append(info)
             except Exception as e:
-                print(f"  错误: {case_info['case_id']}: {e}")
+                print(f"  ❌ 错误: {case_info['case_id']}: {e}")
     else:
         with ProcessPoolExecutor(max_workers=num_workers) as executor:
             futures = []
@@ -709,7 +741,8 @@ def process_m3d_seg_dataset(dataset_root: str,
                     sdf_resolution,
                     sdf_threshold_factor,
                     replace_npy,
-                    use_mask
+                    use_mask,
+                    skip_existing
                 )
                 futures.append((future, case_info['case_id']))
             
@@ -723,6 +756,18 @@ def process_m3d_seg_dataset(dataset_root: str,
     # 生成元数据
     print("\n" + "=" * 70)
     print("生成元数据...")
+    
+    # 统计跳过和处理的病例
+    skipped_count = sum(1 for info in metadata_list if info.get('_skipped', False))
+    processed_count = len(metadata_list) - skipped_count
+    
+    if skip_existing and skipped_count > 0:
+        print(f"  ✓ 跳过已处理: {skipped_count} 个病例")
+        print(f"  ✓ 新处理: {processed_count} 个病例")
+    
+    # 清理临时标记
+    for info in metadata_list:
+        info.pop('_skipped', None)
     
     metadata_df = pd.DataFrame(metadata_list)
     
@@ -787,6 +832,8 @@ def main():
                        help='用NPZ文件替换原NPY文件')
     parser.add_argument('--use_mask', action='store_true',
                        help='直接使用分割掩码生成二值化体素网格，跳过窗位窗宽处理')
+    parser.add_argument('--no_skip', action='store_true',
+                       help='不跳过已处理的病例，强制重新处理所有病例')
     
     args = parser.parse_args()
     
@@ -799,7 +846,8 @@ def main():
         sdf_resolution=args.sdf_resolution,
         sdf_threshold_factor=args.sdf_threshold_factor,
         replace_npy=args.replace_npy,
-        use_mask=args.use_mask
+        use_mask=args.use_mask,
+        skip_existing=not args.no_skip
     )
     
     print("\n全部完成！")
