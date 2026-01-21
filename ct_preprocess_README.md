@@ -198,7 +198,7 @@ bash scripts/prepare_ct_recursive.sh \
     ./M3D_Seg \
     ./processed_dataset \
     ./organ_labels.json \
-    15 \
+    8 \
     5 \
     --use_mask \
     --compute_sdf \

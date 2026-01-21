@@ -322,9 +322,15 @@ def process_m3d_seg_case(case_info: Dict,
         info_path = os.path.join(case_output_dir, 'info.json')
         if os.path.exists(info_path):
             try:
+                skip_start = time.time()
                 with open(info_path, 'r', encoding='utf-8') as f:
                     existing_info = json.load(f)
-                print(f"\n⏭️  跳过已处理病例: {case_id} (耗时: {existing_info.get('processing_time_sec', 0):.2f}秒)")
+                skip_time = time.time() - skip_start
+                
+                # 显示更清晰的信息：区分原处理时间和跳过操作时间
+                original_time = existing_info.get('processing_time_sec', 0)
+                print(f"\n⏭️  跳过已处理: {case_id} | 跳过用时: {skip_time:.3f}秒 | 节省: {original_time:.2f}秒")
+                
                 # 添加标记表示这是跳过的病例
                 existing_info['_skipped'] = True
                 return existing_info
