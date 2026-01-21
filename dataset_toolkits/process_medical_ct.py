@@ -275,8 +275,33 @@ def process_single_case(case_info: Dict,
     # 如果有分割标签，也进行适配
     seg_adapted = None
     if seg_array is not None:
+        # 在适配前再次确保seg_array是3D的
+        print(f"     [适配前检查] seg_array形状: {seg_array.shape}, 维度: {seg_array.ndim}")
+        if seg_array.ndim == 4:
+            print(f"     [警告] seg_array仍是4D！尝试修复...")
+            print(f"     [分析] 各维度大小: {seg_array.shape}")
+            
+            # 分析每个通道的体素数
+            if seg_array.shape[0] <= 10:  # 假设通道在第一维
+                print(f"     [分析] 假设通道在第0维，各通道体素数:")
+                for i in range(seg_array.shape[0]):
+                    print(f"       - 通道{i}: {seg_array[i].sum()} 个体素")
+                print(f"     [决策] 取第一个通道")
+                seg_array = seg_array[0]
+            elif seg_array.shape[-1] <= 10:  # 假设通道在最后一维
+                print(f"     [分析] 假设通道在最后维，各通道体素数:")
+                for i in range(seg_array.shape[-1]):
+                    print(f"       - 通道{i}: {seg_array[..., i].sum()} 个体素")
+                print(f"     [决策] 取第一个通道")
+                seg_array = seg_array[..., 0]
+            else:
+                print(f"     [错误] 无法确定通道维度，强制squeeze")
+                seg_array = seg_array.squeeze()
+            
+            print(f"     [修复后] seg_array形状: {seg_array.shape}")
+        
         seg_adapted = adapt_resolution(seg_array, target_resolution, fill_value=0, mode='constant')
-        print(f"     分割标签也已适配")
+        print(f"     分割标签已适配，形状: {seg_adapted.shape}")
     
     # 根据 use_mask 参数选择不同的处理流程
     organs_info = []
@@ -392,6 +417,22 @@ def process_single_case(case_info: Dict,
                         print(f"       - SDF点数: {sdf_points}")
                     except Exception as e:
                         print(f"       - SDF计算失败: {e}")
+                        # 如果是维度错误，立即分析organ_binary的结构
+                        if "Expected 3D array" in str(e) or organ_binary.ndim != 3:
+                            print(f"       [错误分析] organ_binary结构详情:")
+                            print(f"         - 当前形状: {organ_binary.shape}")
+                            print(f"         - 当前维度: {organ_binary.ndim}")
+                            print(f"         - 数据类型: {organ_binary.dtype}")
+                            print(f"         - 非零体素: {organ_binary.sum()}")
+                            
+                            if organ_binary.ndim == 4:
+                                print(f"       [错误分析] 4D数据通道分析:")
+                                for i in range(min(organ_binary.shape[0], 5)):
+                                    print(f"         - 通道{i}形状: {organ_binary[i].shape}, 非零: {organ_binary[i].sum()}")
+                                print(f"       [建议] 这是4维数据，可能需要：")
+                                print(f"         1. 如果是(C,Z,Y,X)格式，取第一个通道: organ_binary[0]")
+                                print(f"         2. 如果有size=1的维度，使用np.squeeze()")
+                                print(f"         3. 检查adapt_resolution函数是否错误地增加了维度")
                 
                 # 记录器官信息
                 organs_info.append({
