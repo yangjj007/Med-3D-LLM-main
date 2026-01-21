@@ -409,13 +409,13 @@ def process_m3d_seg_case(case_info: Dict,
                     }, f, indent=2, ensure_ascii=False)
                 print(f"     保存器官标签映射: masks/organ_labels.json")
             
-            # 保存完整的分割掩码（稀疏格式）
-            mask_shape_save = seg_adapted.shape
-            seg_flat = seg_adapted.reshape(-1)
-            seg_sparse = sparse.csr_matrix(seg_flat)
-            mask_path = os.path.join(masks_dir, 'segmentation_masks.npz')
-            sparse.save_npz(mask_path, seg_sparse)
-            print(f"     保存分割掩码: masks/segmentation_masks.npz")
+            # 保存完整的分割掩码（稀疏格式）- 已禁用以节省空间
+            # mask_shape_save = seg_adapted.shape
+            # seg_flat = seg_adapted.reshape(-1)
+            # seg_sparse = sparse.csr_matrix(seg_flat)
+            # mask_path = os.path.join(masks_dir, 'segmentation_masks.npz')
+            # sparse.save_npz(mask_path, seg_sparse)
+            # print(f"     保存分割掩码: masks/segmentation_masks.npz")
         else:
             print(f"  警告: 掩码模式需要分割标签和器官映射，跳过处理")
     
@@ -524,16 +524,16 @@ def process_m3d_seg_case(case_info: Dict,
                 
                 print(f"       {organ_name}: {organ_stats['voxel_count']} 体素")
             
-            # 保存分割掩码
-            masks_dir = os.path.join(case_output_dir, 'masks')
-            os.makedirs(masks_dir, exist_ok=True)
-            
-            mask_shape_save = seg_adapted.shape
-            seg_flat = seg_adapted.reshape(-1)
-            seg_sparse = sparse.csr_matrix(seg_flat)
-            mask_path = os.path.join(masks_dir, 'segmentation_masks.npz')
-            sparse.save_npz(mask_path, seg_sparse)
-            print(f"     保存分割掩码")
+            # 保存分割掩码 - 已禁用以节省空间
+            # masks_dir = os.path.join(case_output_dir, 'masks')
+            # os.makedirs(masks_dir, exist_ok=True)
+            # 
+            # mask_shape_save = seg_adapted.shape
+            # seg_flat = seg_adapted.reshape(-1)
+            # seg_sparse = sparse.csr_matrix(seg_flat)
+            # mask_path = os.path.join(masks_dir, 'segmentation_masks.npz')
+            # sparse.save_npz(mask_path, seg_sparse)
+            # print(f"     保存分割掩码")
         else:
             print(f"  4. 跳过器官处理")
     
@@ -559,7 +559,7 @@ def process_m3d_seg_case(case_info: Dict,
         'processing_time_sec': round(processing_time, 2),
         'use_mask': use_mask,
         'ct_path': f'processed/{case_id}/ct_original_{target_resolution}.npy' if not use_mask else None,
-        'masks_path': f'processed/{case_id}/masks/segmentation_masks.npz' if seg_array is not None else None,
+        'masks_path': None,  # segmentation_masks.npz 不再保存
         'organ_labels_file': f'processed/{case_id}/masks/organ_labels.json' if use_mask and organs_info else None,
         'source_format': 'm3d_seg'
     }
