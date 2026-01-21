@@ -195,10 +195,10 @@ bash scripts/prepare_ct_recursive.sh \
 
 ```bash
 bash scripts/prepare_ct_recursive.sh \
-    ./med_dataset \
+    ./M3D_Seg \
     ./processed_dataset \
     ./organ_labels.json \
-    8 \
+    15 \
     5 \
     --use_mask \
     --compute_sdf \

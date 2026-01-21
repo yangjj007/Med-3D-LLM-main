@@ -205,8 +205,59 @@ def process_single_case(case_info: Dict,
     if ct_array.ndim == 4 and ct_array.shape[0] == 1:
         ct_array = ct_array[0]  # 移除通道维度
     
+    # ===== 分析4维seg_array的结构 =====
     if seg_array is not None and seg_array.ndim == 4:
-        seg_array = seg_array.squeeze()
+        print(f"\n     [分析] 检测到4维分割数组:")
+        print(f"     [分析] 原始seg_array形状: {seg_array.shape}")
+        print(f"     [分析] 各维度信息:")
+        for i in range(seg_array.ndim):
+            print(f"       - 维度{i}: 大小={seg_array.shape[i]}")
+        
+        # 分析每个通道的内容
+        print(f"     [分析] 第一维度(可能是通道)的内容分析:")
+        for ch in range(seg_array.shape[0]):
+            ch_data = seg_array[ch]
+            unique_values = np.unique(ch_data)
+            non_zero_count = np.count_nonzero(ch_data)
+            print(f"       - 通道{ch}: 唯一值={unique_values[:10]}{'...' if len(unique_values) > 10 else ''}, "
+                  f"非零体素数={non_zero_count}, 非零占比={non_zero_count/ch_data.size*100:.2f}%")
+        
+        # 检查是否是one-hot编码
+        sum_across_channel = seg_array.sum(axis=0)
+        max_sum = sum_across_channel.max()
+        min_sum = sum_across_channel.min()
+        print(f"     [分析] 跨通道求和统计: min={min_sum}, max={max_sum}")
+        if max_sum <= 1.1 and min_sum >= 0:
+            print(f"     [分析] 可能是one-hot编码格式 (每个位置只有一个通道为1)")
+        
+        # 尝试不同的处理策略
+        print(f"     [分析] 尝试处理策略:")
+        print(f"       策略1: squeeze()移除大小为1的维度")
+        seg_squeezed = seg_array.squeeze()
+        print(f"         结果形状: {seg_squeezed.shape}")
+        
+        if seg_squeezed.ndim == 4:  # squeeze没有效果
+            print(f"       策略2: 取第一个通道 seg_array[0]")
+            seg_first = seg_array[0]
+            print(f"         结果形状: {seg_first.shape}, 唯一值: {np.unique(seg_first)[:20]}")
+            
+            print(f"       策略3: argmax沿第一维(适用于one-hot编码)")
+            seg_argmax = np.argmax(seg_array, axis=0)
+            print(f"         结果形状: {seg_argmax.shape}, 唯一值: {np.unique(seg_argmax)[:20]}")
+            
+            # 根据分析结果选择策略
+            if max_sum <= 1.1 and min_sum >= 0:
+                print(f"     [决策] 使用argmax策略（检测到one-hot编码）")
+                seg_array = seg_argmax
+            else:
+                print(f"     [决策] 使用第一个通道（不确定数据格式，保守处理）")
+                seg_array = seg_first
+                print(f"     [警告] 如果结果不正确，请检查数据格式！")
+        else:
+            seg_array = seg_squeezed
+            print(f"     [决策] squeeze成功，使用squeeze后的数据")
+        
+        print(f"     [最终] 处理后seg_array形状: {seg_array.shape}\n")
     
     original_shape = ct_array.shape
     print(f"     原始形状: {original_shape}")
@@ -242,6 +293,9 @@ def process_single_case(case_info: Dict,
             
             # 遍历所有器官
             organ_labels = organ_mapping.get('organ_labels', {})
+            print(f"     [分析] seg_adapted形状: {seg_adapted.shape}, 数据类型: {seg_adapted.dtype}")
+            print(f"     [分析] seg_adapted唯一值: {np.unique(seg_adapted)[:20]}")
+            
             for label_str, organ_info in organ_labels.items():
                 organ_label = int(label_str)
                 organ_name = organ_info['name']
@@ -249,8 +303,13 @@ def process_single_case(case_info: Dict,
                 # 提取器官掩码（二值化：1表示器官，0表示背景）
                 organ_binary = (seg_adapted == organ_label).astype(np.uint8)
                 
+                print(f"     [分析] 器官'{organ_name}'(标签{organ_label}):")
+                print(f"       - organ_binary形状: {organ_binary.shape}, 维度: {organ_binary.ndim}")
+                print(f"       - organ_binary数据类型: {organ_binary.dtype}")
+                
                 # 检查是否存在该器官
                 if organ_binary.sum() == 0:
+                    print(f"       - 该器官不存在，跳过")
                     continue
                 
                 # 保存标签映射：标签值 -> 器官名称
@@ -265,6 +324,24 @@ def process_single_case(case_info: Dict,
                 if compute_sdf:
                     from ct_preprocessing.sdf_processor import convert_window_to_sdf, save_sdf_result
                     try:
+                        print(f"       [SDF] 准备计算SDF:")
+                        print(f"         - 输入数据形状: {organ_binary.shape}")
+                        print(f"         - 输入数据维度: {organ_binary.ndim}")
+                        print(f"         - 输入数据类型: {organ_binary.dtype}")
+                        print(f"         - 非零体素数: {organ_binary.sum()}")
+                        
+                        # 如果是4维数据，需要处理
+                        if organ_binary.ndim == 4:
+                            print(f"         [警告] 检测到4维数据！尝试修复...")
+                            if organ_binary.shape[0] == 1:
+                                organ_binary = organ_binary[0]
+                                print(f"         [修复] 移除第一维，新形状: {organ_binary.shape}")
+                            else:
+                                print(f"         [错误] 第一维大小为{organ_binary.shape[0]}，无法自动处理")
+                                print(f"         [尝试] 使用第一个通道: organ_binary[0]")
+                                organ_binary = organ_binary[0]
+                                print(f"         [修复] 新形状: {organ_binary.shape}")
+                        
                         sdf_result = convert_window_to_sdf(
                             organ_binary,
                             resolution=sdf_resolution,
