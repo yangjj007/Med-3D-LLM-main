@@ -16,6 +16,26 @@ from ..utils.general_utils import *
 from ..utils.data_utils import recursive_to_device, cycle, ResumableSampler
 
 
+def convert_to_serializable(obj):
+    """
+    递归转换对象为 JSON 可序列化的类型
+    """
+    if isinstance(obj, dict):
+        return {key: convert_to_serializable(value) for key, value in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_to_serializable(item) for item in obj]
+    elif isinstance(obj, (np.integer, np.int32, np.int64)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float32, np.float64)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().item() if obj.numel() == 1 else obj.detach().cpu().tolist()
+    else:
+        return obj
+
+
 class Trainer:
     """
     Base class for training.
@@ -567,7 +587,7 @@ class Trainer:
                 if self.step % self.i_log == 0:
                     ## save to log file
                     log_str = '\n'.join([
-                        f'{step}: {json.dumps(log)}' for step, log in log
+                        f'{step}: {json.dumps(convert_to_serializable(log))}' for step, log in log
                     ])
                     with open(os.path.join(self.output_dir, 'log.txt'), 'a') as log_file:
                         log_file.write(log_str + '\n')
