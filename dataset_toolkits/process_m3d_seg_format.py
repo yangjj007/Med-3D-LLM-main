@@ -449,15 +449,24 @@ def process_m3d_seg_case(case_info: Dict,
             # 遍历所有器官
             organ_labels = organ_mapping.get('organ_labels', {})
             print(f"     [调试] 遍历 {len(organ_labels)} 个器官标签")
+            print(f"     [调试] seg_adapted shape: {seg_adapted.shape}, dtype: {seg_adapted.dtype}")
+            print(f"     [调试] seg_adapted唯一值: {np.unique(seg_adapted)}")
+            
             for label_str, organ_info in organ_labels.items():
                 organ_label = int(label_str)
                 organ_name = organ_info['name']
                 
+                print(f"     [调试] 处理器官: {organ_name} (标签值={organ_label})")
+                
                 # 提取器官掩码（二值化：1表示器官，0表示背景）
                 organ_binary = (seg_adapted == organ_label).astype(np.uint8)
+                voxel_count = int(organ_binary.sum())
+                
+                print(f"     [调试] 器官 {organ_name} 的体素数: {voxel_count}")
                 
                 # 检查是否存在该器官
-                if organ_binary.sum() == 0:
+                if voxel_count == 0:
+                    print(f"     [调试] 跳过器官 {organ_name}：体素数为0")
                     continue
                 
                 # 保存标签映射：标签值 -> 器官名称
