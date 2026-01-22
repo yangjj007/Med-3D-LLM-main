@@ -158,6 +158,7 @@ def build_organ_mapping_from_json(dataset_json: Dict, dataset_root: str = None) 
     
     # 方法1: 从'labels'字段读取（字典格式：{label_id: label_name}）
     labels = dataset_json.get('labels', {})
+    print(f"  [调试] 从JSON读取的labels: {labels}")
     
     # 方法2: 从'label_names'字段读取（可能是列表或字典）
     if not labels:
@@ -189,8 +190,10 @@ def build_organ_mapping_from_json(dataset_json: Dict, dataset_root: str = None) 
     
     # 转换标签格式并自动推断窗口类型
     for label_id, label_name in labels.items():
+        print(f"  [调试] 处理标签: {label_id} -> {label_name}")
         # 跳过背景标签
         if str(label_id) == '0' or label_name.lower() in ['background', '背景']:
+            print(f"  [调试] 跳过背景标签: {label_id}")
             continue
         
         # 根据器官名称自动推断合适的窗口设置
@@ -204,8 +207,10 @@ def build_organ_mapping_from_json(dataset_json: Dict, dataset_root: str = None) 
             'window': window,
             'original_name': label_name
         }
+        print(f"  [调试] 添加器官: {label_id} -> {clean_name} (窗口: {window})")
     
     print(f"  构建器官映射: {len(organ_mapping['organ_labels'])}个器官")
+    print(f"  [调试] 最终organ_mapping['organ_labels']: {organ_mapping['organ_labels']}")
     
     return organ_mapping
 
@@ -429,6 +434,13 @@ def process_m3d_seg_case(case_info: Dict,
         # ===== 掩码模式：直接从分割掩码提取各器官二值化网格 =====
         print(f"  3. 使用掩码模式（跳过窗位窗宽处理）...")
         
+        # 调试信息
+        print(f"     [调试] seg_adapted is None: {seg_adapted is None}")
+        print(f"     [调试] organ_mapping is None: {organ_mapping is None}")
+        if organ_mapping is not None:
+            print(f"     [调试] organ_mapping keys: {organ_mapping.keys()}")
+            print(f"     [调试] organ_labels: {organ_mapping.get('organ_labels', {})}")
+        
         if seg_adapted is not None and organ_mapping is not None:
             organ_label_to_name = {}  # 标签值 -> 器官名称的映射
             masks_dir = os.path.join(case_output_dir, 'masks')
@@ -436,6 +448,7 @@ def process_m3d_seg_case(case_info: Dict,
             
             # 遍历所有器官
             organ_labels = organ_mapping.get('organ_labels', {})
+            print(f"     [调试] 遍历 {len(organ_labels)} 个器官标签")
             for label_str, organ_info in organ_labels.items():
                 organ_label = int(label_str)
                 organ_name = organ_info['name']
