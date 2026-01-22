@@ -405,26 +405,45 @@ def process_m3d_seg_case(case_info: Dict,
     # 如果有分割标签，也进行适配
     seg_adapted = None
     if seg_array is not None:
+        print(f"     [调试] 原始seg_array形状: {seg_array.shape}, dtype: {seg_array.dtype}")
+        print(f"     [调试] 原始seg_array唯一值: {np.unique(seg_array)}")
+        
         # 处理分割数组维度（4D -> 3D）
         if seg_array.ndim == 4:
+            print(f"     [调试] seg_array是4D，开始降维处理...")
             # 检查是否是 one-hot 编码
             if seg_array.shape[0] <= 20:  # 通道在第一维
-                sum_along_channel = seg_array.sum(axis=0)
-                max_overlap = sum_along_channel.max()
+                print(f"     [调试] 第一维度={seg_array.shape[0]} <= 20，检查是否one-hot编码")
                 
-                if max_overlap <= 1.1:
-                    # one-hot 编码，使用 argmax 转换
-                    seg_array = np.argmax(seg_array, axis=0).astype(np.uint8)
-                else:
-                    # 非 one-hot，尝试 squeeze 或取第一个通道
+                # 如果第一维度是1，直接squeeze，不是one-hot
+                if seg_array.shape[0] == 1:
+                    print(f"     [调试] 第一维度=1，直接squeeze")
                     seg_array = seg_array.squeeze()
-                    if seg_array.ndim == 4:
-                        seg_array = seg_array[0]
+                else:
+                    sum_along_channel = seg_array.sum(axis=0)
+                    max_overlap = sum_along_channel.max()
+                    print(f"     [调试] max_overlap={max_overlap}")
+                    
+                    if max_overlap <= 1.1:
+                        # one-hot 编码，使用 argmax 转换
+                        print(f"     [调试] 判断为one-hot编码，使用argmax")
+                        seg_array = np.argmax(seg_array, axis=0).astype(np.uint8)
+                    else:
+                        # 非 one-hot，尝试 squeeze 或取第一个通道
+                        print(f"     [调试] 非one-hot，使用squeeze")
+                        seg_array = seg_array.squeeze()
+                        if seg_array.ndim == 4:
+                            seg_array = seg_array[0]
             else:
+                print(f"     [调试] 第一维度={seg_array.shape[0]} > 20，直接squeeze")
                 seg_array = seg_array.squeeze()
+        
+        print(f"     [调试] 降维后seg_array形状: {seg_array.shape}")
+        print(f"     [调试] 降维后seg_array唯一值: {np.unique(seg_array)}")
         
         seg_adapted = adapt_resolution(seg_array, target_resolution, fill_value=0, mode='constant')
         print(f"     分割标签已适配")
+        print(f"     [调试] 适配后seg_adapted唯一值: {np.unique(seg_adapted)}")
     
     # 根据 use_mask 参数选择不同的处理流程
     organs_info = []
