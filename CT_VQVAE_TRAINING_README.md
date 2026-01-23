@@ -114,7 +114,7 @@ python train.py \
     --config configs/vae/ct_vqvae_stage2.json \
     --output_dir outputs/ct_vqvae_lung_stage2 \
     --data_dir ./processed_dataset \
-    --num_gpus 1 > stage2_train.log 2>&1
+    --num_gpus 4 > stage2_train.log 2>&1
 ```
 
 可选参数，或者config中配置阶段一训练权重：
