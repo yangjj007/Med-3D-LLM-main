@@ -101,9 +101,9 @@ bash scripts/prepare_ct_recursive.sh \
 export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/ct_vqvae_stage1.json \
-    --output_dir outputs/ct_vqvae_lung_stage1 \
+    --output_dir outputs/ct_vqvae_stage1 \
     --data_dir ./processed_dataset \
-    --num_gpus 1 > stage1_train.log 2>&1
+    --num_gpus 4 > stage1_train.log 2>&1
 ```
 
 ### 步骤3：阶段2训练 - 联合微调
@@ -112,7 +112,7 @@ python train.py \
 export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/ct_vqvae_stage2.json \
-    --output_dir outputs/ct_vqvae_lung_stage2 \
+    --output_dir outputs/ct_vqvae_stage2 \
     --data_dir ./processed_dataset \
     --num_gpus 4 > stage2_train.log 2>&1
 ```

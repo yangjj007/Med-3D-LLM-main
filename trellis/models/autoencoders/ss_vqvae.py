@@ -24,8 +24,8 @@ class SparseVectorQuantizer(nn.Module):
         self.beta = beta
         
         self.embeddings = nn.Embedding(self.num_embeddings, self.embedding_dim)
-        self.embeddings.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
-        # self.embeddings.weight.data.normal_(mean=0.0, std=1.0)
+        # self.embeddings.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
+        self.embeddings.weight.data.normal_(mean=0.0, std=1.0)
     
 
     def forward(self, z: sp.SparseTensor, only_return_indices: bool = False):
