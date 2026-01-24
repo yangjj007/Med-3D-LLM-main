@@ -47,7 +47,7 @@
             "optimizer": {
                 "name": "AdamW",
                 "args": {
-                    "lr": 1e-3,
+                    "lr": 5e-3,
                     "weight_decay": 0.01
                 }
             },
