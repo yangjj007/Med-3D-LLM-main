@@ -410,12 +410,13 @@ class SparseSDFVQVAE(nn.Module):
         return meshes
     
     @torch.no_grad()
-    def load_pretrained_vae(self, encoder_state_dict: dict, decoder_state_dict: dict):
+    def load_pretrained_vae(self, encoder_state_dict: dict, decoder_state_dict: dict, vq_state_dict: dict = None):
         """
         加载预训练的 VAE 参数
         Args:
             encoder_state_dict: 预训练的 encoder 权重字典
             decoder_state_dict: 预训练的 decoder 权重字典
+            vq_state_dict: 预训练的 VQ 权重字典（可选）
         """
         # 加载 encoder 参数
         encoder_dict = self.encoder.state_dict()
@@ -430,6 +431,41 @@ class SparseSDFVQVAE(nn.Module):
         print(f"✅ Loaded pretrained VAE parameters")
         print(f"   Encoder: {len(encoder_state_dict)} parameters loaded")
         print(f"   Decoder: {len(decoder_state_dict)} parameters loaded")
+        
+        # 加载 VQ 参数（如果提供）
+        if vq_state_dict is not None and len(vq_state_dict) > 0:
+            vq_dict = self.vq.state_dict()
+            
+            # 筛选可用的参数（避免形状不匹配）
+            loaded_keys = []
+            skipped_keys = []
+            for key, value in vq_state_dict.items():
+                if key in vq_dict:
+                    if vq_dict[key].shape == value.shape:
+                        vq_dict[key] = value
+                        loaded_keys.append(key)
+                    else:
+                        skipped_keys.append(f"{key} (shape mismatch: {vq_dict[key].shape} vs {value.shape})")
+                else:
+                    skipped_keys.append(f"{key} (not found in current model)")
+            
+            # 加载更新后的参数
+            self.vq.load_state_dict(vq_dict, strict=False)
+            
+            print(f"   VQ: {len(loaded_keys)} parameters loaded")
+            if loaded_keys:
+                print(f"      Loaded: {', '.join(loaded_keys)}")
+            if skipped_keys:
+                print(f"      Skipped: {', '.join(skipped_keys)}")
+            
+            # 特别说明EMA buffer的处理
+            if self.use_ema_update:
+                if 'ema_cluster_size' in loaded_keys and 'ema_w' in loaded_keys:
+                    print(f"      ℹ️  EMA buffers loaded from pretrained model")
+                else:
+                    print(f"      ⚠️  EMA buffers not found in pretrained model, will be initialized from scratch")
+        else:
+            print(f"   VQ: No pretrained VQ parameters provided, using random initialization")
     
     # def convert_to_fp16(self) -> None:
     #     """

@@ -155,13 +155,20 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             if k.startswith('decoder.')
         }
         
+        # Get VQ state dict (if exists)
+        vq_state_dict = {
+            k.replace('vq.', ''): v
+            for k, v in vae_state_dict.items()
+            if k.startswith('vq.')
+        }
+        
         # Load into VQVAE model
         vqvae = self.models['vqvae']
         if hasattr(vqvae, 'module'):
             vqvae = vqvae.module
         
         if hasattr(vqvae, 'load_pretrained_vae'):
-            vqvae.load_pretrained_vae(encoder_state_dict, decoder_state_dict)
+            vqvae.load_pretrained_vae(encoder_state_dict, decoder_state_dict, vq_state_dict)
             if self.is_master:
                 print('Successfully loaded pretrained VAE weights')
         else:
