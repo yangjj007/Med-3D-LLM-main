@@ -37,13 +37,10 @@ class SparseVectorQuantizer(nn.Module):
         if use_ema_update:
             # EMA模式：禁用梯度，注册统计buffer
             self.embeddings.weight.requires_grad = False
-            # 标准EMA实现里，ema_cluster_size / ema_w 通常带一个“先验”(pseudo-count)初始化，
-            # 否则在训练最初期（尤其是K很大、batch里只激活少量code时），拉普拉斯平滑会让未使用code的
-            # smoothed_cluster_size 变得极小，从而导致 e = w / c 数值不稳定（爆炸或坍塌到0向量）。
-            #
-            # 这里采用常见且稳定的初始化：
-            # - ema_cluster_size 初始化为 1（每个code一个先验计数）
-            # - ema_w 初始化为当前embedding（对应先验计数为1时，e = w/c = embedding，不会突变）
+            # 🔧 使用拉普拉斯先验（伪计数）初始化，避免未使用码本坍塌为0
+            # ema_cluster_size = 1: 每个码本有1次先验计数
+            # ema_w = embedding: 当c=1时，e=w/c=embedding，保持初始分布
+            # 这样未使用的码本会保持原值，而不是衰减到0向量
             self.register_buffer('ema_cluster_size', torch.ones(num_embeddings))
             self.register_buffer('ema_w', self.embeddings.weight.data.clone())
         # else: 梯度模式保持默认requires_grad=True
@@ -154,9 +151,13 @@ class SparseVectorQuantizer(nn.Module):
         )
         print(f"[DEBUG EMA] Smoothed cluster size: min={smoothed_cluster_size.min().item():.6f}, max={smoothed_cluster_size.max().item():.6f}, mean={smoothed_cluster_size.mean().item():.6f}")
         
-        # 更新码本向量
+        # 更新码本向量（所有码本，包括未使用的）
         new_embeddings = new_w / (smoothed_cluster_size.unsqueeze(1) + 1e-7)
-        print(f"[DEBUG EMA] NEW embeddings (before copy): min={new_embeddings.min().item():.6f}, max={new_embeddings.max().item():.6f}, mean={new_embeddings.mean().item():.6f}, std={new_embeddings.std().item():.6f}")
+        print(f"[DEBUG EMA] NEW embeddings (all codes): min={new_embeddings.min().item():.6f}, max={new_embeddings.max().item():.6f}, mean={new_embeddings.mean().item():.6f}, std={new_embeddings.std().item():.6f}")
+        
+        # 统计实际使用的码本数量（去除先验计数影响）
+        used_codes = (new_cluster_size > 1.5).sum().item()  # > 1.5表示除了先验1次外，实际被使用过
+        print(f"[DEBUG EMA] Actually used codes: {used_codes}/{self.num_embeddings} (cluster_size > 1.5)")
         
         self.embeddings.weight.data.copy_(new_embeddings)
         
