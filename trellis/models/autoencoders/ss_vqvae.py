@@ -329,7 +329,10 @@ class SparseSDFVQVAE(nn.Module):
         
         # 量化（替代 VAE 的采样）
         quantized, vq_loss, commitment_loss, _ = self.vq(h)
-        print(f"[DEBUG encode] Quantization results: vq_loss={vq_loss.item():.6f}, commitment_loss={commitment_loss.item():.6f}")
+        if vq_loss is not None:
+            print(f"[DEBUG encode] Quantization results: vq_loss={vq_loss.item():.6f}, commitment_loss={commitment_loss.item():.6f}")
+        else:
+            print(f"[DEBUG encode] Quantization results: vq_loss=None (EMA mode), commitment_loss={commitment_loss.item():.6f}")
 
         return quantized, vq_loss, commitment_loss
     
