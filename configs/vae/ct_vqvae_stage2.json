@@ -7,7 +7,7 @@
                 "vq_decay": 0.99,
                 "vq_epsilon": 1e-5,
                 "use_kmeans_reinit": true,
-                "kmeans_interval": 2000,
+                "kmeans_interval": 50,
                 "reservoir_size": 16384,
                 "resolution": 64,
                 "model_channels": 512,
