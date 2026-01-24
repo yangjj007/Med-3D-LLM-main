@@ -60,6 +60,12 @@ class SparseVectorQuantizer(nn.Module):
         print(f"[DEBUG VQ] Codebook: min={self.embeddings.weight.min().item():.6f}, max={self.embeddings.weight.max().item():.6f}, mean={self.embeddings.weight.mean().item():.6f}, std={self.embeddings.weight.std().item():.6f}")
         print(f"[DEBUG VQ] Codebook requires_grad: {self.embeddings.weight.requires_grad}, use_ema_update: {self.use_ema_update}")
         
+        # 检查码本是否有异常（太多零向量）
+        codebook_norms = torch.norm(self.embeddings.weight, dim=1)  # [num_embeddings]
+        zero_codes = (codebook_norms < 0.01).sum().item()
+        print(f"[DEBUG VQ] Codebook norms: min={codebook_norms.min().item():.6f}, max={codebook_norms.max().item():.6f}, mean={codebook_norms.mean().item():.6f}")
+        print(f"[DEBUG VQ] Near-zero codes (norm<0.01): {zero_codes}/{self.num_embeddings}")
+        
         # z.feats: [N, embedding_dim]
         z_flatten = z.feats  # [N, embedding_dim]
         
@@ -67,8 +73,19 @@ class SparseVectorQuantizer(nn.Module):
         distances = torch.cdist(z_flatten, self.embeddings.weight)  # [N, num_embeddings]
         print(f"[DEBUG VQ] Distances: min={distances.min().item():.6f}, max={distances.max().item():.6f}, mean={distances.mean().item():.6f}")
         
+        # 统计最小距离的分布
+        min_distances = distances.min(dim=1)[0]  # [N]
+        print(f"[DEBUG VQ] Min distances: mean={min_distances.mean().item():.6f}, std={min_distances.std().item():.6f}, median={min_distances.median().item():.6f}")
+        
         encoding_indices = torch.argmin(distances, dim=1)  # [N]
-        print(f"[DEBUG VQ] Encoding indices: unique codes used={len(torch.unique(encoding_indices))}/{self.num_embeddings}")
+        unique_codes = torch.unique(encoding_indices)
+        print(f"[DEBUG VQ] Encoding indices: unique codes used={len(unique_codes)}/{self.num_embeddings}")
+        
+        # 统计每个码本被使用的次数
+        if len(unique_codes) < 100:  # 只在激活少时打印
+            counts = torch.bincount(encoding_indices, minlength=self.num_embeddings)
+            used_counts = counts[counts > 0]
+            print(f"[DEBUG VQ] Usage distribution: min={used_counts.min().item()}, max={used_counts.max().item()}, mean={used_counts.float().mean().item():.1f}")
         
         if only_return_indices:
             # 返回 indices 作为 SparseTensor，保持原始坐标
