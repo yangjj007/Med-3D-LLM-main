@@ -111,25 +111,53 @@ class SparseVectorQuantizer(nn.Module):
             encoding_indices: 分配的码本索引 [N]
             z_flatten: encoder输出的特征向量 [N, embedding_dim]
         """
+        print(f"[DEBUG EMA] === Starting EMA Update ===")
+        print(f"[DEBUG EMA] Input z_flatten: shape={z_flatten.shape}, min={z_flatten.min().item():.6f}, max={z_flatten.max().item():.6f}, mean={z_flatten.mean().item():.6f}, std={z_flatten.std().item():.6f}")
+        print(f"[DEBUG EMA] Encoding indices: shape={encoding_indices.shape}, unique codes={len(torch.unique(encoding_indices))}/{self.num_embeddings}")
+        
         # 计算one-hot编码
         encodings = F.one_hot(encoding_indices, self.num_embeddings).float()  # [N, num_embeddings]
+        print(f"[DEBUG EMA] One-hot encodings: shape={encodings.shape}, sum={encodings.sum().item():.1f}")
+        
+        # 检查当前EMA状态
+        print(f"[DEBUG EMA] OLD ema_cluster_size: sum={self.ema_cluster_size.sum().item():.1f}, min={self.ema_cluster_size.min().item():.6f}, max={self.ema_cluster_size.max().item():.6f}")
+        print(f"[DEBUG EMA] OLD ema_w: min={self.ema_w.min().item():.6f}, max={self.ema_w.max().item():.6f}, mean={self.ema_w.mean().item():.6f}")
+        print(f"[DEBUG EMA] OLD embeddings: min={self.embeddings.weight.data.min().item():.6f}, max={self.embeddings.weight.data.max().item():.6f}, mean={self.embeddings.weight.data.mean().item():.6f}")
         
         # EMA更新统计量
-        new_cluster_size = self.decay * self.ema_cluster_size + (1 - self.decay) * encodings.sum(0)
-        new_w = self.decay * self.ema_w + (1 - self.decay) * (encodings.t() @ z_flatten)
+        batch_cluster_size = encodings.sum(0)  # [num_embeddings]
+        print(f"[DEBUG EMA] Batch cluster size: sum={batch_cluster_size.sum().item():.1f}, nonzero={(batch_cluster_size > 0).sum().item()}/{self.num_embeddings}")
+        
+        new_cluster_size = self.decay * self.ema_cluster_size + (1 - self.decay) * batch_cluster_size
+        print(f"[DEBUG EMA] NEW cluster_size: sum={new_cluster_size.sum().item():.1f}, min={new_cluster_size.min().item():.6f}, max={new_cluster_size.max().item():.6f}")
+        
+        # 计算batch的加权特征和
+        batch_w = encodings.t() @ z_flatten  # [num_embeddings, embedding_dim]
+        print(f"[DEBUG EMA] Batch_w (encodings.t() @ z_flatten): shape={batch_w.shape}, min={batch_w.min().item():.6f}, max={batch_w.max().item():.6f}, mean={batch_w.mean().item():.6f}")
+        
+        new_w = self.decay * self.ema_w + (1 - self.decay) * batch_w
+        print(f"[DEBUG EMA] NEW ema_w: min={new_w.min().item():.6f}, max={new_w.max().item():.6f}, mean={new_w.mean().item():.6f}")
         
         # 拉普拉斯平滑（避免某些码本从未被使用）
         n = new_cluster_size.sum()
+        print(f"[DEBUG EMA] Total cluster size n: {n.item():.1f}")
+        
         smoothed_cluster_size = (
             (new_cluster_size + self.epsilon) / (n + self.num_embeddings * self.epsilon) * n
         )
+        print(f"[DEBUG EMA] Smoothed cluster size: min={smoothed_cluster_size.min().item():.6f}, max={smoothed_cluster_size.max().item():.6f}, mean={smoothed_cluster_size.mean().item():.6f}")
         
         # 更新码本向量
-        self.embeddings.weight.data.copy_(new_w / (smoothed_cluster_size.unsqueeze(1) + 1e-7))
+        new_embeddings = new_w / (smoothed_cluster_size.unsqueeze(1) + 1e-7)
+        print(f"[DEBUG EMA] NEW embeddings (before copy): min={new_embeddings.min().item():.6f}, max={new_embeddings.max().item():.6f}, mean={new_embeddings.mean().item():.6f}, std={new_embeddings.std().item():.6f}")
+        
+        self.embeddings.weight.data.copy_(new_embeddings)
         
         # 更新buffer
         self.ema_cluster_size.copy_(new_cluster_size)
         self.ema_w.copy_(new_w)
+        
+        print(f"[DEBUG EMA] === EMA Update Complete ===\n")
 
 
 class SparseSDFVQVAE(nn.Module):
