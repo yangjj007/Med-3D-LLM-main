@@ -37,12 +37,13 @@ class SparseVectorQuantizer(nn.Module):
         if use_ema_update:
             # EMA模式：禁用梯度，注册统计buffer
             self.embeddings.weight.requires_grad = False
-            # 🔧 使用拉普拉斯先验（伪计数）初始化，避免未使用码本坍塌为0
-            # ema_cluster_size = 1: 每个码本有1次先验计数
-            # ema_w = embedding: 当c=1时，e=w/c=embedding，保持初始分布
-            # 这样未使用的码本会保持原值，而不是衰减到0向量
-            self.register_buffer('ema_cluster_size', torch.ones(num_embeddings))
-            self.register_buffer('ema_w', self.embeddings.weight.data.clone())
+            # 🔧 修复：使用0初始化，在第一个batch后才开始EMA更新
+            # 这避免了初始化带来的假设，让码本完全由数据驱动
+            # 对于未使用的码本，通过拉普拉斯平滑保持为初始值
+            self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
+            self.register_buffer('ema_w', torch.zeros(num_embeddings, embedding_dim))
+            # 标记是否是第一次EMA更新
+            self.register_buffer('_ema_initialized', torch.tensor(False))
         # else: 梯度模式保持默认requires_grad=True
     
 
@@ -145,6 +146,21 @@ class SparseVectorQuantizer(nn.Module):
         print(f"[DEBUG EMA] OLD ema_w: min={self.ema_w.min().item():.6f}, max={self.ema_w.max().item():.6f}, mean={self.ema_w.mean().item():.6f}")
         print(f"[DEBUG EMA] OLD embeddings: min={self.embeddings.weight.data.min().item():.6f}, max={self.embeddings.weight.data.max().item():.6f}, mean={self.embeddings.weight.data.mean().item():.6f}")
         
+        # 第一次初始化：直接用batch统计初始化EMA
+        if not self._ema_initialized:
+            print(f"[DEBUG EMA] ⚠️  First EMA update - Initializing from batch statistics")
+            batch_cluster_size = encodings.sum(0)  # [num_embeddings]
+            batch_w = encodings.t() @ z_flatten  # [num_embeddings, embedding_dim]
+            
+            # 对于未使用的码本，保持原始初始化值
+            # 对于使用过的码本，用batch统计初始化
+            self.ema_cluster_size.copy_(batch_cluster_size)
+            self.ema_w.copy_(batch_w)
+            self._ema_initialized.fill_(True)
+            
+            print(f"[DEBUG EMA] Initialized ema_cluster_size: sum={self.ema_cluster_size.sum().item():.1f}, nonzero={(self.ema_cluster_size > 0).sum().item()}/{self.num_embeddings}")
+            print(f"[DEBUG EMA] Initialized ema_w: min={self.ema_w.min().item():.6f}, max={self.ema_w.max().item():.6f}")
+        
         # EMA更新统计量
         batch_cluster_size = encodings.sum(0)  # [num_embeddings]
         print(f"[DEBUG EMA] Batch cluster size: sum={batch_cluster_size.sum().item():.1f}, nonzero={(batch_cluster_size > 0).sum().item()}/{self.num_embeddings}")
@@ -166,15 +182,23 @@ class SparseVectorQuantizer(nn.Module):
         smoothed_cluster_size = (
             (new_cluster_size + self.epsilon) / (n + self.num_embeddings * self.epsilon) * n
         )
-        print(f"[DEBUG EMA] Smoothed cluster size: min={smoothed_cluster_size.min().item():.6f}, max={smoothed_cluster_size.max().item():.6f}, mean={smoothed_cluster_size.mean().item():.6f}")
+        print(f"[DEBUG EMA] Smoothed cluster size: min={smoothed_cluster_size.min().item():.6f}, max={smoothed_cluster_size.max().item():.6f}, mean={smoothed_cluster_size.mean():.6f}")
         
-        # 更新码本向量（所有码本，包括未使用的）
-        new_embeddings = new_w / (smoothed_cluster_size.unsqueeze(1) + 1e-7)
+        # 更新码本向量
+        # 对于使用过的码本（new_cluster_size > 0），用EMA更新
+        # 对于从未使用的码本（new_cluster_size == 0），保持初始值
+        new_embeddings = torch.zeros_like(self.embeddings.weight.data)
+        used_mask = new_cluster_size > 0
+        new_embeddings[used_mask] = new_w[used_mask] / (smoothed_cluster_size[used_mask].unsqueeze(1) + 1e-7)
+        new_embeddings[~used_mask] = self.embeddings.weight.data[~used_mask]  # 保持未使用码本不变
+        
         print(f"[DEBUG EMA] NEW embeddings (all codes): min={new_embeddings.min().item():.6f}, max={new_embeddings.max().item():.6f}, mean={new_embeddings.mean().item():.6f}, std={new_embeddings.std().item():.6f}")
+        print(f"[DEBUG EMA] Used codes: {used_mask.sum().item()}/{self.num_embeddings}, Unused codes: {(~used_mask).sum().item()}/{self.num_embeddings}")
         
-        # 统计实际使用的码本数量（去除先验计数影响）
-        used_codes = (new_cluster_size > 1.5).sum().item()  # > 1.5表示除了先验1次外，实际被使用过
-        print(f"[DEBUG EMA] Actually used codes: {used_codes}/{self.num_embeddings} (cluster_size > 1.5)")
+        # 检查更新后的码本中是否有near-zero向量
+        updated_norms = torch.norm(new_embeddings[used_mask], dim=1)
+        if len(updated_norms) > 0:
+            print(f"[DEBUG EMA] Updated codes norms: min={updated_norms.min().item():.6f}, max={updated_norms.max().item():.6f}, mean={updated_norms.mean().item():.6f}")
         
         self.embeddings.weight.data.copy_(new_embeddings)
         
