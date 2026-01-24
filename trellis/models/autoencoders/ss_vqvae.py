@@ -38,7 +38,9 @@ class SparseVectorQuantizer(nn.Module):
             # EMA模式：禁用梯度，注册统计buffer
             self.embeddings.weight.requires_grad = False
             self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
-            self.register_buffer('ema_w', self.embeddings.weight.data.clone())
+            # 🔧 修复：ema_w应该初始化为0，而不是码本权重的副本
+            # ema_w是累积的特征和，初始状态应该是零向量
+            self.register_buffer('ema_w', torch.zeros(num_embeddings, embedding_dim))
         # else: 梯度模式保持默认requires_grad=True
     
 
