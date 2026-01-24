@@ -189,14 +189,25 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
                 for param in vqvae.decoder.parameters():
                     param.requires_grad = False
             
-            # Ensure VQ parameters are trainable
+            # Ensure VQ parameters are trainable (except for EMA mode where embeddings have no grad)
             if hasattr(vqvae, 'vq'):
                 for param in vqvae.vq.parameters():
                     param.requires_grad = True
+                # 但如果是EMA模式，码本权重不需要梯度
+                if hasattr(vqvae, 'use_ema_update') and vqvae.use_ema_update:
+                    vqvae.vq.embeddings.weight.requires_grad = False
             
             if self.is_master:
                 print("\n" + "=" * 80)
                 print("[Stage 1] Encoder and Decoder frozen, training Codebook only")
+                
+                # 打印码本更新模式
+                if hasattr(vqvae, 'use_ema_update'):
+                    if vqvae.use_ema_update:
+                        print(f"[Codebook Update Mode] EMA (decay={vqvae.vq.decay}, epsilon={vqvae.vq.epsilon})")
+                    else:
+                        print(f"[Codebook Update Mode] Gradient (lambda_vq={self.lambda_vq})")
+                
                 print("=" * 80)
                 
                 # Count trainable parameters
@@ -212,9 +223,21 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             for param in vqvae.parameters():
                 param.requires_grad = True
             
+            # 但如果是EMA模式，码本权重不需要梯度
+            if hasattr(vqvae, 'use_ema_update') and vqvae.use_ema_update:
+                vqvae.vq.embeddings.weight.requires_grad = False
+            
             if self.is_master:
                 print("\n" + "=" * 80)
                 print("[Stage 2] Joint training: Encoder + Decoder + Codebook")
+                
+                # 打印码本更新模式
+                if hasattr(vqvae, 'use_ema_update'):
+                    if vqvae.use_ema_update:
+                        print(f"[Codebook Update Mode] EMA (decay={vqvae.vq.decay}, epsilon={vqvae.vq.epsilon})")
+                    else:
+                        print(f"[Codebook Update Mode] Gradient (lambda_vq={self.lambda_vq})")
+                
                 print("=" * 80)
                 
                 # Count trainable parameters
@@ -298,15 +321,18 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         
         # Extract outputs from dictionary
         recon = outputs['reconst_x']
-        vq_loss = outputs['vq_loss']
+        vq_loss = outputs.get('vq_loss')  # 可能为None（EMA模式）
         commitment_loss = outputs['commitment_loss']
         
         print(f"[DEBUG training_losses] VQVAE输出:")
         print(f"  recon.shape: {recon.shape}, recon.feats.shape: {recon.feats.shape}")
         print(f"  recon.feats - min: {recon.feats.min().item():.6f}, max: {recon.feats.max().item():.6f}, mean: {recon.feats.mean().item():.6f}")
-        print(f"  vq_loss: {vq_loss.item():.6f} (type: {type(vq_loss)})")
+        if vq_loss is not None:
+            print(f"  vq_loss: {vq_loss.item():.6f} (type: {type(vq_loss)})")
+            print(f"  vq_loss requires_grad: {vq_loss.requires_grad}")
+        else:
+            print(f"  vq_loss: None (EMA update mode)")
         print(f"  commitment_loss: {commitment_loss.item():.6f} (type: {type(commitment_loss)})")
-        print(f"  vq_loss requires_grad: {vq_loss.requires_grad}")
         print(f"  commitment_loss requires_grad: {commitment_loss.requires_grad}")
         
         # Align reconstruction with input coordinates (ShapeLLM方法)
@@ -371,22 +397,31 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         print(f"  lambda_vq: {self.lambda_vq}")
         print(f"  lambda_commitment: {self.lambda_commitment}")
         
-        # Total loss
-        total_loss = recon_loss + self.lambda_vq * vq_loss + self.lambda_commitment * commitment_loss
-        
-        print(f"[DEBUG training_losses] 总损失:")
-        print(f"  total_loss: {total_loss.item():.6f}")
-        print(f"  total_loss requires_grad: {total_loss.requires_grad}")
-        print(f"  计算: {recon_loss.item():.6f} + {self.lambda_vq}*{vq_loss.item():.6f} + {self.lambda_commitment}*{commitment_loss.item():.6f}")
+        # Total loss - 根据vq_loss是否为None选择不同的计算方式
+        if vq_loss is not None:
+            # 梯度模式：使用vq_loss
+            total_loss = recon_loss + self.lambda_vq * vq_loss + self.lambda_commitment * commitment_loss
+            print(f"[DEBUG training_losses] 总损失 (梯度模式):")
+            print(f"  total_loss: {total_loss.item():.6f}")
+            print(f"  total_loss requires_grad: {total_loss.requires_grad}")
+            print(f"  计算: {recon_loss.item():.6f} + {self.lambda_vq}*{vq_loss.item():.6f} + {self.lambda_commitment}*{commitment_loss.item():.6f}")
+        else:
+            # EMA模式：不使用vq_loss
+            total_loss = recon_loss + self.lambda_commitment * commitment_loss
+            print(f"[DEBUG training_losses] 总损失 (EMA模式):")
+            print(f"  total_loss: {total_loss.item():.6f}")
+            print(f"  total_loss requires_grad: {total_loss.requires_grad}")
+            print(f"  计算: {recon_loss.item():.6f} + {self.lambda_commitment}*{commitment_loss.item():.6f}")
         print(f"{'='*100}\n")
         
         # Loss dictionary
         terms = edict(
             loss=total_loss,
             recon=recon_loss,
-            vq=vq_loss,
             commitment=commitment_loss,
         )
+        if vq_loss is not None:
+            terms['vq'] = vq_loss
         
         # Status dictionary with additional metrics
         status = edict(

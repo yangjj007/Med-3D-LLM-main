@@ -15,17 +15,31 @@ from .decoder import SparseSDFDecoder
 class SparseVectorQuantizer(nn.Module):
     """
     稀疏张量的 Vector Quantizer
-    参考 vae_2_vqvae_example.py 中的 VectorQuantizer 实现
+    支持两种码本更新模式：
+    1. 梯度更新模式 (use_ema_update=False): 通过反向传播更新码本
+    2. EMA更新模式 (use_ema_update=True): 通过指数移动平均统计更新码本
     """
-    def __init__(self, num_embeddings: int = 8192, embedding_dim: int = 64, beta: float = 0.25):
+    def __init__(self, num_embeddings: int = 8192, embedding_dim: int = 64, beta: float = 0.25,
+                 use_ema_update: bool = False, decay: float = 0.99, epsilon: float = 1e-5):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.beta = beta
+        self.use_ema_update = use_ema_update
+        self.decay = decay
+        self.epsilon = epsilon
         
+        # 码本嵌入
         self.embeddings = nn.Embedding(self.num_embeddings, self.embedding_dim)
-        # self.embeddings.weight.data.uniform_(-1/self.num_embeddings, 1/self.num_embeddings)
         self.embeddings.weight.data.normal_(mean=0.0, std=1.0)
+        
+        # 根据更新模式设置requires_grad和初始化buffer
+        if use_ema_update:
+            # EMA模式：禁用梯度，注册统计buffer
+            self.embeddings.weight.requires_grad = False
+            self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
+            self.register_buffer('ema_w', self.embeddings.weight.data.clone())
+        # else: 梯度模式保持默认requires_grad=True
     
 
     def forward(self, z: sp.SparseTensor, only_return_indices: bool = False):
@@ -36,10 +50,11 @@ class SparseVectorQuantizer(nn.Module):
         Returns:
             如果 only_return_indices=True: 返回 indices 的 SparseTensor
             否则: 返回 (quantized, vq_loss, commitment_loss, encoding_indices)
+            注意：当use_ema_update=True时，vq_loss为None
         """
         print(f"\n[DEBUG VQ] Input z.feats: shape={z.feats.shape}, min={z.feats.min().item():.6f}, max={z.feats.max().item():.6f}, mean={z.feats.mean().item():.6f}, std={z.feats.std().item():.6f}")
         print(f"[DEBUG VQ] Codebook: min={self.embeddings.weight.min().item():.6f}, max={self.embeddings.weight.max().item():.6f}, mean={self.embeddings.weight.mean().item():.6f}, std={self.embeddings.weight.std().item():.6f}")
-        print(f"[DEBUG VQ] Codebook requires_grad: {self.embeddings.weight.requires_grad}")
+        print(f"[DEBUG VQ] Codebook requires_grad: {self.embeddings.weight.requires_grad}, use_ema_update: {self.use_ema_update}")
         
         # z.feats: [N, embedding_dim]
         z_flatten = z.feats  # [N, embedding_dim]
@@ -60,12 +75,21 @@ class SparseVectorQuantizer(nn.Module):
         quantized_feats = self.embeddings(encoding_indices)  # [N, embedding_dim]
         print(f"[DEBUG VQ] Quantized feats: min={quantized_feats.min().item():.6f}, max={quantized_feats.max().item():.6f}, mean={quantized_feats.mean().item():.6f}")
         
-        # 计算损失
+        # 计算commitment loss（两种模式都需要）
         commitment_loss = F.mse_loss(z_flatten, quantized_feats.detach())
-        vq_loss = F.mse_loss(quantized_feats, z_flatten.detach())
         
-        print(f"[DEBUG VQ] VQ Loss: {vq_loss.item():.6f}, Commitment Loss: {commitment_loss.item():.6f}")
-        print(f"[DEBUG VQ] VQ Loss requires_grad: {vq_loss.requires_grad}, Commitment Loss requires_grad: {commitment_loss.requires_grad}")
+        # 根据更新模式选择不同的处理方式
+        if self.use_ema_update:
+            # EMA模式：在训练时调用EMA更新
+            if self.training:
+                self._update_ema(encoding_indices, z_flatten)
+            vq_loss = None  # EMA模式不需要vq_loss
+            print(f"[DEBUG VQ] EMA mode - Commitment Loss: {commitment_loss.item():.6f}, VQ Loss: None")
+        else:
+            # 梯度模式：计算vq_loss用于反向传播
+            vq_loss = F.mse_loss(quantized_feats, z_flatten.detach())
+            print(f"[DEBUG VQ] Gradient mode - VQ Loss: {vq_loss.item():.6f}, Commitment Loss: {commitment_loss.item():.6f}")
+            print(f"[DEBUG VQ] VQ Loss requires_grad: {vq_loss.requires_grad}, Commitment Loss requires_grad: {commitment_loss.requires_grad}")
         
         # Straight-through estimator
         quantized_feats = z_flatten + (quantized_feats - z_flatten).detach()
@@ -77,6 +101,35 @@ class SparseVectorQuantizer(nn.Module):
         print(f"[DEBUG VQ] Output quantized feats: min={quantized.feats.min().item():.6f}, max={quantized.feats.max().item():.6f}, requires_grad={quantized.feats.requires_grad}\n")
         
         return quantized, vq_loss, commitment_loss, encoding_indices_st
+    
+    @torch.no_grad()
+    def _update_ema(self, encoding_indices, z_flatten):
+        """
+        使用EMA更新码本（仅在use_ema_update=True时调用）
+        
+        Args:
+            encoding_indices: 分配的码本索引 [N]
+            z_flatten: encoder输出的特征向量 [N, embedding_dim]
+        """
+        # 计算one-hot编码
+        encodings = F.one_hot(encoding_indices, self.num_embeddings).float()  # [N, num_embeddings]
+        
+        # EMA更新统计量
+        new_cluster_size = self.decay * self.ema_cluster_size + (1 - self.decay) * encodings.sum(0)
+        new_w = self.decay * self.ema_w + (1 - self.decay) * (encodings.t() @ z_flatten)
+        
+        # 拉普拉斯平滑（避免某些码本从未被使用）
+        n = new_cluster_size.sum()
+        smoothed_cluster_size = (
+            (new_cluster_size + self.epsilon) / (n + self.num_embeddings * self.epsilon) * n
+        )
+        
+        # 更新码本向量
+        self.embeddings.weight.data.copy_(new_w / (smoothed_cluster_size.unsqueeze(1) + 1e-7))
+        
+        # 更新buffer
+        self.ema_cluster_size.copy_(new_cluster_size)
+        self.ema_w.copy_(new_w)
 
 
 class SparseSDFVQVAE(nn.Module):
@@ -107,6 +160,9 @@ class SparseSDFVQVAE(nn.Module):
                  latents_scale: float = 1.0,
                  latents_shift: float = 0.0,
                  num_embeddings: int = 8192,
+                 use_ema_update: bool = False,  # 新增：是否使用EMA更新码本
+                 vq_decay: float = 0.99,        # 新增：EMA衰减率
+                 vq_epsilon: float = 1e-5,      # 新增：拉普拉斯平滑系数
                  mlp_ratio: float = 4,
                  attn_mode: str = "swin",
                  window_size: int = 8,
@@ -201,10 +257,14 @@ class SparseSDFVQVAE(nn.Module):
         self.vq = SparseVectorQuantizer(
             num_embeddings=num_embeddings,
             embedding_dim=embed_dim,
-            beta=0.25
+            beta=0.25,
+            use_ema_update=use_ema_update,
+            decay=vq_decay,
+            epsilon=vq_epsilon
         )
         
         self.embed_dim = embed_dim
+        self.use_ema_update = use_ema_update
 
     def forward(self, batch):
         """

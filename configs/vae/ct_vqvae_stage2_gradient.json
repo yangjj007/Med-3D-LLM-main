@@ -8,9 +8,7 @@
                 "latent_channels": 16,
                 "num_blocks": 8,
                 "num_embeddings": 8192,
-                "use_ema_update": true,
-                "vq_decay": 0.99,
-                "vq_epsilon": 1e-5,
+                "use_ema_update": false,
                 "num_heads": null,
                 "num_head_channels": 64,
                 "mlp_ratio": 4.0,
@@ -69,7 +67,7 @@
                     "clip_percentile": 90
                 }
             },
-            "lambda_vq": 0.0,
+            "lambda_vq": 1.0,
             "lambda_commitment": 0.25,
             "loss_type": "l1_l2",
             "i_print": 100,
@@ -80,3 +78,4 @@
         }
     }
 }
+
