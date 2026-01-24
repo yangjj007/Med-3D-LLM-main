@@ -39,7 +39,7 @@
         "args": {
             "training_stage": 2,
             "num_workers": 30,
-            "pretrained_vae_path": "./outputs/ct_vqvae_lung_stage1/ckpts/vqvae_step0000500.pth",
+            "pretrained_vae_path": "./outputs/ct_vqvae_stage1_8192/ckpts/vqvae_ema0.9999_step0000150.pth",
             "max_steps": 100000,
             "max_epoch": 1,
             "batch_size_per_gpu": 8,
