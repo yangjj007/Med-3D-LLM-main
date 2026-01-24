@@ -138,9 +138,11 @@ python train.py \
 - **周期性无条件触发**
 
 ### 分布式训练支持
-- 使用 `torch.distributed.all_gather` 收集所有 GPU 的特征
-- K-means 聚类在所有进程上同步执行
-- 码本更新后自动同步到所有 GPU
+- **水塘采样**：每个 GPU 独立维护自己的采样器（避免频繁同步）
+- **K-means 聚类**：只在重估计时进行一次性同步
+  - 使用 `send`/`recv` 收集所有 GPU 的样本到 rank 0
+  - 只在 rank 0 执行 K-means 聚类（避免重复计算）
+  - 使用 `broadcast` 将更新后的码本同步到所有 GPU
 
 ## 预期效果
 
@@ -198,6 +200,14 @@ python train.py \
 ### 问题：分布式训练报错 "Tensors must be contiguous"
 - **原因**：`dist.all_gather` 要求张量连续存储
 - **解决**：已在代码中修复，确保调用 `contiguous()` 处理张量
+
+### 问题：分布式训练 NCCL 超时（ALLGATHER timeout）
+- **症状**：`Watchdog caught collective operation timeout: WorkNCCL(OpType=ALLGATHER)`
+- **原因**：在 `add()` 方法中频繁调用 `all_gather` 导致死锁
+- **解决**：
+  - ✅ 已修复：每个 GPU 独立维护水塘采样器
+  - ✅ 只在 K-means 重估计时才进行跨 GPU 同步
+  - ✅ 使用 `send`/`recv` + `broadcast` 替代 `all_gather`
 
 ## 参考资料
 

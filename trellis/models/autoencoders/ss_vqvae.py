@@ -27,7 +27,7 @@ class ReservoirSampler(nn.Module):
         
     def add(self, samples: torch.Tensor):
         """
-        添加样本到水塘
+        添加样本到水塘（每个 GPU 独立维护）
         Args:
             samples: [N, D] 特征张量
         """
@@ -35,10 +35,6 @@ class ReservoirSampler(nn.Module):
             return
             
         samples = samples.detach()
-        
-        # 确保张量是连续的（分布式通信要求）
-        if not samples.is_contiguous():
-            samples = samples.contiguous()
         
         # 初始化 buffer
         if self.buffer is None:
@@ -51,15 +47,7 @@ class ReservoirSampler(nn.Module):
             self.buffer = self.buffer.to(samples.device)
             self.i = self.i.to(samples.device)
         
-        # 如果是分布式训练，收集所有 GPU 的样本
-        if dist.is_initialized():
-            # 使用 all_gather 收集所有进程的样本
-            world_size = dist.get_world_size()
-            # 创建连续的张量列表
-            gathered_samples = [torch.zeros_like(samples).contiguous() for _ in range(world_size)]
-            dist.all_gather(gathered_samples, samples)
-            samples = torch.cat(gathered_samples, dim=0)
-        
+        # 每个 GPU 独立进行水塘采样（不进行跨 GPU 同步）
         for sample in samples:
             if self.i < self.n:
                 # 缓冲区未满，直接添加
@@ -228,33 +216,96 @@ class SparseVectorQuantizer(nn.Module):
         """
         使用 K-means 重新初始化码本
         参考 VQFR 实现，用 K-means 聚类中心整体替换码本权重
+        在分布式训练中，收集所有 GPU 的样本后进行聚类
         """
         if not self.use_kmeans_reinit:
             return
         
-        # 获取收集的特征
+        # 获取当前 GPU 收集的特征
         encodings = self.reestimation_reservoir.contents()
         
-        # 检查样本数量是否足够
-        if encodings.shape[0] < self.num_embeddings:
-            print(f'[K-means 重估计] 跳过：样本数不足 ({encodings.shape[0]} < {self.num_embeddings})')
-            return
-        
-        print(f'[K-means 重估计] 开始，使用 {encodings.shape[0]} 个样本重建 {self.num_embeddings} 个码本向量...')
-        
-        # 转换为 numpy 进行聚类
-        encodings_np = encodings.cpu().numpy()
-        
-        try:
-            # 使用 sklearn 的 K-means 进行聚类
-            clustered, *_ = cluster.k_means(encodings_np, self.num_embeddings, random_state=0)
+        # 如果是分布式训练，收集所有 GPU 的样本
+        if dist.is_initialized():
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
             
-            # 用 K-means 的聚类中心整体替换码本
-            self.embeddings.weight.data[...] = torch.tensor(clustered, 
-                                                            dtype=self.embeddings.weight.dtype,
-                                                            device=self.embeddings.weight.device)
+            # 获取所有 GPU 的样本数量
+            local_size = torch.tensor([encodings.shape[0]], device=encodings.device)
+            size_list = [torch.zeros_like(local_size) for _ in range(world_size)]
+            dist.all_gather(size_list, local_size)
             
-            # 清空水塘采样器，重新收集特征
+            # 计算总样本数
+            total_samples = sum(s.item() for s in size_list)
+            
+            if rank == 0:
+                print(f'[K-means 重估计] 收集到各 GPU 样本数: {[s.item() for s in size_list]}，总计: {total_samples}')
+            
+            # 检查总样本数是否足够
+            if total_samples < self.num_embeddings:
+                if rank == 0:
+                    print(f'[K-means 重估计] 跳过：总样本数不足 ({total_samples} < {self.num_embeddings})')
+                # 所有 GPU 同步跳过
+                return
+            
+            # 收集所有 GPU 的样本（只在 rank 0 执行聚类）
+            if encodings.shape[0] > 0:
+                # 确保张量连续
+                encodings = encodings.contiguous()
+            
+            # 使用 gather 而非 all_gather（只在 rank 0 收集）
+            if rank == 0:
+                # 准备接收缓冲区
+                max_size = max(s.item() for s in size_list)
+                gathered_encodings = []
+                
+                for i in range(world_size):
+                    if i == 0:
+                        # rank 0 的样本
+                        if encodings.shape[0] > 0:
+                            gathered_encodings.append(encodings)
+                    else:
+                        # 从其他 rank 接收
+                        recv_size = size_list[i].item()
+                        if recv_size > 0:
+                            recv_tensor = torch.empty(recv_size, encodings.shape[1], 
+                                                     device=encodings.device, dtype=encodings.dtype)
+                            dist.recv(recv_tensor, src=i)
+                            gathered_encodings.append(recv_tensor)
+                
+                # 合并所有样本
+                all_encodings = torch.cat(gathered_encodings, dim=0) if gathered_encodings else encodings
+            else:
+                # 其他 rank 发送样本到 rank 0
+                if encodings.shape[0] > 0:
+                    dist.send(encodings, dst=0)
+                all_encodings = None
+            
+            # 只在 rank 0 执行 K-means 聚类
+            if rank == 0:
+                print(f'[K-means 重估计] 开始，使用 {all_encodings.shape[0]} 个样本重建 {self.num_embeddings} 个码本向量...')
+                
+                try:
+                    # 转换为 numpy 进行聚类
+                    encodings_np = all_encodings.cpu().numpy()
+                    
+                    # 使用 sklearn 的 K-means 进行聚类
+                    clustered, *_ = cluster.k_means(encodings_np, self.num_embeddings, random_state=0)
+                    
+                    # 用 K-means 的聚类中心整体替换码本
+                    new_embeddings = torch.tensor(clustered, 
+                                                  dtype=self.embeddings.weight.dtype,
+                                                  device=self.embeddings.weight.device)
+                    self.embeddings.weight.data[...] = new_embeddings
+                    
+                    print(f'[K-means 重估计] 完成！码本已更新')
+                    
+                except Exception as e:
+                    print(f'[K-means 重估计] 失败：{e}')
+            
+            # 广播更新后的码本到所有 GPU
+            dist.broadcast(self.embeddings.weight.data, src=0)
+            
+            # 所有 GPU 同步清空水塘采样器
             self.reestimation_reservoir.reset()
             
             # 如果是 EMA 模式，也重置 EMA 统计量
@@ -262,12 +313,43 @@ class SparseVectorQuantizer(nn.Module):
                 self.ema_cluster_size.zero_()
                 self.ema_w.zero_()
                 self._ema_initialized.fill_(False)
-                print(f'[K-means 重估计] 同时重置了 EMA 统计量')
+                if rank == 0:
+                    print(f'[K-means 重估计] 同时重置了 EMA 统计量')
+        
+        else:
+            # 单 GPU 模式
+            if encodings.shape[0] < self.num_embeddings:
+                print(f'[K-means 重估计] 跳过：样本数不足 ({encodings.shape[0]} < {self.num_embeddings})')
+                return
             
-            print(f'[K-means 重估计] 完成！码本已更新')
+            print(f'[K-means 重估计] 开始，使用 {encodings.shape[0]} 个样本重建 {self.num_embeddings} 个码本向量...')
             
-        except Exception as e:
-            print(f'[K-means 重估计] 失败：{e}')
+            # 转换为 numpy 进行聚类
+            encodings_np = encodings.cpu().numpy()
+            
+            try:
+                # 使用 sklearn 的 K-means 进行聚类
+                clustered, *_ = cluster.k_means(encodings_np, self.num_embeddings, random_state=0)
+                
+                # 用 K-means 的聚类中心整体替换码本
+                self.embeddings.weight.data[...] = torch.tensor(clustered, 
+                                                                dtype=self.embeddings.weight.dtype,
+                                                                device=self.embeddings.weight.device)
+                
+                # 清空水塘采样器，重新收集特征
+                self.reestimation_reservoir.reset()
+                
+                # 如果是 EMA 模式，也重置 EMA 统计量
+                if self.use_ema_update:
+                    self.ema_cluster_size.zero_()
+                    self.ema_w.zero_()
+                    self._ema_initialized.fill_(False)
+                    print(f'[K-means 重估计] 同时重置了 EMA 统计量')
+                
+                print(f'[K-means 重估计] 完成！码本已更新')
+                
+            except Exception as e:
+                print(f'[K-means 重估计] 失败：{e}')
     
     @torch.no_grad()
     def _update_ema(self, encoding_indices, z_flatten):
