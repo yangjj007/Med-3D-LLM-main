@@ -195,6 +195,10 @@ python train.py \
 - **原因**：`kmeans_interval` 设置过小
 - **解决**：增加重估计间隔（如 5000）
 
+### 问题：分布式训练报错 "Tensors must be contiguous"
+- **原因**：`dist.all_gather` 要求张量连续存储
+- **解决**：已在代码中修复，确保调用 `contiguous()` 处理张量
+
 ## 参考资料
 
 - VQFR 论文实现：`VQFR码本K-means初始化实现总结.md`

@@ -36,6 +36,10 @@ class ReservoirSampler(nn.Module):
             
         samples = samples.detach()
         
+        # 确保张量是连续的（分布式通信要求）
+        if not samples.is_contiguous():
+            samples = samples.contiguous()
+        
         # 初始化 buffer
         if self.buffer is None:
             self.buffer = torch.empty(self.n, samples.size(-1), 
@@ -51,7 +55,8 @@ class ReservoirSampler(nn.Module):
         if dist.is_initialized():
             # 使用 all_gather 收集所有进程的样本
             world_size = dist.get_world_size()
-            gathered_samples = [torch.zeros_like(samples) for _ in range(world_size)]
+            # 创建连续的张量列表
+            gathered_samples = [torch.zeros_like(samples).contiguous() for _ in range(world_size)]
             dist.all_gather(gathered_samples, samples)
             samples = torch.cat(gathered_samples, dim=0)
         
