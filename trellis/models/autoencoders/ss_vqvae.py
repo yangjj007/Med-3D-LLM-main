@@ -37,10 +37,15 @@ class SparseVectorQuantizer(nn.Module):
         if use_ema_update:
             # EMA模式：禁用梯度，注册统计buffer
             self.embeddings.weight.requires_grad = False
-            self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
-            # 🔧 修复：ema_w应该初始化为0，而不是码本权重的副本
-            # ema_w是累积的特征和，初始状态应该是零向量
-            self.register_buffer('ema_w', torch.zeros(num_embeddings, embedding_dim))
+            # 标准EMA实现里，ema_cluster_size / ema_w 通常带一个“先验”(pseudo-count)初始化，
+            # 否则在训练最初期（尤其是K很大、batch里只激活少量code时），拉普拉斯平滑会让未使用code的
+            # smoothed_cluster_size 变得极小，从而导致 e = w / c 数值不稳定（爆炸或坍塌到0向量）。
+            #
+            # 这里采用常见且稳定的初始化：
+            # - ema_cluster_size 初始化为 1（每个code一个先验计数）
+            # - ema_w 初始化为当前embedding（对应先验计数为1时，e = w/c = embedding，不会突变）
+            self.register_buffer('ema_cluster_size', torch.ones(num_embeddings))
+            self.register_buffer('ema_w', self.embeddings.weight.data.clone())
         # else: 梯度模式保持默认requires_grad=True
     
 
