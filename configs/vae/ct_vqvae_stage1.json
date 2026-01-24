@@ -3,7 +3,7 @@
         "vqvae": {
             "name": "SparseSDFVQVAE",
             "args": {
-                "use_ema_update": true,
+                "use_ema_update": false,
                 "vq_decay": 0.99,
                 "vq_epsilon": 1e-5,
                 "use_kmeans_reinit": true,
