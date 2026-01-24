@@ -298,6 +298,7 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         vqvae = self.training_models['vqvae']
         print(f"[DEBUG training_losses] 调用VQVAE forward...")
         print(f"[DEBUG training_losses] VQVAE训练模式: {vqvae.training}")
+        print(f"[DEBUG training_losses] 当前训练步数: {self.step}")
         
         # 检查模型参数是否正常
         if hasattr(vqvae, 'module'):
@@ -323,7 +324,8 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         print(f"  mean: {vq_embeddings.mean().item():.6f}, std: {vq_embeddings.std().item():.6f}")
         print(f"  requires_grad: {vq_embeddings.requires_grad}")
         
-        outputs = vqvae(x)
+        # 传递当前步数到模型，用于 K-means 重估计
+        outputs = vqvae(x, current_step=self.step)
         print(f"[DEBUG training_losses] VQVAE forward完成")
         
         # Extract outputs from dictionary

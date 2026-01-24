@@ -2,14 +2,85 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 
 import trimesh
 from skimage import measure
+from sklearn import cluster
 
 from ...modules import sparse as sp
 from .encoder import SparseSDFEncoder
 from .decoder import SparseSDFDecoder
 # VQVAE不需要DiagonalGaussianDistribution（移除VAE的高斯采样机制）
+
+
+class ReservoirSampler(nn.Module):
+    """
+    水塘采样器，用于持续收集训练特征
+    使用经典水塘采样算法，维护固定大小的特征池
+    """
+    def __init__(self, num_samples: int = 16384):
+        super(ReservoirSampler, self).__init__()
+        self.n = num_samples  # 容量
+        self.register_buffer('buffer', None, persistent=False)
+        self.register_buffer('i', torch.tensor(0), persistent=False)
+        
+    def add(self, samples: torch.Tensor):
+        """
+        添加样本到水塘
+        Args:
+            samples: [N, D] 特征张量
+        """
+        if samples.numel() == 0:
+            return
+            
+        samples = samples.detach()
+        
+        # 初始化 buffer
+        if self.buffer is None:
+            self.buffer = torch.empty(self.n, samples.size(-1), 
+                                     device=samples.device, dtype=samples.dtype)
+            self.i = torch.tensor(0, device=samples.device)
+        
+        # 确保 buffer 和 samples 在同一设备上
+        if self.buffer.device != samples.device:
+            self.buffer = self.buffer.to(samples.device)
+            self.i = self.i.to(samples.device)
+        
+        # 如果是分布式训练，收集所有 GPU 的样本
+        if dist.is_initialized():
+            # 使用 all_gather 收集所有进程的样本
+            world_size = dist.get_world_size()
+            gathered_samples = [torch.zeros_like(samples) for _ in range(world_size)]
+            dist.all_gather(gathered_samples, samples)
+            samples = torch.cat(gathered_samples, dim=0)
+        
+        for sample in samples:
+            if self.i < self.n:
+                # 缓冲区未满，直接添加
+                self.buffer[self.i] = sample
+                self.i += 1
+            else:
+                # 缓冲区已满，随机替换（水塘采样算法）
+                j = torch.randint(0, self.i + 1, (1,), device=sample.device).item()
+                if j < self.n:
+                    self.buffer[j] = sample
+                self.i += 1
+    
+    def contents(self) -> torch.Tensor:
+        """
+        获取采样结果
+        Returns:
+            [min(i, n), D] 已收集的特征
+        """
+        if self.buffer is None:
+            return torch.empty(0)
+        return self.buffer[:min(self.i.item(), self.n)]
+    
+    def reset(self):
+        """清空缓冲区"""
+        if self.buffer is not None:
+            self.i.fill_(0)
 
 
 class SparseVectorQuantizer(nn.Module):
@@ -18,9 +89,13 @@ class SparseVectorQuantizer(nn.Module):
     支持两种码本更新模式：
     1. 梯度更新模式 (use_ema_update=False): 通过反向传播更新码本
     2. EMA更新模式 (use_ema_update=True): 通过指数移动平均统计更新码本
+    支持可选的 K-means 周期性重新初始化：
+    3. K-means 重估计模式 (use_kmeans_reinit=True): 周期性使用 K-means 聚类重置码本
     """
     def __init__(self, num_embeddings: int = 8192, embedding_dim: int = 64, beta: float = 0.25,
-                 use_ema_update: bool = False, decay: float = 0.99, epsilon: float = 1e-5):
+                 use_ema_update: bool = False, decay: float = 0.99, epsilon: float = 1e-5,
+                 use_kmeans_reinit: bool = False, kmeans_interval: int = 2000, 
+                 reservoir_size: int = 16384):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
@@ -28,6 +103,10 @@ class SparseVectorQuantizer(nn.Module):
         self.use_ema_update = use_ema_update
         self.decay = decay
         self.epsilon = epsilon
+        
+        # K-means 重估计参数
+        self.use_kmeans_reinit = use_kmeans_reinit
+        self.kmeans_interval = kmeans_interval
         
         # 码本嵌入
         self.embeddings = nn.Embedding(self.num_embeddings, self.embedding_dim)
@@ -45,13 +124,19 @@ class SparseVectorQuantizer(nn.Module):
             # 标记是否是第一次EMA更新
             self.register_buffer('_ema_initialized', torch.tensor(False))
         # else: 梯度模式保持默认requires_grad=True
+        
+        # K-means 重估计器
+        if use_kmeans_reinit:
+            self.reestimation_reservoir = ReservoirSampler(reservoir_size)
+            print(f"[K-means 重估计] 已启用，间隔={kmeans_interval}步，水塘容量={reservoir_size}")
     
 
-    def forward(self, z: sp.SparseTensor, only_return_indices: bool = False):
+    def forward(self, z: sp.SparseTensor, only_return_indices: bool = False, current_step: int = -1):
         """
         Args:
             z: SparseTensor，feats shape 为 [N, embedding_dim]，N 是激活体素数量
             only_return_indices: 是否只返回 indices
+            current_step: 当前训练步数，用于 K-means 重估计触发（-1 表示不使用）
         Returns:
             如果 only_return_indices=True: 返回 indices 的 SparseTensor
             否则: 返回 (quantized, vq_loss, commitment_loss, encoding_indices)
@@ -122,7 +207,62 @@ class SparseVectorQuantizer(nn.Module):
         
         print(f"[DEBUG VQ] Output quantized feats: min={quantized.feats.min().item():.6f}, max={quantized.feats.max().item():.6f}, requires_grad={quantized.feats.requires_grad}\n")
         
+        # ============ K-means 特征收集和周期性重估计 ============
+        if self.use_kmeans_reinit and self.training and current_step >= 0:
+            # 收集特征到水塘采样器
+            self.reestimation_reservoir.add(z_flatten)
+            
+            # 周期性触发 K-means 重估计
+            if current_step > 0 and current_step % self.kmeans_interval == 0:
+                self.reestimate()
+        
         return quantized, vq_loss, commitment_loss, encoding_indices_st
+    
+    @torch.no_grad()
+    def reestimate(self):
+        """
+        使用 K-means 重新初始化码本
+        参考 VQFR 实现，用 K-means 聚类中心整体替换码本权重
+        """
+        if not self.use_kmeans_reinit:
+            return
+        
+        # 获取收集的特征
+        encodings = self.reestimation_reservoir.contents()
+        
+        # 检查样本数量是否足够
+        if encodings.shape[0] < self.num_embeddings:
+            print(f'[K-means 重估计] 跳过：样本数不足 ({encodings.shape[0]} < {self.num_embeddings})')
+            return
+        
+        print(f'[K-means 重估计] 开始，使用 {encodings.shape[0]} 个样本重建 {self.num_embeddings} 个码本向量...')
+        
+        # 转换为 numpy 进行聚类
+        encodings_np = encodings.cpu().numpy()
+        
+        try:
+            # 使用 sklearn 的 K-means 进行聚类
+            clustered, *_ = cluster.k_means(encodings_np, self.num_embeddings, random_state=0)
+            
+            # 用 K-means 的聚类中心整体替换码本
+            self.embeddings.weight.data[...] = torch.tensor(clustered, 
+                                                            dtype=self.embeddings.weight.dtype,
+                                                            device=self.embeddings.weight.device)
+            
+            # 清空水塘采样器，重新收集特征
+            self.reestimation_reservoir.reset()
+            
+            # 如果是 EMA 模式，也重置 EMA 统计量
+            if self.use_ema_update:
+                self.ema_cluster_size.zero_()
+                self.ema_w.zero_()
+                self._ema_initialized.fill_(False)
+                print(f'[K-means 重估计] 同时重置了 EMA 统计量')
+            
+            print(f'[K-means 重估计] 完成！码本已更新')
+            
+        except Exception as e:
+            print(f'[K-means 重估计] 失败：{e}')
     
     @torch.no_grad()
     def _update_ema(self, encoding_indices, z_flatten):
@@ -240,6 +380,9 @@ class SparseSDFVQVAE(nn.Module):
                  use_ema_update: bool = False,  # 新增：是否使用EMA更新码本
                  vq_decay: float = 0.99,        # 新增：EMA衰减率
                  vq_epsilon: float = 1e-5,      # 新增：拉普拉斯平滑系数
+                 use_kmeans_reinit: bool = False,  # 新增：是否使用K-means重新初始化
+                 kmeans_interval: int = 2000,   # 新增：K-means重估计间隔
+                 reservoir_size: int = 16384,   # 新增：水塘采样器容量
                  mlp_ratio: float = 4,
                  attn_mode: str = "swin",
                  window_size: int = 8,
@@ -337,17 +480,24 @@ class SparseSDFVQVAE(nn.Module):
             beta=0.25,
             use_ema_update=use_ema_update,
             decay=vq_decay,
-            epsilon=vq_epsilon
+            epsilon=vq_epsilon,
+            use_kmeans_reinit=use_kmeans_reinit,
+            kmeans_interval=kmeans_interval,
+            reservoir_size=reservoir_size
         )
         
         self.embed_dim = embed_dim
         self.use_ema_update = use_ema_update
+        self.use_kmeans_reinit = use_kmeans_reinit
 
-    def forward(self, batch):
+    def forward(self, batch, current_step: int = -1):
         """
         训练时的完整前向传播
+        Args:
+            batch: 输入数据批次
+            current_step: 当前训练步数，用于 K-means 重估计（-1 表示不使用）
         """
-        z, vq_loss, commitment_loss = self.encode(batch)
+        z, vq_loss, commitment_loss = self.encode(batch, current_step=current_step)
 
         print(f"[DEBUG forward] Calling decoder...")
         reconst_x = self.decoder(z)
@@ -362,7 +512,7 @@ class SparseSDFVQVAE(nn.Module):
         }
         return outputs
 
-    def encode(self, batch, only_return_indices: bool = False):
+    def encode(self, batch, only_return_indices: bool = False, current_step: int = -1):
         """
         编码过程，替代 VAE 的采样过程
         Args:
@@ -370,6 +520,7 @@ class SparseSDFVQVAE(nn.Module):
                   - SparseTensor：训练时使用
                   - dict：推理时使用，包含 'sparse_sdf', 'sparse_index', 'batch_idx' 键
             only_return_indices: 是否只返回量化索引（用于推理）
+            current_step: 当前训练步数，用于 K-means 重估计（-1 表示不使用）
         Returns:
             如果 only_return_indices=True: 返回 encoding_indices
             否则: 返回 (z, vq_loss, commitment_loss)
@@ -401,11 +552,11 @@ class SparseSDFVQVAE(nn.Module):
         
         if only_return_indices:
             # 只返回量化索引（用于 Encode 方法）
-            encoding_indices = self.vq(h, only_return_indices=True)
+            encoding_indices = self.vq(h, only_return_indices=True, current_step=current_step)
             return encoding_indices
         
         # 量化（替代 VAE 的采样）
-        quantized, vq_loss, commitment_loss, _ = self.vq(h)
+        quantized, vq_loss, commitment_loss, _ = self.vq(h, current_step=current_step)
         if vq_loss is not None:
             print(f"[DEBUG encode] Quantization results: vq_loss={vq_loss.item():.6f}, commitment_loss={commitment_loss.item():.6f}")
         else:
