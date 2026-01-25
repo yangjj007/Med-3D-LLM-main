@@ -76,7 +76,7 @@
                     "clip_percentile": 90
                 }
             },
-            "lambda_vq": 0.0,
+            "lambda_vq": 1.0,
             "lambda_commitment": 0.25,
             "loss_type": "l1_l2",
             "i_print": 100,
