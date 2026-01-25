@@ -113,6 +113,9 @@ class WarmupThenScheduler(_LRScheduler):
         
         super(WarmupThenScheduler, self).__init__(optimizer, last_epoch)
         
+        # 初始化 _last_lr（用于 get_last_lr()）
+        self._last_lr = [group['lr'] for group in optimizer.param_groups]
+        
     def get_lr(self):
         if self.last_epoch < self.warmup_steps:
             # Warmup 阶段：线性增长从 0 到 base_lr
@@ -131,8 +134,15 @@ class WarmupThenScheduler(_LRScheduler):
             epoch = self.last_epoch + 1
         self.last_epoch = epoch
         
-        for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
+        # 计算新的学习率
+        values = self.get_lr()
+        
+        # 更新优化器的学习率
+        for param_group, lr in zip(self.optimizer.param_groups, values):
             param_group['lr'] = lr
+        
+        # 保存当前学习率（用于 get_last_lr()）
+        self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
         
         # 如果已经过了 warmup 阶段，同时更新主调度器
         if self.last_epoch >= self.warmup_steps:
@@ -145,6 +155,7 @@ class WarmupThenScheduler(_LRScheduler):
             'warmup_steps': self.warmup_steps,
             'last_epoch': self.last_epoch,
             'base_lrs': self.base_lrs,
+            '_last_lr': self._last_lr,
             'main_scheduler': self.main_scheduler.state_dict()
         }
         return state
@@ -154,5 +165,6 @@ class WarmupThenScheduler(_LRScheduler):
         self.warmup_steps = state_dict['warmup_steps']
         self.last_epoch = state_dict['last_epoch']
         self.base_lrs = state_dict['base_lrs']
+        self._last_lr = state_dict.get('_last_lr', self.base_lrs)  # 兼容旧版本
         self.main_scheduler.load_state_dict(state_dict['main_scheduler'])
         
