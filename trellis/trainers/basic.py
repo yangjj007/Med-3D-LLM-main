@@ -123,10 +123,21 @@ class BasicTrainer(Trainer):
         
         # Initalize learning rate scheduler
         if self.lr_scheduler_config is not None:
-            if hasattr(torch.optim.lr_scheduler, self.lr_scheduler_config['name']):
-                self.lr_scheduler = getattr(torch.optim.lr_scheduler, self.lr_scheduler_config['name'])(self.optimizer, **self.lr_scheduler_config['args'])
+            scheduler_name = self.lr_scheduler_config['name']
+            scheduler_args = copy.deepcopy(self.lr_scheduler_config['args'])
+            
+            # 特殊处理 WarmupThenScheduler：需要将 main_scheduler_class 从字符串转换为类
+            if scheduler_name == 'WarmupThenScheduler':
+                main_scheduler_class_name = scheduler_args.pop('main_scheduler_class')
+                if hasattr(torch.optim.lr_scheduler, main_scheduler_class_name):
+                    scheduler_args['main_scheduler_class'] = getattr(torch.optim.lr_scheduler, main_scheduler_class_name)
+                else:
+                    scheduler_args['main_scheduler_class'] = globals()[main_scheduler_class_name]
+                self.lr_scheduler = globals()[scheduler_name](self.optimizer, **scheduler_args)
+            elif hasattr(torch.optim.lr_scheduler, scheduler_name):
+                self.lr_scheduler = getattr(torch.optim.lr_scheduler, scheduler_name)(self.optimizer, **scheduler_args)
             else:
-                self.lr_scheduler = globals()[self.lr_scheduler_config['name']](self.optimizer, **self.lr_scheduler_config['args'])
+                self.lr_scheduler = globals()[scheduler_name](self.optimizer, **scheduler_args)
 
         # Initialize elastic memory controller
         if self.elastic_controller_config is not None:
