@@ -550,6 +550,36 @@ class Trainer:
                         print(f"  当前学习率: {status_info['lr']:.2e}")
                     if 'grad_norm' in status_info:
                         print(f"  梯度范数: {status_info['grad_norm']:.6f}")
+                    
+                    # 码本利用率统计
+                    if 'codebook_perplexity' in status_info:
+                        # 获取码本总数
+                        try:
+                            # 尝试从模型中获取码本大小
+                            if 'vqvae' in self.models:
+                                vqvae_model = self.models['vqvae']
+                                if hasattr(vqvae_model, 'module'):
+                                    vqvae_model = vqvae_model.module
+                                if hasattr(vqvae_model, 'vq') and hasattr(vqvae_model.vq, 'num_embeddings'):
+                                    codebook_size = vqvae_model.vq.num_embeddings
+                                else:
+                                    codebook_size = None
+                            else:
+                                codebook_size = None
+                        except:
+                            codebook_size = None
+                        
+                        print(f"\n📊 码本利用率统计:")
+                        if codebook_size is not None:
+                            print(f"  - 困惑度 (Perplexity): {status_info['codebook_perplexity']:.2f} / {codebook_size}")
+                        else:
+                            print(f"  - 困惑度 (Perplexity): {status_info['codebook_perplexity']:.2f}")
+                        print(f"  - 信息熵 (Entropy): {status_info['codebook_entropy']:.4f}")
+                        print(f"  - 活跃码本比例: {status_info['codebook_utilization_ratio']:.2f}%")
+                        if codebook_size is not None:
+                            print(f"  - 唯一码本数量: {status_info['codebook_unique_count']} / {codebook_size}")
+                        else:
+                            print(f"  - 唯一码本数量: {status_info['codebook_unique_count']}")
                 
                 print(f"{'='*100}\n")
                 

@@ -132,8 +132,9 @@ class SparseVectorQuantizer(nn.Module):
             current_step: 当前训练步数，用于 K-means 重估计触发（-1 表示不使用）
         Returns:
             如果 only_return_indices=True: 返回 indices 的 SparseTensor
-            否则: 返回 (quantized, vq_loss, commitment_loss, encoding_indices)
+            否则: 返回 (quantized, vq_loss, commitment_loss, encoding_indices, codebook_stats)
             注意：当use_ema_update=True时，vq_loss为None
+            codebook_stats: 包含 perplexity, entropy, unique_count, utilization_ratio 的字典
         """
         print(f"\n[DEBUG VQ] Input z.feats: shape={z.feats.shape}, min={z.feats.min().item():.6f}, max={z.feats.max().item():.6f}, mean={z.feats.mean().item():.6f}, std={z.feats.std().item():.6f}")
         print(f"[DEBUG VQ] Codebook: min={self.embeddings.weight.min().item():.6f}, max={self.embeddings.weight.max().item():.6f}, mean={self.embeddings.weight.mean().item():.6f}, std={self.embeddings.weight.std().item():.6f}")
@@ -165,6 +166,30 @@ class SparseVectorQuantizer(nn.Module):
             counts = torch.bincount(encoding_indices, minlength=self.num_embeddings)
             used_counts = counts[counts > 0]
             print(f"[DEBUG VQ] Usage distribution: min={used_counts.min().item()}, max={used_counts.max().item()}, mean={used_counts.float().mean().item():.1f}")
+        
+        # ============ 码本利用率统计 ============
+        # 计算每个码本的使用概率
+        encodings_onehot = F.one_hot(encoding_indices, self.num_embeddings).float()  # [N, K]
+        avg_probs = torch.mean(encodings_onehot, dim=0)  # [K] 每个码本被选中的平均概率
+        
+        # 计算信息熵
+        epsilon = 1e-10
+        entropy = -torch.sum(avg_probs * torch.log(avg_probs + epsilon))
+        
+        # 计算困惑度
+        perplexity = torch.exp(entropy)
+        
+        # 计算活跃码本数量和比例
+        unique_count = len(unique_codes)
+        utilization_ratio = (unique_count / self.num_embeddings) * 100.0
+        
+        # 构建统计字典
+        codebook_stats = {
+            'perplexity': perplexity.item(),
+            'entropy': entropy.item(),
+            'unique_count': unique_count,
+            'utilization_ratio': utilization_ratio,
+        }
         
         if only_return_indices:
             # 返回 indices 作为 SparseTensor，保持原始坐标
@@ -209,7 +234,7 @@ class SparseVectorQuantizer(nn.Module):
             if current_step > 0 and current_step % self.kmeans_interval == 0:
                 self.reestimate()
         
-        return quantized, vq_loss, commitment_loss, encoding_indices_st
+        return quantized, vq_loss, commitment_loss, encoding_indices_st, codebook_stats
     
     @torch.no_grad()
     def reestimate(self):
@@ -584,7 +609,7 @@ class SparseSDFVQVAE(nn.Module):
             batch: 输入数据批次
             current_step: 当前训练步数，用于 K-means 重估计（-1 表示不使用）
         """
-        z, vq_loss, commitment_loss = self.encode(batch, current_step=current_step)
+        z, vq_loss, commitment_loss, codebook_stats = self.encode(batch, current_step=current_step)
 
         print(f"[DEBUG forward] Calling decoder...")
         reconst_x = self.decoder(z)
@@ -595,7 +620,8 @@ class SparseSDFVQVAE(nn.Module):
         outputs = {
             'reconst_x': reconst_x, 
             'vq_loss': vq_loss,
-            'commitment_loss': commitment_loss
+            'commitment_loss': commitment_loss,
+            'codebook_stats': codebook_stats
         }
         return outputs
 
@@ -610,7 +636,7 @@ class SparseSDFVQVAE(nn.Module):
             current_step: 当前训练步数，用于 K-means 重估计（-1 表示不使用）
         Returns:
             如果 only_return_indices=True: 返回 encoding_indices
-            否则: 返回 (z, vq_loss, commitment_loss)
+            否则: 返回 (z, vq_loss, commitment_loss, codebook_stats)
         """
         # 判断 batch 的类型并处理
         if hasattr(batch, 'feats') and hasattr(batch, 'coords'):
@@ -643,13 +669,13 @@ class SparseSDFVQVAE(nn.Module):
             return encoding_indices
         
         # 量化（替代 VAE 的采样）
-        quantized, vq_loss, commitment_loss, _ = self.vq(h, current_step=current_step)
+        quantized, vq_loss, commitment_loss, _, codebook_stats = self.vq(h, current_step=current_step)
         if vq_loss is not None:
             print(f"[DEBUG encode] Quantization results: vq_loss={vq_loss.item():.6f}, commitment_loss={commitment_loss.item():.6f}")
         else:
             print(f"[DEBUG encode] Quantization results: vq_loss=None (EMA mode), commitment_loss={commitment_loss.item():.6f}")
 
-        return quantized, vq_loss, commitment_loss
+        return quantized, vq_loss, commitment_loss, codebook_stats
     
     def Encode(self, batch):
         """

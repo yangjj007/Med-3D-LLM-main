@@ -332,6 +332,7 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         recon = outputs['reconst_x']
         vq_loss = outputs.get('vq_loss')  # 可能为None（EMA模式）
         commitment_loss = outputs['commitment_loss']
+        codebook_stats = outputs.get('codebook_stats', {})
         
         print(f"[DEBUG training_losses] VQVAE输出:")
         print(f"  recon.shape: {recon.shape}, recon.feats.shape: {recon.feats.shape}")
@@ -438,6 +439,10 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             num_output_voxels=len(output_coords),
             num_aligned_voxels=len(aligned_indices_output),
             alignment_ratio=len(aligned_indices_output) / len(input_coords),
+            codebook_perplexity=codebook_stats.get('perplexity', 0.0),
+            codebook_entropy=codebook_stats.get('entropy', 0.0),
+            codebook_utilization_ratio=codebook_stats.get('utilization_ratio', 0.0),
+            codebook_unique_count=codebook_stats.get('unique_count', 0),
         )
         
         return terms, status
