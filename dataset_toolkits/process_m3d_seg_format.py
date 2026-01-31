@@ -82,6 +82,161 @@ def normalize_ct(ct_array: np.ndarray) -> np.ndarray:
     return ct_normalized
 
 
+def detect_mask_format(seg_array: np.ndarray) -> tuple:
+    """
+    智能检测掩码格式类型
+    
+    Args:
+        seg_array: 分割掩码数组（可能是3D或4D）
+    
+    Returns:
+        (mask_type, num_channels) 其中：
+        - mask_type: 'single_label_3d' (3D单通道标签)
+                    'single_channel_4d' (4D但第一维=1)
+                    'one_hot' (4D one-hot编码，互斥)
+                    'multi_channel' (4D多通道布尔掩码，可能重叠)
+        - num_channels: 通道数（对于3D返回None）
+    """
+    if seg_array.ndim == 3:
+        return 'single_label_3d', None
+    
+    if seg_array.ndim == 4:
+        num_channels = seg_array.shape[0]
+        
+        # 情况1：第一维度=1，只是单通道的4D表示
+        if num_channels == 1:
+            return 'single_channel_4d', 1
+        
+        # 情况2：检查是否为布尔类型或二值掩码
+        is_binary = seg_array.dtype == bool or np.all(np.isin(seg_array, [0, 1]))
+        
+        if is_binary:
+            # 采样检查重叠情况（避免大数组全量计算）
+            sample_size = min(1000000, seg_array[0].size)
+            if seg_array[0].size > sample_size:
+                # 随机采样
+                sample_indices = np.random.choice(seg_array[0].size, sample_size, replace=False)
+                sample_data = seg_array.reshape(num_channels, -1)[:, sample_indices]
+                sum_along_channel = sample_data.sum(axis=0)
+            else:
+                sum_along_channel = seg_array.sum(axis=0)
+            
+            max_overlap = sum_along_channel.max()
+            
+            # 判断是否为one-hot（互斥，无重叠）
+            if max_overlap <= 1.1:  # 允许一点浮点误差
+                return 'one_hot', num_channels
+            else:
+                return 'multi_channel', num_channels
+        else:
+            # 非二值数据，可能是已经转换过的标签或其他格式
+            # 检查是否所有值都是整数标签
+            unique_vals = np.unique(seg_array)
+            if len(unique_vals) <= num_channels + 1 and np.all(unique_vals == unique_vals.astype(int)):
+                # 可能是one-hot编码后的结果，尝试检测
+                sum_along_channel = seg_array.sum(axis=0)
+                max_overlap = sum_along_channel.max()
+                if max_overlap <= 1.1:
+                    return 'one_hot', num_channels
+            
+            # 默认当作多通道处理
+            return 'multi_channel', num_channels
+    
+    # 其他维度，报错
+    raise ValueError(f"不支持的掩码维度: {seg_array.ndim}, 形状: {seg_array.shape}")
+
+
+def get_organ_name_from_mapping(channel_idx: int, organ_mapping: Optional[Dict]) -> str:
+    """
+    根据通道索引获取器官名称
+    
+    Args:
+        channel_idx: 通道索引（从0开始）
+        organ_mapping: 器官映射字典
+    
+    Returns:
+        器官名称（如果没有映射，返回默认名称 'organ_{idx}'）
+    """
+    if organ_mapping is None or 'organ_labels' not in organ_mapping:
+        return f'organ_{channel_idx}'
+    
+    organ_labels = organ_mapping['organ_labels']
+    
+    # 尝试通过通道索引查找（label_id可能对应channel_idx）
+    # 多通道布尔掩码：channel 0对应label 1, channel 1对应label 2...
+    label_id = str(channel_idx + 1)
+    
+    if label_id in organ_labels:
+        return organ_labels[label_id]['name']
+    
+    # 尝试直接用channel_idx作为key（从0开始）
+    label_id_zero = str(channel_idx)
+    if label_id_zero in organ_labels:
+        return organ_labels[label_id_zero]['name']
+    
+    # 没有找到，返回默认名称
+    return f'organ_{channel_idx}'
+
+
+def parse_multi_channel_mask(seg_array: np.ndarray, target_resolution: int) -> tuple:
+    """
+    解析多通道掩码，保持4D结构进行分辨率适配
+    
+    Args:
+        seg_array: 4D掩码数组 (C, H, W, D)
+        target_resolution: 目标分辨率
+    
+    Returns:
+        (seg_adapted_4d, mask_type, num_channels)
+        - seg_adapted_4d: 适配后的4D数组或3D数组
+        - mask_type: 掩码类型
+        - num_channels: 通道数
+    """
+    # 检测掩码格式
+    mask_type, num_channels = detect_mask_format(seg_array)
+    
+    print(f"     [检测] 掩码类型: {mask_type}, 通道数: {num_channels}")
+    
+    # 根据类型处理
+    if mask_type == 'single_label_3d':
+        # 3D单通道标签，直接适配
+        seg_adapted = adapt_resolution(seg_array, target_resolution, fill_value=0, mode='constant')
+        return seg_adapted, mask_type, None
+    
+    elif mask_type == 'single_channel_4d':
+        # 4D但第一维=1，squeeze后适配
+        seg_array_3d = seg_array.squeeze()
+        seg_adapted = adapt_resolution(seg_array_3d, target_resolution, fill_value=0, mode='constant')
+        return seg_adapted, mask_type, None
+    
+    elif mask_type == 'one_hot':
+        # one-hot编码，转换为单通道标签（互斥，无重叠，安全）
+        print(f"     [转换] one-hot编码 -> 单通道标签（argmax）")
+        seg_array_3d = np.argmax(seg_array, axis=0).astype(np.uint8)
+        seg_adapted = adapt_resolution(seg_array_3d, target_resolution, fill_value=0, mode='constant')
+        return seg_adapted, mask_type, None
+    
+    elif mask_type == 'multi_channel':
+        # 多通道布尔掩码，保持4D结构，逐通道适配
+        print(f"     [保持] 多通道布尔掩码 -> 保持4D结构，逐通道适配")
+        seg_adapted_list = []
+        
+        for ch_idx in range(num_channels):
+            # 逐通道进行分辨率适配
+            channel_data = seg_array[ch_idx]
+            channel_adapted = adapt_resolution(channel_data, target_resolution, fill_value=0, mode='constant')
+            seg_adapted_list.append(channel_adapted)
+        
+        # 重新组合为4D
+        seg_adapted_4d = np.stack(seg_adapted_list, axis=0)
+        print(f"     [完成] 4D掩码适配: {seg_adapted_4d.shape}")
+        
+        return seg_adapted_4d, mask_type, num_channels
+    
+    else:
+        raise ValueError(f"未知的掩码类型: {mask_type}")
+
+
 def load_m3d_seg_case(case_dir: str) -> tuple:
     """
     加载M3D-Seg格式的单个病例
@@ -161,13 +316,17 @@ def build_organ_mapping_from_json(dataset_json: Dict, dataset_root: str = None) 
     print(f"  [调试] 从JSON读取的labels: {labels}")
     
     # 方法2: 从'label_names'字段读取（可能是列表或字典）
+    is_list_format = False  # 标记是否为列表格式（对应多通道布尔掩码）
     if not labels:
         label_names = dataset_json.get('label_names', None)
         if isinstance(label_names, dict):
             labels = label_names
         elif isinstance(label_names, list):
-            # 列表格式：索引就是label_id
+            # 列表格式：索引就是通道索引（对应多通道布尔掩码）
+            # 索引0对应第一个通道，索引1对应第二个通道...
             labels = {str(i): name for i, name in enumerate(label_names)}
+            is_list_format = True
+            print(f"  [调试] 检测到列表格式标签，将作为通道索引映射")
     
     # 方法3: 尝试从全局dataset_info.json读取
     if not labels and dataset_root:
@@ -191,8 +350,8 @@ def build_organ_mapping_from_json(dataset_json: Dict, dataset_root: str = None) 
     # 转换标签格式并自动推断窗口类型
     for label_id, label_name in labels.items():
         print(f"  [调试] 处理标签: {label_id} -> {label_name}")
-        # 跳过背景标签
-        if str(label_id) == '0' or label_name.lower() in ['background', '背景']:
+        # 跳过背景标签（但对于多通道布尔掩码，不跳过索引0）
+        if not is_list_format and (str(label_id) == '0' or label_name.lower() in ['background', '背景']):
             print(f"  [调试] 跳过背景标签: {label_id}")
             continue
         
@@ -205,9 +364,14 @@ def build_organ_mapping_from_json(dataset_json: Dict, dataset_root: str = None) 
         organ_mapping['organ_labels'][str(label_id)] = {
             'name': clean_name,
             'window': window,
-            'original_name': label_name
+            'original_name': label_name,
+            'channel_index': int(label_id) if is_list_format else None  # 添加通道索引字段
         }
-        print(f"  [调试] 添加器官: {label_id} -> {clean_name} (窗口: {window})")
+        
+        if is_list_format:
+            print(f"  [调试] 添加器官: 通道{label_id} -> {clean_name} (窗口: {window})")
+        else:
+            print(f"  [调试] 添加器官: 标签{label_id} -> {clean_name} (窗口: {window})")
     
     print(f"  构建器官映射: {len(organ_mapping['organ_labels'])}个器官")
     print(f"  [调试] 最终organ_mapping['organ_labels']: {organ_mapping['organ_labels']}")
@@ -404,96 +568,35 @@ def process_m3d_seg_case(case_info: Dict,
     
     # 如果有分割标签，也进行适配
     seg_adapted = None
+    seg_mask_type = None
+    seg_num_channels = None
+    
     if seg_array is not None:
         print(f"     [调试] 原始seg_array形状: {seg_array.shape}, dtype: {seg_array.dtype}")
-        print(f"     [调试] 原始seg_array唯一值: {np.unique(seg_array)}")
         
-        # 处理分割数组维度（4D -> 3D）
-        if seg_array.ndim == 4:
-            print(f"     [调试] seg_array是4D，开始降维处理...")
-            # 检查是否是 one-hot 编码
-            if seg_array.shape[0] <= 20:  # 通道在第一维
-                print(f"     [调试] 第一维度={seg_array.shape[0]} <= 20，检查是否one-hot编码")
-                
-                # 如果第一维度是1，直接squeeze，不是one-hot
-                if seg_array.shape[0] == 1:
-                    print(f"     [调试] 第一维度=1，直接squeeze")
-                    seg_array = seg_array.squeeze()
-                else:
-                    sum_along_channel = seg_array.sum(axis=0)
-                    max_overlap = sum_along_channel.max()
-                    print(f"     [调试] max_overlap={max_overlap}")
-                    
-                    if max_overlap <= 1.1:
-                        # one-hot 编码，使用 argmax 转换
-                        print(f"     [调试] 判断为one-hot编码，使用argmax")
-                        seg_array = np.argmax(seg_array, axis=0).astype(np.uint8)
-                    else:
-                        # 非 one-hot，尝试 squeeze 或取第一个通道
-                        print(f"     [调试] 非one-hot，使用squeeze")
-                        seg_array = seg_array.squeeze()
-                        if seg_array.ndim == 4:
-                            seg_array = seg_array[0]
-            else:
-                # 第一维度>20，很可能是多通道布尔掩码（每个器官一个通道）
-                print(f"     [调试] 第一维度={seg_array.shape[0]} > 20，检查是否为多通道布尔掩码")
-                print(f"     [调试] seg_array dtype: {seg_array.dtype}")
-                
-                # 检查是否为布尔类型或二值掩码
-                if seg_array.dtype == bool or np.all(np.isin(seg_array, [0, 1])):
-                    print(f"     [调试] 判断为多通道布尔掩码，转换为标签格式...")
-                    num_channels = seg_array.shape[0]
-                    print(f"     [调试] 开始转换 {num_channels} 个通道...")
-                    
-                    # 将多通道布尔掩码转换为单通道标签数组
-                    # 背景=0，每个通道对应标签1, 2, 3...
-                    label_array = np.zeros(seg_array.shape[1:], dtype=np.uint8)
-                    
-                    # 分批处理以显示进度和节省内存
-                    batch_size = 5
-                    for start_idx in range(0, num_channels, batch_size):
-                        end_idx = min(start_idx + batch_size, num_channels)
-                        print(f"     [调试] 处理通道 {start_idx+1}-{end_idx}/{num_channels}...", end='', flush=True)
-                        
-                        for i in range(start_idx, end_idx):
-                            # 将当前通道的True位置标记为标签值(i+1)
-                            mask = seg_array[i]
-                            if isinstance(mask, np.ndarray):
-                                label_array[mask] = i + 1
-                            else:
-                                # 如果是稀疏矩阵或其他类型
-                                label_array[mask.astype(bool)] = i + 1
-                        
-                        print(f" 完成")
-                    
-                    seg_array = label_array
-                    print(f"     [调试] 转换完成！形状: {seg_array.shape}, 标签范围: [0-{num_channels}]")
-                else:
-                    # 尝试squeeze，如果失败则取第一个通道
-                    print(f"     [调试] 非布尔类型，尝试squeeze")
-                    seg_array = seg_array.squeeze()
-                    if seg_array.ndim == 4:
-                        print(f"     [调试] squeeze后仍是4D，取第一个通道")
-                        seg_array = seg_array[0]
+        # 使用新的parse_multi_channel_mask函数处理
+        # 这个函数会自动检测格式并保持多通道结构（如果需要）
+        seg_adapted, seg_mask_type, seg_num_channels = parse_multi_channel_mask(seg_array, target_resolution)
         
-        print(f"     [调试] 降维后seg_array形状: {seg_array.shape}")
-        print(f"     [调试] 降维后seg_array唯一值: {np.unique(seg_array)[:10]}...")  # 只显示前10个值
-        
-        print(f"     [调试] 开始分辨率适配（可能需要一些时间）...")
-        seg_adapted = adapt_resolution(seg_array, target_resolution, fill_value=0, mode='constant')
         print(f"     分割标签已适配到 {target_resolution}³")
+        print(f"     适配后形状: {seg_adapted.shape}, 掩码类型: {seg_mask_type}")
         
-        # 对大数组，计算唯一值可能很慢，使用采样估计
-        if seg_adapted.size > 512**3:
-            # 对于非常大的数组，使用采样
-            print(f"     [调试] 数组较大，采样检查唯一值...")
-            sample_indices = np.random.choice(seg_adapted.size, min(10000000, seg_adapted.size), replace=False)
-            sample_values = seg_adapted.flat[sample_indices]
-            unique_sample = np.unique(sample_values)
-            print(f"     [调试] 采样到的标签值: {unique_sample} (共{len(unique_sample)}个)")
-        else:
-            unique_vals = np.unique(seg_adapted)
-            print(f"     [调试] 适配后唯一值: {unique_vals} (共{len(unique_vals)}个)")
+        # 对于3D掩码，显示唯一值（对大数组使用采样）
+        if seg_adapted.ndim == 3:
+            if seg_adapted.size > 512**3:
+                # 对于非常大的数组，使用采样
+                print(f"     [调试] 数组较大，采样检查唯一值...")
+                sample_size = min(10000000, seg_adapted.size)
+                sample_indices = np.random.choice(seg_adapted.size, sample_size, replace=False)
+                sample_values = seg_adapted.flat[sample_indices]
+                unique_sample = np.unique(sample_values)
+                print(f"     [调试] 采样到的标签值: {unique_sample} (共{len(unique_sample)}个)")
+            else:
+                unique_vals = np.unique(seg_adapted)
+                print(f"     [调试] 适配后唯一值: {unique_vals} (共{len(unique_vals)}个)")
+        elif seg_adapted.ndim == 4:
+            # 4D多通道掩码
+            print(f"     [调试] 4D多通道掩码: {seg_num_channels}个通道，每个通道形状: {seg_adapted.shape[1:]}")
     
     # 根据 use_mask 参数选择不同的处理流程
     organs_info = []
@@ -510,133 +613,227 @@ def process_m3d_seg_case(case_info: Dict,
             print(f"     [调试] organ_mapping keys: {organ_mapping.keys()}")
             print(f"     [调试] organ_labels: {organ_mapping.get('organ_labels', {})}")
         
-        if seg_adapted is not None and organ_mapping is not None:
-            organ_label_to_name = {}  # 标签值 -> 器官名称的映射
+        if seg_adapted is not None:
             masks_dir = os.path.join(case_output_dir, 'masks')
             os.makedirs(masks_dir, exist_ok=True)
             
-            # 遍历所有器官
-            organ_labels = organ_mapping.get('organ_labels', {})
-            print(f"     [调试] 遍历 {len(organ_labels)} 个器官标签")
-            print(f"     [调试] seg_adapted shape: {seg_adapted.shape}, dtype: {seg_adapted.dtype}")
+            organ_label_to_name = {}  # 标签值/通道索引 -> 器官名称的映射
             
-            # 预先计算所有存在的标签（避免在循环中重复计算）
-            print(f"     [调试] 检查存在的标签值（可能需要一些时间）...")
-            if seg_adapted.size > 512**3:
-                # 大数组使用采样估计
-                sample_size = min(10000000, seg_adapted.size)
-                sample_indices = np.random.choice(seg_adapted.size, sample_size, replace=False)
-                present_labels = np.unique(seg_adapted.flat[sample_indices])
-            else:
-                present_labels = np.unique(seg_adapted)
-            print(f"     [调试] 检测到的标签: {present_labels} (共{len(present_labels)}个)")
-            
-            for idx, (label_str, organ_info) in enumerate(organ_labels.items(), 1):
-                organ_label = int(label_str)
-                organ_name = organ_info['name']
+            # ========== 分支1: 4D多通道掩码（逐通道保存，无数据丢失） ==========
+            if seg_adapted.ndim == 4:
+                print(f"     [4D多通道模式] 检测到 {seg_num_channels} 个通道，逐通道保存")
                 
-                print(f"     [{idx}/{len(organ_labels)}] 处理器官: {organ_name} (标签={organ_label})", end='', flush=True)
-                
-                # 先检查该标签是否存在（避免不必要的计算）
-                if organ_label not in present_labels:
-                    print(f" -> 跳过（标签不存在）")
-                    continue
-                
-                # 提取器官掩码（二值化：1表示器官，0表示背景）
-                organ_binary = (seg_adapted == organ_label).astype(np.uint8)
-                voxel_count = int(organ_binary.sum())
-                
-                # 检查是否存在该器官
-                if voxel_count == 0:
-                    print(f" -> 跳过（体素数=0）")
-                    continue
-                
-                print(f" -> {voxel_count} 体素", end='', flush=True)
-                
-                # 保存标签映射：标签值 -> 器官名称
-                organ_label_to_name[str(organ_label)] = organ_name
-                
-                # 使用标签值作为文件名
-                binary_path = os.path.join(masks_dir, f'{organ_label}_binary.npy')
-                np.save(binary_path, organ_binary)
-                print(f" -> 已保存", end='')
-                
-                # 如果需要计算SDF
-                if compute_sdf:
-                    print(f" -> 计算SDF...", end='', flush=True)
-                    from ct_preprocessing.sdf_processor import convert_window_to_sdf, save_sdf_result
-                    try:
-                        _debug_log(f"  开始SDF计算: {organ_name} (标签{organ_label})")
-                        _debug_log(f"    原始shape={organ_binary.shape}, dtype={organ_binary.dtype}, sum={organ_binary.sum()}")
-                        
-                        # 确保 organ_binary 是 3D
-                        if organ_binary.ndim == 4:
-                            if organ_binary.shape[0] == 1:
-                                organ_binary = organ_binary[0]
-                            elif 1 in organ_binary.shape:
-                                organ_binary = organ_binary.squeeze()
+                for channel_idx in range(seg_num_channels):
+                    organ_binary = seg_adapted[channel_idx].astype(np.uint8)
+                    voxel_count = int(organ_binary.sum())
+                    
+                    # 跳过空通道
+                    if voxel_count == 0:
+                        continue
+                    
+                    # 获取器官名称（如果有映射）
+                    organ_name = get_organ_name_from_mapping(channel_idx, organ_mapping)
+                    
+                    print(f"     [{channel_idx+1}/{seg_num_channels}] 处理通道 {channel_idx}: {organ_name}", end='', flush=True)
+                    print(f" -> {voxel_count} 体素", end='', flush=True)
+                    
+                    # 保存映射信息
+                    organ_label_to_name[str(channel_idx)] = organ_name
+                    
+                    # 保存二值掩码：{channel_idx}_{organ_name}_binary.npy
+                    binary_path = os.path.join(masks_dir, f'{channel_idx}_{organ_name}_binary.npy')
+                    np.save(binary_path, organ_binary)
+                    print(f" -> 已保存", end='')
+                    
+                    # 如果需要计算SDF
+                    if compute_sdf:
+                        print(f" -> 计算SDF...", end='', flush=True)
+                        from ct_preprocessing.sdf_processor import convert_window_to_sdf, save_sdf_result
+                        try:
+                            _debug_log(f"  开始SDF计算: {organ_name} (通道{channel_idx})")
+                            _debug_log(f"    原始shape={organ_binary.shape}, dtype={organ_binary.dtype}, sum={organ_binary.sum()}")
+                            
+                            # 数据验证
+                            if voxel_count < 100:
+                                _debug_log(f"    跳过: 体素数太少 ({voxel_count})")
+                                print(f" -> 跳过SDF(体素太少)", end='', flush=True)
                             else:
-                                organ_binary = organ_binary[0]
+                                _debug_log(f"    开始convert_window_to_sdf (体素数={voxel_count})")
+                                
+                                # 检查CUDA内存
+                                import torch
+                                if torch.cuda.is_available():
+                                    mem_allocated = torch.cuda.memory_allocated() / 1024**3
+                                    mem_reserved = torch.cuda.memory_reserved() / 1024**3
+                                    _debug_log(f"    CUDA内存: allocated={mem_allocated:.2f}GB, reserved={mem_reserved:.2f}GB")
+                                
+                                sdf_result = convert_window_to_sdf(
+                                    organ_binary,
+                                    resolution=sdf_resolution,
+                                    threshold_factor=sdf_threshold_factor
+                                )
+                                _debug_log(f"    SDF计算完成")
+                                
+                                sdf_path = os.path.join(masks_dir, f'{channel_idx}_{organ_name}_sdf.npz')
+                                save_sdf_result(
+                                    sdf_result,
+                                    sdf_path,
+                                    replace_source=replace_npy,
+                                    source_path=binary_path if replace_npy else None
+                                )
+                                sdf_points = len(sdf_result['sparse_index'])
+                                _debug_log(f"    SDF已保存: {sdf_points}点")
+                                print(f" + SDF({sdf_points}点)", end='', flush=True)
+                                
+                                # 清理CUDA内存
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                                    _debug_log(f"    CUDA缓存已清理")
                         
-                        _debug_log(f"    处理后shape={organ_binary.shape}")
+                        except Exception as e:
+                            import traceback
+                            error_trace = traceback.format_exc()
+                            _debug_log(f"    SDF计算失败: {type(e).__name__}: {e}")
+                            _debug_log(f"    错误堆栈:\n{error_trace}")
+                            print(f" -> ❌ SDF失败: {type(e).__name__}", end='', flush=True)
+                    
+                    # 完成该通道的处理
+                    print()  # 换行
+                    
+                    # 记录器官信息
+                    organs_info.append({
+                        'name': organ_name,
+                        'channel_index': channel_idx,
+                        'voxel_count': voxel_count
+                    })
+            
+            # ========== 分支2: 3D单通道标签（原有逻辑，向后兼容） ==========
+            elif seg_adapted.ndim == 3:
+                print(f"     [3D单标签模式] 基于标签值提取器官掩码")
+                
+                if organ_mapping is not None:
+                    organ_labels = organ_mapping.get('organ_labels', {})
+                    print(f"     [调试] 遍历 {len(organ_labels)} 个器官标签")
+                    
+                    # 预先计算所有存在的标签（避免在循环中重复计算）
+                    print(f"     [调试] 检查存在的标签值（可能需要一些时间）...")
+                    if seg_adapted.size > 512**3:
+                        # 大数组使用采样估计
+                        sample_size = min(10000000, seg_adapted.size)
+                        sample_indices = np.random.choice(seg_adapted.size, sample_size, replace=False)
+                        present_labels = np.unique(seg_adapted.flat[sample_indices])
+                    else:
+                        present_labels = np.unique(seg_adapted)
+                    print(f"     [调试] 检测到的标签: {present_labels} (共{len(present_labels)}个)")
+                    
+                    for idx, (label_str, organ_info) in enumerate(organ_labels.items(), 1):
+                        organ_label = int(label_str)
+                        organ_name = organ_info['name']
                         
-                        # 数据验证
-                        voxel_count = organ_binary.sum()
-                        if voxel_count < 100:
-                            _debug_log(f"    跳过: 体素数太少 ({voxel_count})")
-                            print(f"       - 跳过SDF: 体素数太少 ({voxel_count})")
-                        else:
-                            _debug_log(f"    开始convert_window_to_sdf (体素数={voxel_count})")
-                            
-                            # 检查CUDA内存
-                            import torch
-                            if torch.cuda.is_available():
-                                mem_allocated = torch.cuda.memory_allocated() / 1024**3
-                                mem_reserved = torch.cuda.memory_reserved() / 1024**3
-                                _debug_log(f"    CUDA内存: allocated={mem_allocated:.2f}GB, reserved={mem_reserved:.2f}GB")
-                            
-                            sdf_result = convert_window_to_sdf(
-                                organ_binary,
-                                resolution=sdf_resolution,
-                                threshold_factor=sdf_threshold_factor
-                            )
-                            _debug_log(f"    SDF计算完成")
-                            
-                            sdf_path = os.path.join(masks_dir, f'{organ_label}_sdf.npz')
-                            save_sdf_result(
-                                sdf_result,
-                                sdf_path,
-                                replace_source=replace_npy,
-                                source_path=binary_path if replace_npy else None
-                            )
-                            sdf_points = len(sdf_result['sparse_index'])
-                            _debug_log(f"    SDF已保存: {sdf_points}点")
-                            print(f" + SDF({sdf_points}点)", end='', flush=True)
-                            
-                            # 清理CUDA内存
-                            if torch.cuda.is_available():
-                                torch.cuda.empty_cache()
-                                _debug_log(f"    CUDA缓存已清理")
-                            
-                    except Exception as e:
-                        import traceback
-                        error_trace = traceback.format_exc()
-                        _debug_log(f"    SDF计算失败: {type(e).__name__}: {e}")
-                        _debug_log(f"    错误堆栈:\n{error_trace}")
-                        print(f" -> ❌ SDF失败: {type(e).__name__}", end='', flush=True)
+                        print(f"     [{idx}/{len(organ_labels)}] 处理器官: {organ_name} (标签={organ_label})", end='', flush=True)
+                        
+                        # 先检查该标签是否存在（避免不必要的计算）
+                        if organ_label not in present_labels:
+                            print(f" -> 跳过（标签不存在）")
+                            continue
+                        
+                        # 提取器官掩码（二值化：1表示器官，0表示背景）
+                        organ_binary = (seg_adapted == organ_label).astype(np.uint8)
+                        voxel_count = int(organ_binary.sum())
+                        
+                        # 检查是否存在该器官
+                        if voxel_count == 0:
+                            print(f" -> 跳过（体素数=0）")
+                            continue
+                        
+                        print(f" -> {voxel_count} 体素", end='', flush=True)
+                        
+                        # 保存标签映射：标签值 -> 器官名称
+                        organ_label_to_name[str(organ_label)] = organ_name
+                        
+                        # 使用标签值作为文件名
+                        binary_path = os.path.join(masks_dir, f'{organ_label}_binary.npy')
+                        np.save(binary_path, organ_binary)
+                        print(f" -> 已保存", end='')
+                        
+                        # 如果需要计算SDF
+                        if compute_sdf:
+                            print(f" -> 计算SDF...", end='', flush=True)
+                            from ct_preprocessing.sdf_processor import convert_window_to_sdf, save_sdf_result
+                            try:
+                                _debug_log(f"  开始SDF计算: {organ_name} (标签{organ_label})")
+                                _debug_log(f"    原始shape={organ_binary.shape}, dtype={organ_binary.dtype}, sum={organ_binary.sum()}")
+                                
+                                # 确保 organ_binary 是 3D
+                                if organ_binary.ndim == 4:
+                                    if organ_binary.shape[0] == 1:
+                                        organ_binary = organ_binary[0]
+                                    elif 1 in organ_binary.shape:
+                                        organ_binary = organ_binary.squeeze()
+                                    else:
+                                        organ_binary = organ_binary[0]
+                                
+                                _debug_log(f"    处理后shape={organ_binary.shape}")
+                                
+                                # 数据验证
+                                voxel_count_sdf = organ_binary.sum()
+                                if voxel_count_sdf < 100:
+                                    _debug_log(f"    跳过: 体素数太少 ({voxel_count_sdf})")
+                                    print(f"       - 跳过SDF: 体素数太少 ({voxel_count_sdf})")
+                                else:
+                                    _debug_log(f"    开始convert_window_to_sdf (体素数={voxel_count_sdf})")
+                                    
+                                    # 检查CUDA内存
+                                    import torch
+                                    if torch.cuda.is_available():
+                                        mem_allocated = torch.cuda.memory_allocated() / 1024**3
+                                        mem_reserved = torch.cuda.memory_reserved() / 1024**3
+                                        _debug_log(f"    CUDA内存: allocated={mem_allocated:.2f}GB, reserved={mem_reserved:.2f}GB")
+                                    
+                                    sdf_result = convert_window_to_sdf(
+                                        organ_binary,
+                                        resolution=sdf_resolution,
+                                        threshold_factor=sdf_threshold_factor
+                                    )
+                                    _debug_log(f"    SDF计算完成")
+                                    
+                                    sdf_path = os.path.join(masks_dir, f'{organ_label}_sdf.npz')
+                                    save_sdf_result(
+                                        sdf_result,
+                                        sdf_path,
+                                        replace_source=replace_npy,
+                                        source_path=binary_path if replace_npy else None
+                                    )
+                                    sdf_points = len(sdf_result['sparse_index'])
+                                    _debug_log(f"    SDF已保存: {sdf_points}点")
+                                    print(f" + SDF({sdf_points}点)", end='', flush=True)
+                                    
+                                    # 清理CUDA内存
+                                    if torch.cuda.is_available():
+                                        torch.cuda.empty_cache()
+                                        _debug_log(f"    CUDA缓存已清理")
+                                    
+                            except Exception as e:
+                                import traceback
+                                error_trace = traceback.format_exc()
+                                _debug_log(f"    SDF计算失败: {type(e).__name__}: {e}")
+                                _debug_log(f"    错误堆栈:\n{error_trace}")
+                                print(f" -> ❌ SDF失败: {type(e).__name__}", end='', flush=True)
+                        
+                        # 完成该器官的处理
+                        print()  # 换行
+                        
+                        # 记录器官信息
+                        organs_info.append({
+                            'name': organ_name,
+                            'label': organ_label,
+                            'voxel_count': voxel_count
+                        })
                 else:
-                    # 没有SDF计算时也换行
-                    pass
-                
-                # 完成该器官的处理
-                print()  # 换行
-                
-                # 记录器官信息
-                organs_info.append({
-                    'name': organ_name,
-                    'label': organ_label,
-                    'voxel_count': int(organ_binary.sum())
-                })
+                    print(f"  警告: 3D掩码模式但没有器官映射，跳过处理")
+            
+            else:
+                print(f"  错误: 不支持的掩码维度: {seg_adapted.ndim}")
             
             # 保存器官标签映射信息到JSON文件
             if organ_label_to_name:
@@ -644,23 +841,18 @@ def process_m3d_seg_case(case_info: Dict,
                 with open(organ_labels_path, 'w', encoding='utf-8') as f:
                     json.dump({
                         'label_to_name': organ_label_to_name,
-                        'dataset_name': organ_mapping.get('dataset_name', 'unknown'),
-                        'modality': organ_mapping.get('modality', 'CT'),
+                        'dataset_name': organ_mapping.get('dataset_name', 'unknown') if organ_mapping else 'unknown',
+                        'modality': organ_mapping.get('modality', 'CT') if organ_mapping else 'CT',
                         'resolution': target_resolution,
                         'num_organs': len(organ_label_to_name),
-                        'description': '标签值到器官名称的映射'
+                        'mask_type': seg_mask_type,
+                        'mask_dimensions': seg_adapted.ndim,
+                        'description': '器官标签/通道索引到器官名称的映射'
                     }, f, indent=2, ensure_ascii=False)
                 print(f"     保存器官标签映射: masks/organ_labels.json")
-            
-            # 保存完整的分割掩码（稀疏格式）- 已禁用以节省空间
-            # mask_shape_save = seg_adapted.shape
-            # seg_flat = seg_adapted.reshape(-1)
-            # seg_sparse = sparse.csr_matrix(seg_flat)
-            # mask_path = os.path.join(masks_dir, 'segmentation_masks.npz')
-            # sparse.save_npz(mask_path, seg_sparse)
-            # print(f"     保存分割掩码: masks/segmentation_masks.npz")
+        
         else:
-            print(f"  警告: 掩码模式需要分割标签和器官映射，跳过处理")
+            print(f"  警告: 掩码模式但没有分割标签数据，跳过处理")
     
     else:
         # ===== 原有流程：窗位窗宽处理 =====
