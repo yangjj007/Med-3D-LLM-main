@@ -3,7 +3,7 @@
         "vqvae": {
             "name": "SparseSDFVQVAE",
             "args": {
-                "use_ema_update": false,
+                "use_ema_update": true,
                 "vq_decay": 0.99,
                 "vq_epsilon": 1e-5,
                 "use_kmeans_reinit": true,
@@ -58,7 +58,7 @@
             "lr_scheduler": {
                 "name": "WarmupThenScheduler",
                 "args": {
-                    "warmup_steps": 50,
+                    "warmup_steps": 100,
                     "main_scheduler_class": "CosineAnnealingLR",
                     "main_scheduler_kwargs": {
                         "T_max": 100000,
