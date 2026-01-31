@@ -7,13 +7,13 @@
                 "vq_decay": 0.99,
                 "vq_epsilon": 1e-5,
                 "use_kmeans_reinit": true,
-                "kmeans_interval": 50,
+                "kmeans_interval": 100,
                 "reservoir_size": 16384,
                 "resolution": 64,
                 "model_channels": 512,
                 "latent_channels": 16,
                 "num_blocks": 8,
-                "num_embeddings": 1024,
+                "num_embeddings": 2048,
                 "num_heads": null,
                 "num_head_channels": 64,
                 "mlp_ratio": 4.0,
@@ -43,8 +43,8 @@
             "num_workers": 30,
             "pretrained_vae_path": "./vae_weights/sparse_vae_512.pth",
             "max_steps": 100000,
-            "max_epoch": 4,
-            "batch_size_per_gpu": 16,
+            "max_epoch": 2,
+            "batch_size_per_gpu": 64,
             "batch_split": 1,
             "disable_snapshot": true,
             "optimizer": {
@@ -54,11 +54,15 @@
                     "weight_decay": 0.01
                 }
             },
-            "lr_scheduler": {       
-                "name": "CosineAnnealingLR",
+            "lr_scheduler": {
+            "name": "WarmupThenScheduler",
                 "args": {
-                    "T_max": 100000,
-                    "eta_min": 5e-5
+                    "warmup_steps": 100,
+                    "main_scheduler_class": "CosineAnnealingLR",
+                    "main_scheduler_kwargs": {
+                        "T_max": 100000,
+                        "eta_min": 5e-5
+                    }
                 }
             },
             "ema_rate": [0.9999],
