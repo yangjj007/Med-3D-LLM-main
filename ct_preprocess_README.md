@@ -200,7 +200,7 @@ bash scripts/prepare_ct_recursive.sh \
     ./organ_labels.json \
     8 \
     5 \
-    --use_mask \    
+    --use_mask \
     --replace_npy \
     --compute_sdf \
     --replace_npy > sdf_preprocess.log 2>&1

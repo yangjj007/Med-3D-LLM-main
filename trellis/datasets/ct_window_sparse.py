@@ -125,8 +125,13 @@ class CTWindowSparseSDF(Dataset):
                 result = {}
                 for sdf_path in sdf_files:
                     filename = os.path.basename(sdf_path)
-                    # 提取标签ID（如1_sdf.npz -> 1）
-                    label_id = filename.split('_sdf.npz')[0]
+                    # 提取标签ID（支持两种格式）
+                    # 格式1: 1_sdf.npz -> label_id = "1"
+                    # 格式2: 11_leftsurrenalgland_sdf.npz -> label_id = "11"
+                    filename_without_ext = filename.replace('_sdf.npz', '')
+                    # 提取第一个下划线之前的部分作为label_id（如果没有额外下划线，就是整个字符串）
+                    parts = filename_without_ext.split('_')
+                    label_id = parts[0]  # 只取第一个数字部分
                     result[label_id] = sdf_path
                 return result
             return {}
@@ -142,9 +147,17 @@ class CTWindowSparseSDF(Dataset):
         # 查找所有标签的SDF文件
         result = {}
         for label_id in label_to_name.keys():
+            # 首先尝试标准格式: {label_id}_sdf.npz
             sdf_path = os.path.join(masks_dir, f"{label_id}_sdf.npz")
             if os.path.exists(sdf_path):
                 result[label_id] = sdf_path
+            else:
+                # 如果标准格式不存在，尝试查找带器官名的格式: {label_id}_*_sdf.npz
+                pattern = os.path.join(masks_dir, f"{label_id}_*_sdf.npz")
+                matching_files = glob.glob(pattern)
+                if matching_files:
+                    # 使用第一个匹配的文件
+                    result[label_id] = matching_files[0]
         
         return result
     
