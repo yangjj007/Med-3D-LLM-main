@@ -130,18 +130,33 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             pretrained_vae_path: Path to pretrained VAE checkpoint (.pth file)
         """
         if self.is_master:
-            print(f'\nLoading pretrained VAE from: {pretrained_vae_path}')
+            print(f'\n{"="*80}')
+            print(f'🔧 [DEBUG] _load_pretrained_vae 被调用')
+            print(f'{"="*80}')
+            print(f'📁 预训练权重路径: {pretrained_vae_path}')
+            print(f'📋 self._should_load_pretrained: {self._should_load_pretrained}')
         
         # Load checkpoint
+        if self.is_master:
+            print(f'\n📦 正在加载 checkpoint...')
         checkpoint = torch.load(pretrained_vae_path, map_location='cpu', weights_only=True)
+        if self.is_master:
+            print(f'✅ Checkpoint 加载成功')
+            print(f'   顶层键: {list(checkpoint.keys())}')
         
         # Extract VAE state dict
         if 'vae' in checkpoint:
             vae_state_dict = checkpoint['vae']
+            if self.is_master:
+                print(f'   使用键: "vae"')
         elif 'state_dict' in checkpoint:
             vae_state_dict = checkpoint['state_dict']
+            if self.is_master:
+                print(f'   使用键: "state_dict"')
         else:
             vae_state_dict = checkpoint
+            if self.is_master:
+                print(f'   直接使用整个 checkpoint')
         
         # Get encoder and decoder state dicts
         encoder_state_dict = {
@@ -162,18 +177,78 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             if k.startswith('vq.')
         }
         
+        if self.is_master:
+            print(f'\n📊 提取的参数统计:')
+            print(f'   Encoder: {len(encoder_state_dict)} 个参数')
+            print(f'   Decoder: {len(decoder_state_dict)} 个参数')
+            print(f'   VQ: {len(vq_state_dict)} 个参数')
+            
+            if vq_state_dict:
+                print(f'\n   VQ 参数详情:')
+                for key, value in vq_state_dict.items():
+                    if isinstance(value, torch.Tensor):
+                        print(f'     - {key}: shape={value.shape}, dtype={value.dtype}')
+                        if key == 'embeddings.weight':
+                            print(f'       统计: min={value.min().item():.6f}, max={value.max().item():.6f}, '
+                                  f'mean={value.mean().item():.6f}, std={value.std().item():.6f}')
+                            print(f'       前3个code的前5维:')
+                            for i in range(min(3, value.shape[0])):
+                                print(f'         Code {i}: {value[i, :5].tolist()}')
+            else:
+                print(f'   ⚠️  VQ state dict 是空的！')
+        
         # Load into VQVAE model
         vqvae = self.models['vqvae']
         if hasattr(vqvae, 'module'):
             vqvae = vqvae.module
+            if self.is_master:
+                print(f'\n🔧 模型被 DDP 包装，使用 module 属性')
+        
+        if self.is_master:
+            print(f'\n🔍 检查模型是否有 load_pretrained_vae 方法...')
+            print(f'   hasattr(vqvae, "load_pretrained_vae"): {hasattr(vqvae, "load_pretrained_vae")}')
         
         if hasattr(vqvae, 'load_pretrained_vae'):
-            vqvae.load_pretrained_vae(encoder_state_dict, decoder_state_dict, vq_state_dict)
             if self.is_master:
-                print('Successfully loaded pretrained VAE weights')
+                print(f'\n📥 调用 vqvae.load_pretrained_vae()...')
+                # 在加载前记录当前codebook
+                print(f'\n📊 加载前的 Codebook 统计:')
+                current_embeddings = vqvae.vq.embeddings.weight.data
+                print(f'   Shape: {current_embeddings.shape}')
+                print(f'   Min: {current_embeddings.min().item():.6f}, Max: {current_embeddings.max().item():.6f}')
+                print(f'   Mean: {current_embeddings.mean().item():.6f}, Std: {current_embeddings.std().item():.6f}')
+                print(f'   前3个code的前5维:')
+                for i in range(min(3, current_embeddings.shape[0])):
+                    print(f'     Code {i}: {current_embeddings[i, :5].tolist()}')
+            
+            vqvae.load_pretrained_vae(encoder_state_dict, decoder_state_dict, vq_state_dict)
+            
+            if self.is_master:
+                print(f'\n📊 加载后的 Codebook 统计:')
+                new_embeddings = vqvae.vq.embeddings.weight.data
+                print(f'   Shape: {new_embeddings.shape}')
+                print(f'   Min: {new_embeddings.min().item():.6f}, Max: {new_embeddings.max().item():.6f}')
+                print(f'   Mean: {new_embeddings.mean().item():.6f}, Std: {new_embeddings.std().item():.6f}')
+                print(f'   前3个code的前5维:')
+                for i in range(min(3, new_embeddings.shape[0])):
+                    print(f'     Code {i}: {new_embeddings[i, :5].tolist()}')
+                
+                # 检查是否真的改变了
+                if vq_state_dict and 'embeddings.weight' in vq_state_dict:
+                    original_embeddings = vq_state_dict['embeddings.weight']
+                    diff = (new_embeddings.cpu() - original_embeddings).abs().max().item()
+                    print(f'\n   ✅ 与预训练权重的最大差异: {diff:.6e}')
+                    if diff < 1e-6:
+                        print(f'   ✅ Codebook 已成功加载！')
+                    else:
+                        print(f'   ⚠️  Codebook 与预训练权重有差异！')
+                
+                print(f'\n✅ 预训练 VAE 权重加载完成')
+                print(f'{"="*80}\n')
         else:
             if self.is_master:
-                print('Warning: VQVAE model does not have load_pretrained_vae method')
+                print(f'❌ 警告: VQVAE 模型没有 load_pretrained_vae 方法')
+                print(f'{"="*80}\n')
     
     def _configure_training_stage(self):
         """

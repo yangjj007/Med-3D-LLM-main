@@ -759,54 +759,137 @@ class SparseSDFVQVAE(nn.Module):
             decoder_state_dict: 预训练的 decoder 权重字典
             vq_state_dict: 预训练的 VQ 权重字典（可选）
         """
+        print(f"\n{'='*80}")
+        print(f"🔧 [DEBUG] SparseSDFVQVAE.load_pretrained_vae 被调用")
+        print(f"{'='*80}")
+        print(f"📊 输入参数:")
+        print(f"   encoder_state_dict: {len(encoder_state_dict) if encoder_state_dict else 0} 个参数")
+        print(f"   decoder_state_dict: {len(decoder_state_dict) if decoder_state_dict else 0} 个参数")
+        print(f"   vq_state_dict: {len(vq_state_dict) if vq_state_dict else 0} 个参数")
+        print(f"   vq_state_dict is None: {vq_state_dict is None}")
+        print(f"   vq_state_dict is not None and len(vq_state_dict) > 0: {vq_state_dict is not None and len(vq_state_dict) > 0}")
+        
+        if vq_state_dict:
+            print(f"\n📋 VQ state_dict 详情:")
+            for key, value in vq_state_dict.items():
+                if isinstance(value, torch.Tensor):
+                    print(f"   - {key}: shape={value.shape}, dtype={value.dtype}")
+        
         # 加载 encoder 参数
+        print(f"\n📥 加载 Encoder 参数...")
         encoder_dict = self.encoder.state_dict()
         encoder_dict.update(encoder_state_dict)
         self.encoder.load_state_dict(encoder_dict, strict=False)
+        print(f"   ✅ Encoder 加载完成")
         
         # 加载 decoder 参数
+        print(f"\n📥 加载 Decoder 参数...")
         decoder_dict = self.decoder.state_dict()
         decoder_dict.update(decoder_state_dict)
         self.decoder.load_state_dict(decoder_dict, strict=False)
+        print(f"   ✅ Decoder 加载完成")
         
-        print(f"✅ Loaded pretrained VAE parameters")
+        print(f"\n✅ Loaded pretrained VAE parameters")
         print(f"   Encoder: {len(encoder_state_dict)} parameters loaded")
         print(f"   Decoder: {len(decoder_state_dict)} parameters loaded")
         
         # 加载 VQ 参数（如果提供）
         if vq_state_dict is not None and len(vq_state_dict) > 0:
+            print(f"\n📥 加载 VQ 参数...")
+            print(f"   VQ state_dict 包含 {len(vq_state_dict)} 个键")
+            
+            # 记录加载前的codebook
+            print(f"\n📊 加载前的 VQ Codebook:")
+            before_embeddings = self.vq.embeddings.weight.data.clone()
+            print(f"   Shape: {before_embeddings.shape}")
+            print(f"   Min: {before_embeddings.min().item():.6f}, Max: {before_embeddings.max().item():.6f}")
+            print(f"   Mean: {before_embeddings.mean().item():.6f}, Std: {before_embeddings.std().item():.6f}")
+            print(f"   前3个code的前5维:")
+            for i in range(min(3, before_embeddings.shape[0])):
+                print(f"     Code {i}: {before_embeddings[i, :5].tolist()}")
+            
             vq_dict = self.vq.state_dict()
+            print(f"\n🔍 当前 VQ 模型的 state_dict 包含 {len(vq_dict)} 个键:")
+            for key in vq_dict.keys():
+                val = vq_dict[key]
+                print(f"   - {key}: shape={val.shape if isinstance(val, torch.Tensor) else type(val)}")
             
             # 筛选可用的参数（避免形状不匹配）
             loaded_keys = []
             skipped_keys = []
+            print(f"\n🔄 开始匹配和加载参数...")
             for key, value in vq_state_dict.items():
+                print(f"\n   检查键: {key}")
                 if key in vq_dict:
+                    print(f"     ✓ 键存在于模型中")
+                    print(f"     预训练 shape: {value.shape}")
+                    print(f"     当前模型 shape: {vq_dict[key].shape}")
                     if vq_dict[key].shape == value.shape:
+                        print(f"     ✓ Shape 匹配！正在更新...")
                         vq_dict[key] = value
                         loaded_keys.append(key)
+                        print(f"     ✅ 已更新到 vq_dict")
+                        
+                        # 如果是 embeddings.weight，打印详细信息
+                        if key == 'embeddings.weight':
+                            print(f"     📊 预训练 embeddings 统计:")
+                            print(f"        Min: {value.min().item():.6f}, Max: {value.max().item():.6f}")
+                            print(f"        Mean: {value.mean().item():.6f}, Std: {value.std().item():.6f}")
+                            print(f"        前3个code的前5维:")
+                            for i in range(min(3, value.shape[0])):
+                                print(f"          Code {i}: {value[i, :5].tolist()}")
                     else:
+                        print(f"     ✗ Shape 不匹配，跳过")
                         skipped_keys.append(f"{key} (shape mismatch: {vq_dict[key].shape} vs {value.shape})")
                 else:
+                    print(f"     ✗ 键不存在于当前模型")
                     skipped_keys.append(f"{key} (not found in current model)")
             
             # 加载更新后的参数
+            print(f"\n📥 调用 self.vq.load_state_dict()...")
             self.vq.load_state_dict(vq_dict, strict=False)
+            print(f"   ✅ load_state_dict 完成")
             
-            print(f"   VQ: {len(loaded_keys)} parameters loaded")
+            # 验证加载后的codebook
+            print(f"\n📊 加载后的 VQ Codebook:")
+            after_embeddings = self.vq.embeddings.weight.data
+            print(f"   Shape: {after_embeddings.shape}")
+            print(f"   Min: {after_embeddings.min().item():.6f}, Max: {after_embeddings.max().item():.6f}")
+            print(f"   Mean: {after_embeddings.mean().item():.6f}, Std: {after_embeddings.std().item():.6f}")
+            print(f"   前3个code的前5维:")
+            for i in range(min(3, after_embeddings.shape[0])):
+                print(f"     Code {i}: {after_embeddings[i, :5].tolist()}")
+            
+            # 计算变化
+            diff = (after_embeddings - before_embeddings).abs().max().item()
+            print(f"\n   🔍 加载前后的最大差异: {diff:.6e}")
+            if diff < 1e-6:
+                print(f"   ⚠️  警告: Codebook 几乎没有变化！可能加载失败！")
+            else:
+                print(f"   ✅ Codebook 已更新！")
+            
+            print(f"\n   VQ: {len(loaded_keys)} parameters loaded")
             if loaded_keys:
-                print(f"      Loaded: {', '.join(loaded_keys)}")
+                print(f"      ✅ Loaded: {', '.join(loaded_keys)}")
             if skipped_keys:
-                print(f"      Skipped: {', '.join(skipped_keys)}")
+                print(f"      ⚠️  Skipped: {', '.join(skipped_keys)}")
             
             # 特别说明EMA buffer的处理
             if self.use_ema_update:
+                print(f"\n   📋 EMA 模式检查 (use_ema_update=True):")
                 if 'ema_cluster_size' in loaded_keys and 'ema_w' in loaded_keys:
-                    print(f"      ℹ️  EMA buffers loaded from pretrained model")
+                    print(f"      ✅ EMA buffers loaded from pretrained model")
                 else:
                     print(f"      ⚠️  EMA buffers not found in pretrained model, will be initialized from scratch")
+                    print(f"      可用的VQ键: {list(vq_state_dict.keys())}")
         else:
-            print(f"   VQ: No pretrained VQ parameters provided, using random initialization")
+            print(f"\n   ⚠️  VQ: No pretrained VQ parameters provided or empty dict, using random initialization")
+            if vq_state_dict is None:
+                print(f"      原因: vq_state_dict is None")
+            elif len(vq_state_dict) == 0:
+                print(f"      原因: vq_state_dict is empty")
+        
+        print(f"{'='*80}\n")
     
     # def convert_to_fp16(self) -> None:
     #     """
