@@ -42,7 +42,7 @@
         "args": {
             "training_stage": 2,
             "num_workers": 30,
-            "pretrained_vae_path": "./outputs/ct_vqvae_stage1_1024_kmeans/ckpts/vqvae_step0000300.pth",
+            "pretrained_vae_path": "./outputs/ct_vqvae_stage1_8192_1/ckpts/vqvae_step0000600.pth",
             "max_steps": 100000,
             "max_epoch": 1,
             "batch_size_per_gpu": 8,
@@ -79,7 +79,7 @@
             "lambda_vq": 1.0,
             "lambda_commitment": 0.25,
             "loss_type": "l1_l2",
-            "i_print": 10,
+            "i_print": 100,
             "i_log": 100,
             "i_sample": 100,
             "i_save": 100,
