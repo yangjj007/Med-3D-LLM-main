@@ -42,7 +42,7 @@
         "args": {
             "training_stage": 2,
             "num_workers": 30,
-            "pretrained_vae_path": "./outputs/ct_vqvae_stage1_8192_1/ckpts/vqvae_step0000600.pth",
+            "pretrained_vae_path": "./outputs/ct_vqvae_stage1_8192_1/ckpts/vqvae_step0000600.pt",
             "max_steps": 100000,
             "max_epoch": 1,
             "batch_size_per_gpu": 8,
