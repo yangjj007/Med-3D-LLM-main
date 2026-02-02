@@ -72,9 +72,33 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
         self.loss_type = loss_type
         self.training_stage = training_stage
         self.pretrained_vae_path = pretrained_vae_path
+        
+        # 检查是否有实际的checkpoint要加载
+        # load_dir 可能被设置为 output_dir，但如果没有checkpoint文件，就不算"恢复训练"
+        has_checkpoint_to_load = False
+        if load_dir is not None and step is not None:
+            # 显式提供了step，肯定要加载checkpoint
+            has_checkpoint_to_load = True
+        elif load_dir is not None:
+            # 只提供了load_dir，检查是否真的有checkpoint文件
+            import os
+            import glob
+            ckpt_files = glob.glob(os.path.join(load_dir, 'ckpts', 'misc_*.pt'))
+            has_checkpoint_to_load = len(ckpt_files) > 0
+        
+        # 只有当：1) 提供了pretrained_vae_path，且 2) 没有checkpoint要恢复时，才加载预训练权重
         self._should_load_pretrained = (pretrained_vae_path is not None and 
-                                       load_dir is None and 
-                                       step is None)
+                                       not has_checkpoint_to_load)
+        
+        print(f"\n{'='*80}")
+        print(f"🔍 [DEBUG] SparseSDF_VQVAETrainer.__init__ 参数检查")
+        print(f"{'='*80}")
+        print(f"  pretrained_vae_path: {pretrained_vae_path}")
+        print(f"  load_dir: {load_dir}")
+        print(f"  step: {step}")
+        print(f"  has_checkpoint_to_load: {has_checkpoint_to_load}")
+        print(f"  _should_load_pretrained: {self._should_load_pretrained}")
+        print(f"{'='*80}\n")
         
         # 调用父类初始化
         super().__init__(models, dataset, load_dir=load_dir, step=step, **kwargs)
