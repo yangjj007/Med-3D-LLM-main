@@ -112,8 +112,10 @@ python train.py \
 export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/ct_vqvae_stage2.json \
-    --output_dir outputs/ct_vqvae_stage2 \
+    --output_dir outputs/ct_vqvae_stage2_8192_1 \
     --data_dir ./processed_dataset \
+    --load_dir outputs/ct_vqvae_stage1_8192_1 \
+    --ckpt latest \
     --num_gpus 4 > stage2_train.log 2>&1
 ```
 
