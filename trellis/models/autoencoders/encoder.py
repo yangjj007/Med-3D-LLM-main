@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ...modules import sparse as sp
+from ...modules.utils import convert_module_to_f16, convert_module_to_f32
 from .base import SparseTransformerBase
 
 
@@ -120,6 +121,24 @@ class SparseSDFEncoder(SparseTransformerBase):
         # # Zero-out output layers:
         # nn.init.constant_(self.out_layer.weight, 0)
         # nn.init.constant_(self.out_layer.bias, 0)
+
+    def convert_to_fp16(self) -> None:
+        """
+        Convert the torso of the model to float16.
+        """
+        super().convert_to_fp16()
+        self.input_layer1.apply(convert_module_to_f16)
+        self.downsample.apply(convert_module_to_f16)
+        self.out_layer.apply(convert_module_to_f16)
+
+    def convert_to_fp32(self) -> None:
+        """
+        Convert the torso of the model to float32.
+        """
+        super().convert_to_fp32()
+        self.input_layer1.apply(convert_module_to_f32)
+        self.downsample.apply(convert_module_to_f32)
+        self.out_layer.apply(convert_module_to_f32)
 
     def forward(self, x: sp.SparseTensor, factor: float = None):
         print(f"[DEBUG Encoder.forward] Input x.shape: {x.shape}, x.feats.shape: {x.feats.shape}")
