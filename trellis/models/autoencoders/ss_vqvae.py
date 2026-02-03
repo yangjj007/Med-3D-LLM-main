@@ -891,30 +891,30 @@ class SparseSDFVQVAE(nn.Module):
         
         print(f"{'='*80}\n")
     
-    # def convert_to_fp16(self) -> None:
-    #     """
-    #     Convert encoder, decoder, and VQ codebook to float16.
-    #     This method is called by the trainer when loading checkpoints with fp16_mode='inflat_all'.
-    #     """
-    #     if hasattr(self.encoder, 'convert_to_fp16'):
-    #         self.encoder.convert_to_fp16()
-    #     if hasattr(self.decoder, 'convert_to_fp16'):
-    #         self.decoder.convert_to_fp16()
-    #     # Convert VQ codebook embeddings to fp16
-    #     if hasattr(self.vq, 'embeddings'):
-    #         self.vq.embeddings.weight.data = self.vq.embeddings.weight.data.half()
+    def convert_to_fp16(self) -> None:
+        """
+        Convert encoder, decoder, and VQ codebook to float16.
+        This method is called by the trainer when loading checkpoints with fp16_mode='inflat_all'.
+        """
+        if hasattr(self.encoder, 'convert_to_fp16'):
+            self.encoder.convert_to_fp16()
+        if hasattr(self.decoder, 'convert_to_fp16'):
+            self.decoder.convert_to_fp16()
+        # Convert VQ codebook embeddings to fp16
+        if hasattr(self.vq, 'embeddings'):
+            self.vq.embeddings.weight.data = self.vq.embeddings.weight.data.half()
     
-    # def convert_to_fp32(self) -> None:
-    #     """
-    #     Convert encoder, decoder, and VQ codebook to float32.
-    #     """
-    #     if hasattr(self.encoder, 'convert_to_fp32'):
-    #         self.encoder.convert_to_fp32()
-    #     if hasattr(self.decoder, 'convert_to_fp32'):
-    #         self.decoder.convert_to_fp32()
-    #     # Convert VQ codebook embeddings to fp32
-    #     if hasattr(self.vq, 'embeddings'):
-    #         self.vq.embeddings.weight.data = self.vq.embeddings.weight.data.float()
+    def convert_to_fp32(self) -> None:
+        """
+        Convert encoder, decoder, and VQ codebook to float32.
+        """
+        if hasattr(self.encoder, 'convert_to_fp32'):
+            self.encoder.convert_to_fp32()
+        if hasattr(self.decoder, 'convert_to_fp32'):
+            self.decoder.convert_to_fp32()
+        # Convert VQ codebook embeddings to fp32
+        if hasattr(self.vq, 'embeddings'):
+            self.vq.embeddings.weight.data = self.vq.embeddings.weight.data.float()
 
 
 # 向后兼容的别名
