@@ -126,6 +126,8 @@ class SparseSDFEncoder(SparseTransformerBase):
         """
         Convert the torso of the model to float16.
         """
+        self.use_fp16 = True
+        self.dtype = torch.float16
         super().convert_to_fp16()
         self.input_layer1.apply(convert_module_to_f16)
         self.downsample.apply(convert_module_to_f16)
@@ -135,6 +137,8 @@ class SparseSDFEncoder(SparseTransformerBase):
         """
         Convert the torso of the model to float32.
         """
+        self.use_fp16 = False
+        self.dtype = torch.float32
         super().convert_to_fp32()
         self.input_layer1.apply(convert_module_to_f32)
         self.downsample.apply(convert_module_to_f32)
@@ -143,6 +147,10 @@ class SparseSDFEncoder(SparseTransformerBase):
     def forward(self, x: sp.SparseTensor, factor: float = None):
         print(f"[DEBUG Encoder.forward] Input x.shape: {x.shape}, x.feats.shape: {x.feats.shape}")
         print(f"[DEBUG Encoder.forward] Input x.feats min: {x.feats.min().item():.6f}, max: {x.feats.max().item():.6f}, mean: {x.feats.mean().item():.6f}")
+        
+        # Convert input to the correct dtype for fp16 mode
+        dtype = x.feats.dtype
+        x = x.type(self.dtype)
         
         x = self.input_layer1(x)
         print(f"[DEBUG Encoder.forward] After input_layer1, x.feats.shape: {x.feats.shape}")
@@ -158,7 +166,7 @@ class SparseSDFEncoder(SparseTransformerBase):
         print(f"[DEBUG Encoder.forward] After super().forward, h.feats.shape: {h.feats.shape}")
         print(f"[DEBUG Encoder.forward] After super().forward, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
         
-        h = h.type(x.dtype)
+        h = h.type(dtype)
         print(f"[DEBUG Encoder.forward] After type conversion, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}")
         
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))

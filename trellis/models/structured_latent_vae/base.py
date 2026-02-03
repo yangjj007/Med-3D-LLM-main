@@ -90,12 +90,18 @@ class SparseTransformerBase(nn.Module):
         """
         Convert the torso of the model to float16.
         """
+        self.use_fp16 = True
+        self.dtype = torch.float16
+        self.input_layer.apply(convert_module_to_f16)
         self.blocks.apply(convert_module_to_f16)
 
     def convert_to_fp32(self) -> None:
         """
         Convert the torso of the model to float32.
         """
+        self.use_fp16 = False
+        self.dtype = torch.float32
+        self.input_layer.apply(convert_module_to_f32)
         self.blocks.apply(convert_module_to_f32)
 
     def initialize_weights(self) -> None:

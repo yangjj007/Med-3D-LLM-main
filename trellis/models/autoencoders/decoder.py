@@ -128,15 +128,21 @@ class SparseSDFDecoder(SparseTransformerBase):
         """
         Convert the torso of the model to float16.
         """
+        self.use_fp16 = True
+        self.dtype = torch.float16
         super().convert_to_fp16()
         self.upsample.apply(convert_module_to_f16)
+        self.out_layer.apply(convert_module_to_f16)
 
     def convert_to_fp32(self) -> None:
         """
         Convert the torso of the model to float32.
         """
+        self.use_fp16 = False
+        self.dtype = torch.float32
         super().convert_to_fp32()
-        self.upsample.apply(convert_module_to_f32)  
+        self.upsample.apply(convert_module_to_f32)
+        self.out_layer.apply(convert_module_to_f32)  
     
     @torch.no_grad()
     def split_for_meshing(self, x: sp.SparseTensor, chunk_size=4, padding=4):
