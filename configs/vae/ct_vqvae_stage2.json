@@ -13,7 +13,7 @@
                 "model_channels": 512,
                 "latent_channels": 16,
                 "num_blocks": 8,
-                "num_embeddings": 8192,
+                "num_embeddings": 2048,
                 "num_heads": null,
                 "num_head_channels": 64,
                 "mlp_ratio": 4.0,
@@ -42,7 +42,7 @@
         "args": {
             "training_stage": 2,
             "num_workers": 30,
-            "pretrained_vae_path": "./outputs/ct_vqvae_stage1_8192_1/ckpts/vqvae_step0000600.pt",
+            "pretrained_vae_path": "./outputs/ct_vqvae_stage1_2048/ckpts/vqvae_step0000600.pt",
             "max_steps": 100000,
             "max_epoch": 1,
             "batch_size_per_gpu": 8,

@@ -101,7 +101,7 @@ bash scripts/prepare_ct_recursive.sh \
 export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/ct_vqvae_stage1.json \
-    --output_dir outputs/ct_vqvae_stage1_8192_1\
+    --output_dir outputs/ct_vqvae_stage1_2048_1\
     --data_dir ./processed_dataset \
     --num_gpus 4 > stage1_train.log 2>&1
 ```
