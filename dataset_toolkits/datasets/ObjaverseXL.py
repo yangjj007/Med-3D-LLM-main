@@ -6,6 +6,20 @@ import pandas as pd
 import objaverse.xl as oxl
 from utils import get_file_hash
 import threading
+import multiprocessing as mp
+
+
+def _download_batch_worker(batch_df, out_dir, proc_count, result_queue):
+    try:
+        result = oxl.download_objects(
+            batch_df,
+            download_dir=os.path.join(out_dir, "raw"),
+            save_repo_format="zip",
+            processes=proc_count
+        )
+        result_queue.put(("ok", result))
+    except Exception as err:
+        result_queue.put(("err", str(err)))
 
 
 def add_args(parser: argparse.ArgumentParser):
@@ -31,7 +45,6 @@ def get_metadata(source, **kwargs):
 
 def download(metadata, output_dir, batch_size=100, batch_timeout=60, processes=1, **kwargs):    
     import time
-    import multiprocessing as mp
     os.makedirs(os.path.join(output_dir, 'raw'), exist_ok=True)
 
     # download annotations
@@ -64,22 +77,10 @@ def download(metadata, output_dir, batch_size=100, batch_timeout=60, processes=1
         for retry in range(max_retries):
             try:
                 # Run each batch in its own process so we can reliably terminate on timeout.
-                def _worker(batch_df, out_dir, proc_count, result_queue):
-                    try:
-                        result = oxl.download_objects(
-                            batch_df,
-                            download_dir=os.path.join(out_dir, "raw"),
-                            save_repo_format="zip",
-                            processes=proc_count
-                        )
-                        result_queue.put(("ok", result))
-                    except Exception as err:
-                        result_queue.put(("err", str(err)))
-
                 ctx = mp.get_context("spawn")
                 result_queue = ctx.Queue()
                 proc = ctx.Process(
-                    target=_worker,
+                    target=_download_batch_worker,
                     args=(batch_annotations, output_dir, processes, result_queue),
                 )
                 proc.start()
