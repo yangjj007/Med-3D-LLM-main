@@ -43,7 +43,7 @@
             "num_workers": 30,
             "pretrained_vae_path": "./vae_weights/sparse_vae_512.pth",
             "max_steps": 100000,
-            "max_epoch": 2,
+            "max_epoch": 1,
             "batch_size_per_gpu": 64,
             "batch_split": 1,
             "disable_snapshot": true,
