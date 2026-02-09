@@ -77,7 +77,7 @@ python dataset_toolkits/sdf_voxelize.py \
     --output_dir ./train_sdf_dataset \
     --resolutions 512 \
     --filter_aesthetic_score 6.0 \
-    --max_workers 16
+    --max_workers 1
 ```
 
 ### 处理自定义标注数据：
@@ -87,7 +87,7 @@ python dataset_toolkits/sdf_voxelize.py \
     --input_dir ./my_dataset \
     --output_dir ./train_sdf_dataset \
     --resolutions 512 \
-    --max_workers 16
+    --max_workers 1
 ```
 
 

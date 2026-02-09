@@ -42,17 +42,47 @@ def download(metadata, output_dir, **kwargs):
     
     downloaded = {}
     metadata = metadata.set_index("file_identifier")
+    
+    # Debug: Print first few instances to see what we're trying to download
+    print(f"\n[DEBUG] Total instances to download: {len(metadata)}")
+    print(f"[DEBUG] First 5 file_identifiers:")
+    for i, idx in enumerate(list(metadata.index)[:5]):
+        print(f"  {i+1}. {idx}")
+    print(f"[DEBUG] Metadata columns: {list(metadata.columns)}")
+    print()
+    
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor, \
         tqdm(total=len(metadata), desc="Downloading") as pbar:
         def worker(instance: str) -> str:
             try:
+                # Check if file already exists
+                local_file_path = os.path.join(output_dir, 'raw', instance)
+                if os.path.exists(local_file_path):
+                    print(f"[DEBUG] File already exists, skipping download: {instance}")
+                    sha256 = get_file_hash(local_file_path)
+                    pbar.update()
+                    return sha256
+                
+                # Check if instance looks like a URL
+                if instance.startswith('http://') or instance.startswith('https://'):
+                    print(f"\n[WARNING] Instance looks like a URL, not a filename: {instance}")
+                    print(f"  Expected a filename but got a URL. This may indicate incorrect metadata.")
+                    pbar.update()
+                    return None
+                
+                print(f"[DEBUG] Attempting to download: repo_id='hssd/hssd-models', filename='{instance}'")
                 huggingface_hub.hf_hub_download(repo_id="hssd/hssd-models", filename=instance, repo_type="dataset", local_dir=os.path.join(output_dir, 'raw'))
-                sha256 = get_file_hash(os.path.join(output_dir, 'raw', instance))
+                sha256 = get_file_hash(local_file_path)
                 pbar.update()
+                print(f"[DEBUG] Successfully downloaded {instance}, sha256: {sha256}")
                 return sha256
             except Exception as e:
                 pbar.update()
-                print(f"Error extracting for {instance}: {e}")
+                print(f"\n[ERROR] Error downloading '{instance}':")
+                print(f"  Error type: {type(e).__name__}")
+                print(f"  Error message: {e}")
+                import traceback
+                print(f"  Traceback: {traceback.format_exc()}")
                 return None
             
         sha256s = executor.map(worker, metadata.index)

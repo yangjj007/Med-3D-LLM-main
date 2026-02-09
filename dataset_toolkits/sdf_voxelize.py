@@ -348,7 +348,7 @@ def process_dataset(
         output_dir: Output directory for SDF files
         resolutions: List of resolutions to compute
         threshold_factor: UDF threshold factor
-        max_workers: Number of parallel workers (None = use CPU count)
+        max_workers: Number of parallel workers (None = single process with GPU)
         skip_existing: Whether to skip already processed files
     
     Returns:
@@ -377,29 +377,52 @@ def process_dataset(
     print(f"  Threshold factor: {threshold_factor}")
     print(f"  Output directory: {output_dir}")
     
-    # Prepare processing function
-    func = partial(
-        _process_mesh_to_sdf_wrapper,
-        output_dir=output_dir,
-        resolutions=resolutions,
-        threshold_factor=threshold_factor
-    )
+    # Determine processing mode
+    max_workers = max_workers or 1  # Default to single process for GPU safety
     
-    # Process with parallel workers
-    records = []
-    max_workers = max_workers or min(os.cpu_count(), 4)  # Default to 4 workers max
+    # For CUDA operations, we recommend single-process mode to avoid GPU conflicts
+    if max_workers > 1:
+        print(f"\n⚠️  WARNING: Using {max_workers} workers with GPU operations may cause issues.")
+        print("    If processing gets stuck, try max_workers=1 for stability.")
     
     print(f"  Parallel workers: {max_workers}")
     print("\nProcessing meshes...")
     
+    # Process with appropriate mode
+    records = []
+    
     if max_workers == 1:
-        # Single-threaded processing
+        # Single-process mode (recommended for GPU)
         for _, row in tqdm(metadata.iterrows(), total=len(metadata), desc="Processing"):
-            result = func((row['glb_path'], row['sha256']))
+            result = _process_mesh_to_sdf(
+                row['glb_path'], 
+                row['sha256'], 
+                output_dir, 
+                resolutions, 
+                threshold_factor
+            )
             if result is not None:
                 records.append(result)
+                
+            # Periodic GPU cache cleanup
+            if len(records) % 100 == 0:
+                torch.cuda.empty_cache()
     else:
-        # Multi-threaded processing
+        # Multi-process mode (use with caution)
+        import torch.multiprocessing as mp
+        # Set spawn method for better CUDA compatibility
+        try:
+            mp.set_start_method('spawn', force=True)
+        except RuntimeError:
+            pass  # Already set
+        
+        func = partial(
+            _process_mesh_to_sdf_wrapper,
+            output_dir=output_dir,
+            resolutions=resolutions,
+            threshold_factor=threshold_factor
+        )
+        
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = []
             for _, row in metadata.iterrows():
@@ -408,7 +431,7 @@ def process_dataset(
             
             for future in tqdm(as_completed(futures), total=len(futures), desc="Processing"):
                 try:
-                    result = future.result()
+                    result = future.result(timeout=300)  # 5 minute timeout per mesh
                     if result is not None:
                         records.append(result)
                 except Exception as e:
