@@ -201,6 +201,17 @@ def load_trellis500k_metadata(input_dir: str) -> pd.DataFrame:
     if 'sha256' not in captions_df.columns:
         raise ValueError("metadata.csv must have 'sha256' column for TRELLIS-500K format")
 
+    # Normalize file_identifier:
+    # - metadata.csv often stores full URLs like https://sketchfab.com/3d-models/<id>
+    # - object-paths.json stores only the <id>
+    captions_df['file_identifier'] = (
+        captions_df['file_identifier']
+        .astype(str)
+        .str.strip()
+        .str.replace(r'.*/', '', regex=True)
+    )
+    paths_df['file_identifier'] = paths_df['file_identifier'].astype(str).str.strip()
+
     # Select columns to merge (only if they exist)
     merge_cols = ['file_identifier', 'sha256']
     if 'captions' in captions_df.columns:
