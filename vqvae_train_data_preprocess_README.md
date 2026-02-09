@@ -1,14 +1,14 @@
 1、先下载TRELLIS-500Ks：git clone https://huggingface.co/datasets/JeffreyXiang/TRELLIS-500K
 
 2、运行build_metadata下载ObjaverseXL的metadata：
-python dataset_toolkits/build_metadata.py ObjaverseXL --source sketchfab   --output_dir TRELLIS-500K
+python dataset_toolkits/build_metadata.py ObjaverseXL --source sketchfab   --output_dir TRELLIS-500K/ObjaverseXL
 
-python dataset_toolkits/build_metadata.py HSSD --output_dir TRELLIS-500K
+python dataset_toolkits/build_metadata.py HSSD --output_dir TRELLIS-500K/HSSD
 
 3、开始下载
-python dataset_toolkits/download.py ObjaverseXL   --output_dir TRELLIS-500K  --rank 0 --world_size 1
+python dataset_toolkits/download.py ObjaverseXL   --output_dir TRELLIS-500K/ObjaverseXL  --rank 0 --world_size 1
 
-python dataset_toolkits/download.py HSSD --output_dir TRELLIS-500K --rank 0 --world_size 1
+python dataset_toolkits/download.py HSSD --output_dir TRELLIS-500K/HSSD --rank 0 --world_size 1
 
 4、对mesh文件进行SDF预处理（✅已完成）
 
@@ -73,7 +73,15 @@ view_keys,"该模型包含的视图列表 (如 axial, main, top, side)"
 ```bash
 python dataset_toolkits/sdf_voxelize.py \
     --format trellis500k \
-    --input_dir ./TRELLIS-500K/raw/hf-objaverse-v1 \
+    --input_dir ./TRELLIS-500K/ObjaverseXL/raw/hf-objaverse-v1 \
+    --output_dir ./train_sdf_dataset \
+    --resolutions 512 \
+    --filter_aesthetic_score 6.0 \
+    --max_workers 1
+
+python dataset_toolkits/sdf_voxelize.py \
+    --format trellis500k \
+    --input_dir ./TRELLIS-500K/HSSD/raw/objects \
     --output_dir ./train_sdf_dataset \
     --resolutions 512 \
     --filter_aesthetic_score 6.0 \

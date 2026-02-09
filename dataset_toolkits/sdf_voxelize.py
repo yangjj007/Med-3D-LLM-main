@@ -476,7 +476,7 @@ def save_results(
         merged = merged.drop(columns=['glb_path'])
     
     # Save metadata
-    output_csv = os.path.join(os.path.dirname(output_dir), 'metadata.csv')
+    output_csv = os.path.join(output_dir, 'metadata.csv')
     merged.to_csv(output_csv, index=False)
     print(f"\n✓ Metadata saved to: {output_csv}")
     

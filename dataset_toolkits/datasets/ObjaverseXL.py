@@ -10,6 +10,8 @@ from utils import get_file_hash
 def add_args(parser: argparse.ArgumentParser):
     parser.add_argument('--source', type=str, default='sketchfab',
                         help='Data source to download annotations from (github, sketchfab)')
+    parser.add_argument('--batch_size', type=int, default=50,
+                        help='Number of objects to download in each batch (default: 50)')
 
 
 def get_metadata(source, **kwargs):
@@ -22,25 +24,85 @@ def get_metadata(source, **kwargs):
     return metadata
         
 
-def download(metadata, output_dir, **kwargs):    
+def download(metadata, output_dir, batch_size=50, **kwargs):    
     os.makedirs(os.path.join(output_dir, 'raw'), exist_ok=True)
 
     # download annotations
     annotations = oxl.get_annotations()
     annotations = annotations[annotations['sha256'].isin(metadata['sha256'].values)]
     
-    # download and render objects
-    file_paths = oxl.download_objects(
-        annotations,
-        download_dir=os.path.join(output_dir, "raw"),
-        save_repo_format="zip",
-    )
+    # download objects in batches with error handling
+    file_paths = {}
+    failed_objects = []
+    total_objects = len(annotations)
+    
+    # Split into batches
+    annotation_list = list(annotations.iterrows())
+    num_batches = (len(annotation_list) + batch_size - 1) // batch_size
+    
+    print(f"Total objects to download: {total_objects}")
+    print(f"Downloading in {num_batches} batches of size {batch_size}...")
+    
+    for batch_idx in range(num_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = min((batch_idx + 1) * batch_size, len(annotation_list))
+        batch_annotations = pd.DataFrame([row[1] for row in annotation_list[start_idx:end_idx]])
+        
+        print(f"\nBatch {batch_idx + 1}/{num_batches}: Processing objects {start_idx + 1} to {end_idx}...")
+        
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                batch_file_paths = oxl.download_objects(
+                    batch_annotations,
+                    download_dir=os.path.join(output_dir, "raw"),
+                    save_repo_format="zip",
+                )
+                file_paths.update(batch_file_paths)
+                print(f"Batch {batch_idx + 1}: Successfully downloaded {len(batch_file_paths)} objects.")
+                break
+            except Exception as e:
+                print(f"Batch {batch_idx + 1}, Attempt {retry + 1}/{max_retries}: Error - {e}")
+                
+                if retry < max_retries - 1:
+                    import time
+                    wait_time = (retry + 1) * 5
+                    print(f"Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
+                else:
+                    # Last retry failed, record failed objects
+                    print(f"Batch {batch_idx + 1}: Failed after {max_retries} attempts. Recording failed objects...")
+                    for idx, row in batch_annotations.iterrows():
+                        if idx not in file_paths:
+                            failed_objects.append(idx)
+    
+    print(f"\n{'='*60}")
+    print(f"Download Summary:")
+    print(f"Total objects: {total_objects}")
+    print(f"Successfully downloaded: {len(file_paths)}")
+    print(f"Failed: {len(failed_objects)}")
+    
+    if failed_objects:
+        print(f"\nFailed object identifiers (first 20):")
+        for obj in failed_objects[:20]:
+            print(f"  - {obj}")
+        if len(failed_objects) > 20:
+            print(f"  ... and {len(failed_objects) - 20} more")
+        
+        # Save failed objects to a file for later retry
+        failed_file = os.path.join(output_dir, 'failed_downloads.txt')
+        with open(failed_file, 'w') as f:
+            for obj in failed_objects:
+                f.write(f"{obj}\n")
+        print(f"\nFailed object identifiers saved to: {failed_file}")
+    print(f"{'='*60}\n")
     
     downloaded = {}
     metadata = metadata.set_index("file_identifier")
     for k, v in file_paths.items():
-        sha256 = metadata.loc[k, "sha256"]
-        downloaded[sha256] = os.path.relpath(v, output_dir)
+        if k in metadata.index:
+            sha256 = metadata.loc[k, "sha256"]
+            downloaded[sha256] = os.path.relpath(v, output_dir)
 
     return pd.DataFrame(downloaded.items(), columns=['sha256', 'local_path'])
 
