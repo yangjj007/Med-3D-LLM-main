@@ -34,6 +34,7 @@ def _download_batch_worker(batch_annotations, output_dir):
         batch_annotations,
         download_dir=os.path.join(output_dir, "raw"),
         save_repo_format="zip",
+        processes=8
     )
 
 
