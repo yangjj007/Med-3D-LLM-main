@@ -2,18 +2,28 @@
 SDF Voxelization Preprocessing Script
 
 Convert mesh files (GLB format) to sparse SDF format for VQVAE training.
-Supports two data formats:
-1. TRELLIS-500K format (with object-paths.json)
-2. Custom labeled format (with metadata.csv)
+Supports three data formats:
+1. TRELLIS-500K format with ObjaverseXL (with object-paths.json)
+2. TRELLIS-500K format with HSSD (file_identifier as direct path)
+3. Custom labeled format (with metadata.csv)
 
 Usage:
-    # TRELLIS-500K format
+    # TRELLIS-500K format - ObjaverseXL
     python dataset_toolkits/sdf_voxelize.py \
         --format trellis500k \
         --input_dir ./TRELLIS-500K/raw/hf-objaverse-v1 \
         --output_dir ./train_sdf_dataset \
         --resolutions 64,512 \
         --max_workers 4
+    
+    # TRELLIS-500K format - HSSD
+    python dataset_toolkits/sdf_voxelize.py \
+        --format trellis500k \
+        --input_dir ./TRELLIS-500K/HSSD/raw/objects \
+        --output_dir ./train_sdf_dataset \
+        --resolutions 512 \
+        --filter_aesthetic_score 6.0 \
+        --max_workers 1
     
     # Custom labeled format
     python dataset_toolkits/sdf_voxelize.py \
@@ -143,15 +153,25 @@ def load_trellis500k_metadata(input_dir: str) -> pd.DataFrame:
     """
     Load metadata for TRELLIS-500K format.
     
-    Expected structure:
+    Supports two dataset structures:
+    
+    1. ObjaverseXL structure:
         input_dir/
         ├── glbs/
         │   └── 000-023/
         │       └── {sha256}.glb
         └── object-paths.json
+        
+        Metadata at: input_dir/../../metadata.csv
     
-    Metadata should be in parent directory:
-        input_dir/../../metadata.csv
+    2. HSSD structure:
+        input_dir/
+        ├── 0/, 1/, ..., f/
+        │   └── {hash}.glb
+        ├── openings/, x/
+        
+        Metadata at: input_dir/../metadata.csv
+        (file_identifier contains direct path like "objects/3/abc123.glb")
     
     Args:
         input_dir: Path to TRELLIS-500K raw data directory
@@ -161,11 +181,68 @@ def load_trellis500k_metadata(input_dir: str) -> pd.DataFrame:
     """
     print(f"Loading TRELLIS-500K metadata from: {input_dir}")
     
-    # Load object-paths.json to get GLB file mappings
+    # Check for object-paths.json to determine dataset type
     object_paths_file = os.path.join(input_dir, 'object-paths.json')
-    if not os.path.exists(object_paths_file):
-        raise FileNotFoundError(f"object-paths.json not found at: {object_paths_file}")
     
+    # Try to find metadata.csv in parent directories
+    parent_dir = os.path.dirname(input_dir)  # Go up one level first
+    metadata_csv = os.path.join(parent_dir, 'metadata.csv')
+    
+    if not os.path.exists(metadata_csv):
+        # Try going up two levels (for ObjaverseXL structure)
+        parent_dir = os.path.dirname(parent_dir)
+        metadata_csv = os.path.join(parent_dir, 'metadata.csv')
+    
+    if not os.path.exists(metadata_csv):
+        raise FileNotFoundError(
+            f"metadata.csv not found. Tried:\n"
+            f"  - {os.path.join(os.path.dirname(input_dir), 'metadata.csv')}\n"
+            f"  - {os.path.join(os.path.dirname(os.path.dirname(input_dir)), 'metadata.csv')}"
+        )
+    
+    print(f"  Loading metadata from: {metadata_csv}")
+    metadata_df = pd.read_csv(metadata_csv)
+    print(f"  Found columns in metadata.csv: {list(metadata_df.columns)}")
+    
+    if 'file_identifier' not in metadata_df.columns:
+        raise ValueError("metadata.csv must have 'file_identifier' column for TRELLIS-500K format")
+    if 'sha256' not in metadata_df.columns:
+        raise ValueError("metadata.csv must have 'sha256' column for TRELLIS-500K format")
+    
+    # Detect dataset type and process accordingly
+    if os.path.exists(object_paths_file):
+        # ObjaverseXL structure with object-paths.json
+        print(f"  Detected ObjaverseXL structure (object-paths.json found)")
+        metadata_df = _load_objaversexl_paths(object_paths_file, input_dir, metadata_df)
+    else:
+        # HSSD structure: file_identifier contains direct path
+        print(f"  Detected HSSD structure (no object-paths.json, using file_identifier as path)")
+        metadata_df = _load_hssd_paths(input_dir, metadata_df)
+    
+    # Print statistics
+    print(f"  Total objects in metadata: {len(metadata_df)}")
+    if 'captions' in metadata_df.columns:
+        caption_count = metadata_df['captions'].notna().sum()
+        print(f"  Objects with captions: {caption_count}")
+    if 'aesthetic_score' in metadata_df.columns:
+        score_count = metadata_df['aesthetic_score'].notna().sum()
+        print(f"  Objects with aesthetic scores: {score_count}")
+    
+    return metadata_df
+
+
+def _load_objaversexl_paths(object_paths_file: str, input_dir: str, metadata_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Load ObjaverseXL paths from object-paths.json and merge with metadata.
+    
+    Args:
+        object_paths_file: Path to object-paths.json
+        input_dir: Input directory
+        metadata_df: Metadata DataFrame with file_identifier and sha256
+    
+    Returns:
+        Merged DataFrame with glb_path column
+    """
     with open(object_paths_file, 'r') as f:
         object_paths = json.load(f)
     
@@ -182,62 +259,88 @@ def load_trellis500k_metadata(input_dir: str) -> pd.DataFrame:
     
     paths_df = pd.DataFrame(records)
     
-    # Try to load metadata.csv from parent directories for captions
-    parent_dir = os.path.dirname(os.path.dirname(input_dir))
-    metadata_csv = os.path.join(parent_dir, 'metadata.csv')
-    
-    if not os.path.exists(metadata_csv):
-        raise FileNotFoundError(
-            f"metadata.csv not found at {metadata_csv}. "
-            f"It is required to map file_identifier -> sha256."
-        )
-
-    print(f"  Loading metadata from: {metadata_csv}")
-    captions_df = pd.read_csv(metadata_csv)
-    print(f"  Found columns in metadata.csv: {list(captions_df.columns)}")
-
-    if 'file_identifier' not in captions_df.columns:
-        raise ValueError("metadata.csv must have 'file_identifier' column for TRELLIS-500K format")
-    if 'sha256' not in captions_df.columns:
-        raise ValueError("metadata.csv must have 'sha256' column for TRELLIS-500K format")
-
     # Normalize file_identifier:
     # - metadata.csv often stores full URLs like https://sketchfab.com/3d-models/<id>
     # - object-paths.json stores only the <id>
-    captions_df['file_identifier'] = (
-        captions_df['file_identifier']
+    metadata_df['file_identifier'] = (
+        metadata_df['file_identifier']
         .astype(str)
         .str.strip()
         .str.replace(r'.*/', '', regex=True)
     )
     paths_df['file_identifier'] = paths_df['file_identifier'].astype(str).str.strip()
-
-    # Select columns to merge (only if they exist)
-    merge_cols = ['file_identifier', 'sha256']
-    if 'captions' in captions_df.columns:
-        merge_cols.append('captions')
-    if 'aesthetic_score' in captions_df.columns:
-        merge_cols.append('aesthetic_score')
-
-    metadata_df = paths_df.merge(
-        captions_df[merge_cols],
+    
+    # Merge paths with metadata
+    merged_df = paths_df.merge(
+        metadata_df,
         on='file_identifier',
         how='inner'
     )
-
+    
     # Print merge statistics
-    matched = len(metadata_df)
+    matched = len(merged_df)
     total_paths = len(paths_df)
     print(f"  Matched {matched}/{total_paths} objects via file_identifier")
-    if 'captions' in merge_cols:
-        caption_count = metadata_df['captions'].notna().sum()
-        print(f"  Objects with captions: {caption_count}")
-    if 'aesthetic_score' in merge_cols:
-        score_count = metadata_df['aesthetic_score'].notna().sum()
-        print(f"  Objects with aesthetic scores: {score_count}")
+    
+    return merged_df
 
-    print(f"  Total objects in metadata: {len(metadata_df)}")
-    return metadata_df
+
+def _load_hssd_paths(input_dir: str, metadata_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Load HSSD paths directly from file_identifier in metadata.
+    
+    For HSSD, file_identifier contains the relative path to the GLB file,
+    e.g., "objects/3/3e4790548c158671fec162757053201da04b6259.glb"
+    
+    Args:
+        input_dir: Input directory (should be the 'objects' directory)
+        metadata_df: Metadata DataFrame with file_identifier and sha256
+    
+    Returns:
+        DataFrame with glb_path column added
+    """
+    # For HSSD, file_identifier already contains the relative path
+    # We need to construct the full path based on input_dir
+    
+    # The input_dir might be pointing to ./TRELLIS-500K/HSSD/raw/objects
+    # And file_identifier is like "objects/3/xyz.glb"
+    # So we need to go up one level to the 'raw' directory
+    
+    records = []
+    valid_count = 0
+    missing_count = 0
+    
+    for _, row in metadata_df.iterrows():
+        file_identifier = row['file_identifier']
+        sha256 = row['sha256']
+        
+        # Handle different path formats
+        if file_identifier.startswith('objects/'):
+            # Remove 'objects/' prefix since input_dir already points to objects/
+            rel_path = file_identifier[8:]  # Remove "objects/"
+        else:
+            rel_path = file_identifier
+        
+        # Construct full path
+        glb_path = os.path.join(input_dir, rel_path)
+        
+        # Check if file exists
+        if os.path.exists(glb_path):
+            valid_count += 1
+        else:
+            missing_count += 1
+            if missing_count <= 5:  # Show first 5 missing files
+                print(f"  Warning: File not found: {glb_path}")
+        
+        record = row.to_dict()
+        record['glb_path'] = glb_path
+        records.append(record)
+    
+    print(f"  Found {valid_count} existing GLB files")
+    if missing_count > 0:
+        print(f"  Warning: {missing_count} GLB files not found on disk")
+    
+    return pd.DataFrame.from_records(records)
 
 
 def load_custom_metadata(input_dir: str) -> pd.DataFrame:
