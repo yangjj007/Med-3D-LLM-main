@@ -1,17 +1,21 @@
 import os
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from tqdm import tqdm
 import pandas as pd
 import objaverse.xl as oxl
 from utils import get_file_hash
+import signal
+import multiprocessing
 
 
 def add_args(parser: argparse.ArgumentParser):
     parser.add_argument('--source', type=str, default='sketchfab',
                         help='Data source to download annotations from (github, sketchfab)')
-    parser.add_argument('--batch_size', type=int, default=50,
-                        help='Number of objects to download in each batch (default: 50)')
+    parser.add_argument('--batch_size', type=int, default=100,
+                        help='Number of objects to download in each batch (default: 100)')
+    parser.add_argument('--batch_timeout', type=int, default=60,
+                        help='Timeout in seconds for each batch download (default: 60, 1 minutes)')
 
 
 def get_metadata(source, **kwargs):
@@ -24,7 +28,17 @@ def get_metadata(source, **kwargs):
     return metadata
         
 
-def download(metadata, output_dir, batch_size=50, **kwargs):    
+def _download_batch_worker(batch_annotations, output_dir):
+    """Worker function for downloading a batch of objects with timeout support"""
+    return oxl.download_objects(
+        batch_annotations,
+        download_dir=os.path.join(output_dir, "raw"),
+        save_repo_format="zip",
+    )
+
+
+def download(metadata, output_dir, batch_size=100, batch_timeout=600, **kwargs):    
+    import time
     os.makedirs(os.path.join(output_dir, 'raw'), exist_ok=True)
 
     # download annotations
@@ -42,6 +56,7 @@ def download(metadata, output_dir, batch_size=50, **kwargs):
     
     print(f"Total objects to download: {total_objects}")
     print(f"Downloading in {num_batches} batches of size {batch_size}...")
+    print(f"Batch timeout set to: {batch_timeout} seconds\n")
     
     for batch_idx in range(num_batches):
         start_idx = batch_idx * batch_size
@@ -51,21 +66,32 @@ def download(metadata, output_dir, batch_size=50, **kwargs):
         print(f"\nBatch {batch_idx + 1}/{num_batches}: Processing objects {start_idx + 1} to {end_idx}...")
         
         max_retries = 3
+        batch_success = False
+        
         for retry in range(max_retries):
             try:
-                batch_file_paths = oxl.download_objects(
-                    batch_annotations,
-                    download_dir=os.path.join(output_dir, "raw"),
-                    save_repo_format="zip",
-                )
-                file_paths.update(batch_file_paths)
-                print(f"Batch {batch_idx + 1}: Successfully downloaded {len(batch_file_paths)} objects.")
-                break
-            except Exception as e:
-                print(f"Batch {batch_idx + 1}, Attempt {retry + 1}/{max_retries}: Error - {e}")
+                # Use multiprocessing Pool with timeout
+                with multiprocessing.Pool(processes=1) as pool:
+                    result = pool.apply_async(_download_batch_worker, (batch_annotations, output_dir))
+                    try:
+                        batch_file_paths = result.get(timeout=batch_timeout)
+                        file_paths.update(batch_file_paths)
+                        print(f"Batch {batch_idx + 1}: Successfully downloaded {len(batch_file_paths)} objects.")
+                        batch_success = True
+                        break
+                    except multiprocessing.TimeoutError:
+                        pool.terminate()
+                        pool.join()
+                        raise TimeoutError(f"Batch download exceeded {batch_timeout} seconds timeout")
+                        
+            except (TimeoutError, Exception) as e:
+                error_msg = str(e)
+                if isinstance(e, TimeoutError) or "timeout" in error_msg.lower():
+                    print(f"Batch {batch_idx + 1}, Attempt {retry + 1}/{max_retries}: TIMEOUT after {batch_timeout}s")
+                else:
+                    print(f"Batch {batch_idx + 1}, Attempt {retry + 1}/{max_retries}: Error - {e}")
                 
                 if retry < max_retries - 1:
-                    import time
                     wait_time = (retry + 1) * 5
                     print(f"Waiting {wait_time} seconds before retry...")
                     time.sleep(wait_time)
@@ -73,8 +99,9 @@ def download(metadata, output_dir, batch_size=50, **kwargs):
                     # Last retry failed, record failed objects
                     print(f"Batch {batch_idx + 1}: Failed after {max_retries} attempts. Recording failed objects...")
                     for idx, row in batch_annotations.iterrows():
-                        if idx not in file_paths:
-                            failed_objects.append(idx)
+                        sha256 = row.get('sha256', idx)
+                        if sha256 not in [v for k, v in file_paths.items()]:
+                            failed_objects.append({'idx': idx, 'sha256': sha256})
     
     print(f"\n{'='*60}")
     print(f"Download Summary:")
@@ -85,7 +112,8 @@ def download(metadata, output_dir, batch_size=50, **kwargs):
     if failed_objects:
         print(f"\nFailed object identifiers (first 20):")
         for obj in failed_objects[:20]:
-            print(f"  - {obj}")
+            sha256 = obj.get('sha256', obj.get('idx', 'unknown'))
+            print(f"  - {sha256}")
         if len(failed_objects) > 20:
             print(f"  ... and {len(failed_objects) - 20} more")
         
@@ -93,7 +121,8 @@ def download(metadata, output_dir, batch_size=50, **kwargs):
         failed_file = os.path.join(output_dir, 'failed_downloads.txt')
         with open(failed_file, 'w') as f:
             for obj in failed_objects:
-                f.write(f"{obj}\n")
+                sha256 = obj.get('sha256', obj.get('idx', 'unknown'))
+                f.write(f"{sha256}\n")
         print(f"\nFailed object identifiers saved to: {failed_file}")
     print(f"{'='*60}\n")
     
