@@ -13,8 +13,10 @@ def add_args(parser: argparse.ArgumentParser):
                         help='Data source to download annotations from (github, sketchfab)')
     parser.add_argument('--batch_size', type=int, default=100,
                         help='Number of objects to download in each batch (default: 100)')
-    parser.add_argument('--batch_timeout', type=int, default=300,
+    parser.add_argument('--batch_timeout', type=int, default=60,
                         help='Timeout in seconds for each batch download (default: 300, 5 minutes)')
+    parser.add_argument('--processes', type=int, default=1,
+                        help='processes')
 
 
 def get_metadata(source, **kwargs):
@@ -27,7 +29,7 @@ def get_metadata(source, **kwargs):
     return metadata
         
 
-def download(metadata, output_dir, batch_size=100, batch_timeout=300, **kwargs):    
+def download(metadata, output_dir, batch_size=100, batch_timeout=60, processes=1, **kwargs):    
     import time
     os.makedirs(os.path.join(output_dir, 'raw'), exist_ok=True)
 
@@ -67,7 +69,7 @@ def download(metadata, output_dir, batch_size=100, batch_timeout=300, **kwargs):
                         batch_annotations,
                         download_dir=os.path.join(output_dir, "raw"),
                         save_repo_format="zip",
-                        processes=8
+                        processes=processes
                     )
                     try:
                         batch_file_paths = future.result(timeout=batch_timeout)
