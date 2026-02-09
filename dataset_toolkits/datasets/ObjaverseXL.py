@@ -14,7 +14,7 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument('--batch_size', type=int, default=100,
                         help='Number of objects to download in each batch (default: 100)')
     parser.add_argument('--batch_timeout', type=int, default=60,
-                        help='Timeout in seconds for each batch download (default: 300, 5 minutes)')
+                        help='Timeout in seconds for each batch download')
     parser.add_argument('--processes', type=int, default=1,
                         help='processes')
 
@@ -31,6 +31,7 @@ def get_metadata(source, **kwargs):
 
 def download(metadata, output_dir, batch_size=100, batch_timeout=60, processes=1, **kwargs):    
     import time
+    import multiprocessing as mp
     os.makedirs(os.path.join(output_dir, 'raw'), exist_ok=True)
 
     # download annotations
@@ -62,25 +63,45 @@ def download(metadata, output_dir, batch_size=100, batch_timeout=60, processes=1
         
         for retry in range(max_retries):
             try:
-                # Use ThreadPoolExecutor with timeout to avoid daemon process issues
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(
-                        oxl.download_objects,
-                        batch_annotations,
-                        download_dir=os.path.join(output_dir, "raw"),
-                        save_repo_format="zip",
-                        processes=processes
-                    )
+                # Run each batch in its own process so we can reliably terminate on timeout.
+                def _worker(batch_df, out_dir, proc_count, result_queue):
                     try:
-                        batch_file_paths = future.result(timeout=batch_timeout)
+                        result = oxl.download_objects(
+                            batch_df,
+                            download_dir=os.path.join(out_dir, "raw"),
+                            save_repo_format="zip",
+                            processes=proc_count
+                        )
+                        result_queue.put(("ok", result))
+                    except Exception as err:
+                        result_queue.put(("err", str(err)))
+
+                ctx = mp.get_context("spawn")
+                result_queue = ctx.Queue()
+                proc = ctx.Process(
+                    target=_worker,
+                    args=(batch_annotations, output_dir, processes, result_queue),
+                )
+                proc.start()
+                proc.join(batch_timeout)
+
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join()
+                    raise TimeoutError(f"Batch download exceeded {batch_timeout} seconds timeout")
+
+                if not result_queue.empty():
+                    status, payload = result_queue.get()
+                    if status == "ok":
+                        batch_file_paths = payload
                         file_paths.update(batch_file_paths)
                         print(f"Batch {batch_idx + 1}: Successfully downloaded {len(batch_file_paths)} objects.")
                         batch_success = True
                         break
-                    except FuturesTimeoutError:
-                        future.cancel()
-                        raise TimeoutError(f"Batch download exceeded {batch_timeout} seconds timeout")
-                        
+                    raise Exception(payload)
+                else:
+                    raise Exception("Batch download failed without returning results.")
+
             except (TimeoutError, Exception) as e:
                 error_msg = str(e)
                 if isinstance(e, TimeoutError) or "timeout" in error_msg.lower():
