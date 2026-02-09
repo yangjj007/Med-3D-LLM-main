@@ -190,17 +190,39 @@ def load_trellis500k_metadata(input_dir: str) -> pd.DataFrame:
         print(f"  Loading captions from: {metadata_csv}")
         captions_df = pd.read_csv(metadata_csv)
         
-        # Rename file_identifier to sha256 if needed
-        if 'file_identifier' in captions_df.columns:
+        print(f"  Found columns in metadata.csv: {list(captions_df.columns)}")
+        
+        # Handle column naming - prefer sha256 if it exists, otherwise use file_identifier
+        if 'sha256' not in captions_df.columns and 'file_identifier' in captions_df.columns:
+            # Only rename if sha256 doesn't exist but file_identifier does
+            print(f"  Using 'file_identifier' column as 'sha256'")
             captions_df = captions_df.rename(columns={'file_identifier': 'sha256'})
+        elif 'sha256' in captions_df.columns:
+            print(f"  Using 'sha256' column for matching")
+        elif 'sha256' not in captions_df.columns and 'file_identifier' not in captions_df.columns:
+            raise ValueError("metadata.csv must have either 'sha256' or 'file_identifier' column")
+        
+        # Select columns to merge (only if they exist)
+        merge_cols = ['sha256']
+        if 'captions' in captions_df.columns:
+            merge_cols.append('captions')
+        if 'aesthetic_score' in captions_df.columns:
+            merge_cols.append('aesthetic_score')
         
         # Merge with metadata
         metadata_df = metadata_df.merge(
-            captions_df[['sha256', 'captions', 'aesthetic_score']],
+            captions_df[merge_cols],
             on='sha256',
             how='left'
         )
-        print(f"  Merged captions for {metadata_df['captions'].notna().sum()} objects")
+        
+        # Print merge statistics
+        if 'captions' in merge_cols:
+            caption_count = metadata_df['captions'].notna().sum()
+            print(f"  Merged captions for {caption_count} objects")
+        if 'aesthetic_score' in merge_cols:
+            score_count = metadata_df['aesthetic_score'].notna().sum()
+            print(f"  Merged aesthetic scores for {score_count} objects")
     else:
         print(f"  Warning: metadata.csv not found at {metadata_csv}, proceeding without captions")
     
