@@ -1,12 +1,11 @@
 import os
 import argparse
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from tqdm import tqdm
 import pandas as pd
 import objaverse.xl as oxl
 from utils import get_file_hash
-import signal
-import multiprocessing
+import threading
 
 
 def add_args(parser: argparse.ArgumentParser):
@@ -15,7 +14,7 @@ def add_args(parser: argparse.ArgumentParser):
     parser.add_argument('--batch_size', type=int, default=100,
                         help='Number of objects to download in each batch (default: 100)')
     parser.add_argument('--batch_timeout', type=int, default=300,
-                        help='Timeout in seconds for each batch download (default: 60, 1 minutes)')
+                        help='Timeout in seconds for each batch download (default: 300, 5 minutes)')
 
 
 def get_metadata(source, **kwargs):
@@ -28,17 +27,7 @@ def get_metadata(source, **kwargs):
     return metadata
         
 
-def _download_batch_worker(batch_annotations, output_dir):
-    """Worker function for downloading a batch of objects with timeout support"""
-    return oxl.download_objects(
-        batch_annotations,
-        download_dir=os.path.join(output_dir, "raw"),
-        save_repo_format="zip",
-        processes=8
-    )
-
-
-def download(metadata, output_dir, batch_size=100, batch_timeout=600, **kwargs):    
+def download(metadata, output_dir, batch_size=100, batch_timeout=300, **kwargs):    
     import time
     os.makedirs(os.path.join(output_dir, 'raw'), exist_ok=True)
 
@@ -71,24 +60,30 @@ def download(metadata, output_dir, batch_size=100, batch_timeout=600, **kwargs):
         
         for retry in range(max_retries):
             try:
-                # Use multiprocessing Pool with timeout
-                with multiprocessing.Pool(processes=1) as pool:
-                    result = pool.apply_async(_download_batch_worker, (batch_annotations, output_dir))
+                # Use ThreadPoolExecutor with timeout to avoid daemon process issues
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        oxl.download_objects,
+                        batch_annotations,
+                        download_dir=os.path.join(output_dir, "raw"),
+                        save_repo_format="zip",
+                        processes=8
+                    )
                     try:
-                        batch_file_paths = result.get(timeout=batch_timeout)
+                        batch_file_paths = future.result(timeout=batch_timeout)
                         file_paths.update(batch_file_paths)
                         print(f"Batch {batch_idx + 1}: Successfully downloaded {len(batch_file_paths)} objects.")
                         batch_success = True
                         break
-                    except multiprocessing.TimeoutError:
-                        pool.terminate()
-                        pool.join()
+                    except FuturesTimeoutError:
+                        future.cancel()
                         raise TimeoutError(f"Batch download exceeded {batch_timeout} seconds timeout")
                         
             except (TimeoutError, Exception) as e:
                 error_msg = str(e)
                 if isinstance(e, TimeoutError) or "timeout" in error_msg.lower():
                     print(f"Batch {batch_idx + 1}, Attempt {retry + 1}/{max_retries}: TIMEOUT after {batch_timeout}s")
+                    print(f"  Tip: The last object might be stuck. Skipping this batch and continuing...")
                 else:
                     print(f"Batch {batch_idx + 1}, Attempt {retry + 1}/{max_retries}: Error - {e}")
                 
