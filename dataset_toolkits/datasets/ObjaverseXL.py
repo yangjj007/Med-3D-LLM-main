@@ -14,7 +14,7 @@ def add_args(parser: argparse.ArgumentParser):
                         help='Data source to download annotations from (github, sketchfab)')
     parser.add_argument('--batch_size', type=int, default=100,
                         help='Number of objects to download in each batch (default: 100)')
-    parser.add_argument('--batch_timeout', type=int, default=60,
+    parser.add_argument('--batch_timeout', type=int, default=300,
                         help='Timeout in seconds for each batch download (default: 60, 1 minutes)')
 
 
