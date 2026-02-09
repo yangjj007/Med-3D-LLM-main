@@ -3,8 +3,12 @@
 2、运行build_metadata下载ObjaverseXL的metadata：
 python dataset_toolkits/build_metadata.py ObjaverseXL --source sketchfab   --output_dir TRELLIS-500K
 
+python dataset_toolkits/build_metadata.py HSSD --output_dir TRELLIS-500K
+
 3、开始下载
 python dataset_toolkits/download.py ObjaverseXL   --output_dir TRELLIS-500K  --rank 0 --world_size 1
+
+python dataset_toolkits/download.py HSSD --output_dir TRELLIS-500K --rank 0 --world_size 1
 
 4、对mesh文件进行SDF预处理（✅已完成）
 
@@ -73,7 +77,7 @@ python dataset_toolkits/sdf_voxelize.py \
     --output_dir ./train_sdf_dataset \
     --resolutions 512 \
     --filter_aesthetic_score 6.0 \
-    --max_workers 4
+    --max_workers 16
 ```
 
 ### 处理自定义标注数据：
@@ -83,9 +87,8 @@ python dataset_toolkits/sdf_voxelize.py \
     --input_dir ./my_dataset \
     --output_dir ./train_sdf_dataset \
     --resolutions 512 \
-    --max_workers 4
+    --max_workers 16
 ```
 
-详细文档请参考：dataset_toolkits/SDF_PREPROCESSING_GUIDE.md
 
 5、todo：对应修改阶段一和二的训练数据读取框架，支持新的训练数据格式
