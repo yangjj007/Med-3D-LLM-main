@@ -22,6 +22,30 @@ def _download_batch_worker(batch_df, out_dir, proc_count, result_queue):
         result_queue.put(("err", str(err)))
 
 
+def _get_latest_mtime(root_dir):
+    latest_mtime = 0.0
+    if not os.path.isdir(root_dir):
+        return latest_mtime
+    stack = [root_dir]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            mtime = entry.stat(follow_symlinks=False).st_mtime
+                            if mtime > latest_mtime:
+                                latest_mtime = mtime
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return latest_mtime
+
+
 def add_args(parser: argparse.ArgumentParser):
     parser.add_argument('--source', type=str, default='sketchfab',
                         help='Data source to download annotations from (github, sketchfab)')
@@ -84,12 +108,28 @@ def download(metadata, output_dir, batch_size=100, batch_timeout=60, processes=1
                     args=(batch_annotations, output_dir, processes, result_queue),
                 )
                 proc.start()
-                proc.join(batch_timeout)
 
-                if proc.is_alive():
-                    proc.terminate()
-                    proc.join()
-                    raise TimeoutError(f"Batch download exceeded {batch_timeout} seconds timeout")
+                raw_dir = os.path.join(output_dir, "raw")
+                last_mtime = _get_latest_mtime(raw_dir)
+                last_progress = time.monotonic()
+                poll_interval = max(2, min(10, batch_timeout // 6 if batch_timeout else 5))
+
+                while proc.is_alive():
+                    proc.join(poll_interval)
+                    if not proc.is_alive():
+                        break
+
+                    current_mtime = _get_latest_mtime(raw_dir)
+                    if current_mtime > last_mtime:
+                        last_mtime = current_mtime
+                        last_progress = time.monotonic()
+
+                    if time.monotonic() - last_progress > batch_timeout:
+                        proc.terminate()
+                        proc.join()
+                        raise TimeoutError(
+                            f"Batch download exceeded {batch_timeout} seconds without progress"
+                        )
 
                 if not result_queue.empty():
                     status, payload = result_queue.get()
