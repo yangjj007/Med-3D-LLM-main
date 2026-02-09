@@ -13,7 +13,7 @@ def _download_batch_worker(batch_df, out_dir, proc_count, result_queue):
     try:
         result = oxl.download_objects(
             batch_df,
-            download_dir=os.path.join(out_dir, "raw"),
+            download_dir=os.path.join(out_dir, "raw"), 
             save_repo_format="zip",
             processes=proc_count
         )
@@ -49,7 +49,7 @@ def _get_latest_mtime(root_dir):
 def add_args(parser: argparse.ArgumentParser):
     parser.add_argument('--source', type=str, default='sketchfab',
                         help='Data source to download annotations from (github, sketchfab)')
-    parser.add_argument('--batch_size', type=int, default=100,
+    parser.add_argument('--batch_size', type=int, default=10,
                         help='Number of objects to download in each batch (default: 100)')
     parser.add_argument('--batch_timeout', type=int, default=60,
                         help='Timeout in seconds for each batch download')
