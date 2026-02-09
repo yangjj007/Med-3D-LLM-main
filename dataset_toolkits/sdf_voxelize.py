@@ -171,9 +171,7 @@ def load_trellis500k_metadata(input_dir: str) -> pd.DataFrame:
     
     print(f"  Found {len(object_paths)} objects in object-paths.json")
     
-    # The keys in object-paths.json are file_identifiers (Sketchfab IDs), NOT sha256 hashes.
-    # e.g. "18e8e405446849afb22b3760d3c73a31" -> "glbs/000-023/18e8e405446849afb22b3760d3c73a31.glb"
-    # We need to join with metadata.csv via file_identifier to get the real sha256.
+    # The keys in object-paths.json are file_identifier (Sketchfab IDs), not sha256
     records = []
     for file_identifier, rel_path in object_paths.items():
         glb_path = os.path.join(input_dir, rel_path)
@@ -183,56 +181,50 @@ def load_trellis500k_metadata(input_dir: str) -> pd.DataFrame:
         })
     
     paths_df = pd.DataFrame(records)
-    print(f"  Sample file_identifier: {paths_df['file_identifier'].iloc[0] if len(paths_df) > 0 else 'N/A'}")
     
-    # Load metadata.csv from parent directories to get sha256 and captions
+    # Try to load metadata.csv from parent directories for captions
     parent_dir = os.path.dirname(os.path.dirname(input_dir))
     metadata_csv = os.path.join(parent_dir, 'metadata.csv')
     
     if not os.path.exists(metadata_csv):
         raise FileNotFoundError(
             f"metadata.csv not found at {metadata_csv}. "
-            f"It is required for TRELLIS-500K format to map file_identifier -> sha256."
+            f"It is required to map file_identifier -> sha256."
         )
-    
+
     print(f"  Loading metadata from: {metadata_csv}")
     captions_df = pd.read_csv(metadata_csv)
-    print(f"  Found columns: {list(captions_df.columns)}")
-    print(f"  Total rows in metadata.csv: {len(captions_df)}")
-    
-    # Verify required columns
+    print(f"  Found columns in metadata.csv: {list(captions_df.columns)}")
+
     if 'file_identifier' not in captions_df.columns:
         raise ValueError("metadata.csv must have 'file_identifier' column for TRELLIS-500K format")
     if 'sha256' not in captions_df.columns:
         raise ValueError("metadata.csv must have 'sha256' column for TRELLIS-500K format")
-    
-    # Merge paths_df with metadata.csv on file_identifier to get sha256 + captions
+
+    # Select columns to merge (only if they exist)
     merge_cols = ['file_identifier', 'sha256']
     if 'captions' in captions_df.columns:
         merge_cols.append('captions')
     if 'aesthetic_score' in captions_df.columns:
         merge_cols.append('aesthetic_score')
-    
+
     metadata_df = paths_df.merge(
         captions_df[merge_cols],
         on='file_identifier',
-        how='inner'  # Only keep objects that exist in both object-paths.json AND metadata.csv
+        how='inner'
     )
-    
+
     # Print merge statistics
     matched = len(metadata_df)
     total_paths = len(paths_df)
     print(f"  Matched {matched}/{total_paths} objects via file_identifier")
-    
     if 'captions' in merge_cols:
         caption_count = metadata_df['captions'].notna().sum()
         print(f"  Objects with captions: {caption_count}")
     if 'aesthetic_score' in merge_cols:
         score_count = metadata_df['aesthetic_score'].notna().sum()
         print(f"  Objects with aesthetic scores: {score_count}")
-        if score_count > 0:
-            print(f"  Aesthetic score range: [{metadata_df['aesthetic_score'].min():.2f}, {metadata_df['aesthetic_score'].max():.2f}]")
-    
+
     print(f"  Total objects in metadata: {len(metadata_df)}")
     return metadata_df
 
@@ -449,8 +441,8 @@ def save_results(
     if 'glb_path' in merged.columns:
         merged = merged.drop(columns=['glb_path'])
     
-    # Save metadata inside the output directory
-    output_csv = os.path.join(output_dir, 'metadata.csv')
+    # Save metadata
+    output_csv = os.path.join(os.path.dirname(output_dir), 'metadata.csv')
     merged.to_csv(output_csv, index=False)
     print(f"\n✓ Metadata saved to: {output_csv}")
     
