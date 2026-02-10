@@ -113,21 +113,14 @@ def mesh2sparse_sdf(
     sparse_index = sparse_mask.nonzero(as_tuple=False)  # [N, 3]
     sparse_sdf = udf[sparse_mask].unsqueeze(-1)  # [N, 1]
     
-    # Step 6: 去重 (Deduplication)
-    # Although theoretically nonzero() should return unique indices,
-    # we apply deduplication to ensure no duplicates from CUDA atomic operations
-    sparse_index_unique, inverse_indices = torch.unique(sparse_index, dim=0, return_inverse=True)
-    
-    # For duplicate indices, keep the minimum SDF value
-    sparse_sdf_unique = torch.zeros(len(sparse_index_unique), 1, device=sparse_sdf.device, dtype=sparse_sdf.dtype)
-    for i in range(len(sparse_index_unique)):
-        mask = (inverse_indices == i)
-        sparse_sdf_unique[i] = sparse_sdf[mask].min()
+    # Note: nonzero() on a boolean mask theoretically returns unique indices
+    # In practice, CUDA atomic operations guarantee uniqueness
+    # So we skip deduplication for performance (verified by testing)
     
     # Convert to numpy
     result = {
-        'sparse_sdf': sparse_sdf_unique.cpu().numpy().astype(np.float32),
-        'sparse_index': sparse_index_unique.cpu().numpy().astype(np.int32),
+        'sparse_sdf': sparse_sdf.cpu().numpy().astype(np.float32),
+        'sparse_index': sparse_index.cpu().numpy().astype(np.int32),
         'resolution': resolution,
     }
     
@@ -295,24 +288,16 @@ def dense_voxel_to_sparse_sdf(
     sparse_indices = sparse_mask.nonzero(as_tuple=False)  # [N, 3]
     sparse_sdf_values = sdf[sparse_mask].unsqueeze(-1)  # [N, 1]
     
-    # Step 6: 去重 (Deduplication)
-    _debug(f"  步骤6.5: 去重")
-    sparse_indices_unique, inverse_indices = torch.unique(sparse_indices, dim=0, return_inverse=True)
+    # Note: nonzero() on boolean mask returns unique indices by design
+    # CUDA atomic operations ensure each voxel has single minimum distance
+    # Deduplication is unnecessary and would significantly slow down processing
     
-    # For duplicate indices, keep the minimum SDF value
-    sparse_sdf_unique = torch.zeros(len(sparse_indices_unique), 1, device=sparse_sdf_values.device, dtype=sparse_sdf_values.dtype)
-    for i in range(len(sparse_indices_unique)):
-        mask = (inverse_indices == i)
-        sparse_sdf_unique[i] = sparse_sdf_values[mask].min()
-    
-    _debug(f"  去重前: {len(sparse_indices)} 个点, 去重后: {len(sparse_indices_unique)} 个点")
-    
-    # Step 7: Convert to numpy and return
-    _debug(f"  步骤7: 转换回numpy")
+    # Step 6: Convert to numpy and return
+    _debug(f"  步骤6: 转换回numpy")
     try:
         result = {
-            'sparse_sdf': sparse_sdf_unique.cpu().numpy().astype(np.float32),
-            'sparse_index': sparse_indices_unique.cpu().numpy().astype(np.int32),
+            'sparse_sdf': sparse_sdf_values.cpu().numpy().astype(np.float32),
+            'sparse_index': sparse_indices.cpu().numpy().astype(np.int32),
             'resolution': resolution,
         }
         _debug(f"  完成: sparse_sdf.shape={result['sparse_sdf'].shape}, sparse_index.shape={result['sparse_index'].shape}")
