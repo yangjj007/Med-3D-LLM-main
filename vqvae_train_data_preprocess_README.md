@@ -77,7 +77,7 @@ python dataset_toolkits/sdf_voxelize.py \
     --output_dir ./train_sdf_dataset \
     --resolutions 512 \
     --filter_aesthetic_score 6.0 \
-    --threshold_factor 0.5 \ 
+    --threshold_factor 0.5 \
     --max_workers 1
 
 python dataset_toolkits/sdf_voxelize.py \
@@ -86,6 +86,7 @@ python dataset_toolkits/sdf_voxelize.py \
     --output_dir ./train_sdf_dataset \
     --resolutions 512 \
     --filter_aesthetic_score 6.0 \
+    --threshold_factor 0.5 \
     --max_workers 1
 ```
 
