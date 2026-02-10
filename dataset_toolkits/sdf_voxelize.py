@@ -670,6 +670,7 @@ def main():
     print(f"Input directory: {args.input_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"Resolutions: {resolutions}")
+    print(f"Threshold factor: {args.threshold_factor}")
     print(f"Skip existing: {not args.no_skip}")
     
     # Load metadata based on format
