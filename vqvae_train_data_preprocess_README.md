@@ -76,8 +76,8 @@ python dataset_toolkits/sdf_voxelize.py \
     --input_dir ./TRELLIS-500K/ObjaverseXL/raw/hf-objaverse-v1 \
     --output_dir ./train_sdf_dataset \
     --resolutions 512 \
-    --filter_aesthetic_score 6.0 \
-    --threshold_factor 0.5 \
+    --filter_aesthetic_score 4.0 \
+    --threshold_factor 0.01 \
     --max_workers 1
 
 python dataset_toolkits/sdf_voxelize.py \
@@ -85,8 +85,8 @@ python dataset_toolkits/sdf_voxelize.py \
     --input_dir ./TRELLIS-500K/HSSD/raw/objects \
     --output_dir ./train_sdf_dataset \
     --resolutions 512 \
-    --filter_aesthetic_score 6.0 \
-    --threshold_factor 0.5 \
+    --filter_aesthetic_score 4.0 \
+    --threshold_factor 0.01 \
     --max_workers 1
 ```
 
