@@ -13,7 +13,7 @@
                 "model_channels": 512,
                 "latent_channels": 16,
                 "num_blocks": 8,
-                "num_embeddings": 2048,
+                "num_embeddings": 8192,
                 "num_heads": null,
                 "num_head_channels": 64,
                 "mlp_ratio": 4.0,
@@ -28,34 +28,33 @@
         }
     },
     "dataset": {
-        "name": "CTWindowSparseSDF",
+        "name": "SparseSDF",
         "args": {
             "resolution": 512,
-            "window_type": "lung",
             "min_points": 100,
-            "max_points": 100000
+            "max_points": 250000
         }
     },
     "trainer": {
         "name": "SparseSDF_VQVAETrainer",
         "args": {
             "training_stage": 1,
-            "num_workers": 30,
+            "num_workers": 32,
             "pretrained_vae_path": "./vae_weights/sparse_vae_512.pth",
             "max_steps": 100000,
             "max_epoch": 1,
-            "batch_size_per_gpu": 64,
-            "batch_split": 1,
+            "batch_size_per_gpu": 2,
+            "batch_split": 2,
             "disable_snapshot": true,
             "optimizer": {
                 "name": "AdamW",
                 "args": {
-                    "lr": 5e-3,
+                    "lr": 1e-3,
                     "weight_decay": 0.01
                 }
             },
             "lr_scheduler": {
-            "name": "WarmupThenScheduler",
+                "name": "WarmupThenScheduler",
                 "args": {
                     "warmup_steps": 100,
                     "main_scheduler_class": "CosineAnnealingLR",
@@ -86,3 +85,4 @@
         }
     }
 }
+

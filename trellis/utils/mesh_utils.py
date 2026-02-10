@@ -113,9 +113,23 @@ def mesh2sparse_sdf(
     sparse_index = sparse_mask.nonzero(as_tuple=False)  # [N, 3]
     sparse_sdf = udf[sparse_mask].unsqueeze(-1)  # [N, 1]
     
-    # Note: nonzero() on a boolean mask theoretically returns unique indices
-    # In practice, CUDA atomic operations guarantee uniqueness
-    # So we skip deduplication for performance (verified by testing)
+    # ============ 去重检查与调试 ============
+    num_points_before = sparse_index.shape[0]
+    unique_indices = torch.unique(sparse_index, dim=0)
+    num_points_after = unique_indices.shape[0]
+    
+    if num_points_before != num_points_after:
+        print(f"\n⚠️  [mesh2sparse_sdf] 发现重复点!")
+        print(f"   去重前: {num_points_before} 个点")
+        print(f"   去重后: {num_points_after} 个点")
+        print(f"   重复数: {num_points_before - num_points_after} 个 ({(num_points_before-num_points_after)/num_points_before*100:.2f}%)")
+        # 使用去重后的索引
+        sparse_index = unique_indices
+        # 重新从UDF中提取对应位置的SDF值
+        sparse_sdf = udf[sparse_index[:, 0], sparse_index[:, 1], sparse_index[:, 2]].unsqueeze(-1)
+    else:
+        print(f"✓ [mesh2sparse_sdf] 无重复点 (共 {num_points_before} 个点, resolution={resolution}, threshold={threshold_factor/resolution:.6f})")
+    # ========================================
     
     # Convert to numpy
     result = {
@@ -288,19 +302,33 @@ def dense_voxel_to_sparse_sdf(
     sparse_indices = sparse_mask.nonzero(as_tuple=False)  # [N, 3]
     sparse_sdf_values = sdf[sparse_mask].unsqueeze(-1)  # [N, 1]
     
-    # Note: nonzero() on boolean mask returns unique indices by design
-    # CUDA atomic operations ensure each voxel has single minimum distance
-    # Deduplication is unnecessary and would significantly slow down processing
+    # ============ 去重检查与调试 ============
+    num_points_before = sparse_indices.shape[0]
+    unique_indices = torch.unique(sparse_indices, dim=0)
+    num_points_after = unique_indices.shape[0]
     
-    # Step 6: Convert to numpy and return
-    _debug(f"  步骤6: 转换回numpy")
+    if num_points_before != num_points_after:
+        _debug(f"  ⚠️  发现重复点!")
+        _debug(f"    去重前: {num_points_before} 个点")
+        _debug(f"    去重后: {num_points_after} 个点")
+        _debug(f"    重复数: {num_points_before - num_points_after} 个 ({(num_points_before-num_points_after)/num_points_before*100:.2f}%)")
+        # 使用去重后的索引
+        sparse_indices = unique_indices
+        # 重新从SDF中提取对应位置的值
+        sparse_sdf_values = sdf[sparse_indices[:, 0], sparse_indices[:, 1], sparse_indices[:, 2]].unsqueeze(-1)
+    else:
+        _debug(f"  ✓ 无重复点 (共 {num_points_before} 个点)")
+    # ========================================
+    
+    # Step 7: Convert to numpy and return
+    _debug(f"  步骤8: 转换回numpy")
     try:
         result = {
             'sparse_sdf': sparse_sdf_values.cpu().numpy().astype(np.float32),
             'sparse_index': sparse_indices.cpu().numpy().astype(np.int32),
             'resolution': resolution,
         }
-        _debug(f"  完成: sparse_sdf.shape={result['sparse_sdf'].shape}, sparse_index.shape={result['sparse_index'].shape}")
+        _debug(f"  步骤9完成: sparse_sdf.shape={result['sparse_sdf'].shape}, sparse_index.shape={result['sparse_index'].shape}")
     except Exception as e:
         _debug(f"  numpy转换失败: {type(e).__name__}: {e}")
         raise RuntimeError(f"Failed to convert result to numpy: {e}") from e
