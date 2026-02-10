@@ -638,8 +638,8 @@ def main():
     parser.add_argument(
         '--threshold_factor',
         type=float,
-        default=4.0,
-        help='UDF threshold factor for sparse extraction. Default: 4.0'
+        default=0.5,
+        help='UDF threshold factor for sparse extraction.'
     )
     parser.add_argument(
         '--max_workers',
