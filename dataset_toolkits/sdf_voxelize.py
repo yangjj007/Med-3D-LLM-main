@@ -60,7 +60,7 @@ def _process_mesh_to_sdf(
     sha256: str,
     output_dir: str,
     resolutions: List[int] = [512],
-    threshold_factor: float = 4.0
+    threshold_factor: float = 0.01
 ) -> Dict[str, Any]:
     """
     Process a single mesh file and convert to sparse SDF at multiple resolutions.
@@ -638,7 +638,7 @@ def main():
     parser.add_argument(
         '--threshold_factor',
         type=float,
-        default=0.5,
+        default=0.01,
         help='UDF threshold factor for sparse extraction.'
     )
     parser.add_argument(
