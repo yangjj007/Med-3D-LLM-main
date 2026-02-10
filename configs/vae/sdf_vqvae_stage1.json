@@ -3,12 +3,17 @@
         "vqvae": {
             "name": "SparseSDFVQVAE",
             "args": {
+                "use_ema_update": false,
+                "vq_decay": 0.99,
+                "vq_epsilon": 1e-5,
+                "use_kmeans_reinit": true,
+                "kmeans_interval": 100,
+                "reservoir_size": 16384,
                 "resolution": 64,
                 "model_channels": 512,
                 "latent_channels": 16,
                 "num_blocks": 8,
                 "num_embeddings": 8192,
-                "use_ema_update": false,
                 "num_heads": null,
                 "num_head_channels": 64,
                 "mlp_ratio": 4.0,
@@ -18,43 +23,45 @@
                 "use_fp16": false,
                 "use_checkpoint": true,
                 "qk_rms_norm": false,
-                "representation_config": null,
-                "chunk_size": 1
+                "representation_config": null
             }
         }
     },
     "dataset": {
-        "name": "CTWindowSparseSDF",
+        "name": "SparseSDF",
         "args": {
             "resolution": 512,
-            "window_type": "lung",
             "min_points": 100,
-            "max_points": 1000000
+            "max_points": 500000
         }
     },
     "trainer": {
         "name": "SparseSDF_VQVAETrainer",
         "args": {
-            "training_stage": 2,
-            "num_workers": 30,
-            "pretrained_vae_path": "./outputs/ct_vqvae_lung_stage1/ckpts/vqvae_step0000500.pth",
+            "training_stage": 1,
+            "num_workers": 32,
+            "pretrained_vae_path": "./vae_weights/sparse_vae_512.pth",
             "max_steps": 100000,
             "max_epoch": 1,
-            "batch_size_per_gpu": 8,
+            "batch_size_per_gpu": 32,
             "batch_split": 1,
             "disable_snapshot": true,
             "optimizer": {
                 "name": "AdamW",
                 "args": {
-                    "lr": 5e-4,
+                    "lr": 1e-3,
                     "weight_decay": 0.01
                 }
             },
             "lr_scheduler": {
-                "name": "CosineAnnealingLR",
+                "name": "WarmupThenScheduler",
                 "args": {
-                    "T_max": 100000,
-                    "eta_min": 5e-5
+                    "warmup_steps": 100,
+                    "main_scheduler_class": "CosineAnnealingLR",
+                    "main_scheduler_kwargs": {
+                        "T_max": 100000,
+                        "eta_min": 5e-5
+                    }
                 }
             },
             "ema_rate": [0.9999],
@@ -63,13 +70,13 @@
             "grad_clip": {
                 "name": "AdaptiveGradClipper",
                 "args": {
-                    "max_norm": 0.5,
+                    "max_norm": 1.0,
                     "clip_percentile": 90
                 }
             },
             "lambda_vq": 1.0,
             "lambda_commitment": 0.25,
-            "loss_type": "l1_l2",
+            "loss_type": "l1",
             "i_print": 100,
             "i_log": 100,
             "i_sample": 100,

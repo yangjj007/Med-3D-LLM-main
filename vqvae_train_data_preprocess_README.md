@@ -99,4 +99,33 @@ python dataset_toolkits/sdf_voxelize.py \
 ```
 
 
-5、todo：对应修改阶段一和二的训练数据读取框架，支持新的训练数据格式
+5、使用sdf_voxelize输出的数据进行阶段一和阶段二训练（✅已支持）
+
+SparseSDF数据集类已适配sdf_voxelize.py的输出格式：
+- 支持扁平目录布局：`{output_dir}/{sha256}_r{resolution}.npz`
+- 支持metadata.csv中的`sdf_computed`列名
+- 兼容旧版compute_sparse_sdf.py的子目录布局
+
+### 阶段1训练 - 冻结VAE，训练码本
+```bash
+export ATTN_BACKEND=xformers
+python train.py \
+    --config configs/vae/sdf_vqvae_stage1.json \
+    --output_dir outputs/sdf_vqvae_stage1 \
+    --data_dir ./train_sdf_dataset \
+    --num_gpus 4
+```
+
+### 阶段2训练 - 联合微调
+```bash
+export ATTN_BACKEND=xformers
+python train.py \
+    --config configs/vae/sdf_vqvae_stage2.json \
+    --output_dir outputs/sdf_vqvae_stage2 \
+    --data_dir ./train_sdf_dataset \
+    --load_dir outputs/sdf_vqvae_stage1 \
+    --ckpt latest \
+    --num_gpus 4
+```
+
+注意：`--data_dir` 应指向 sdf_voxelize.py 的 `--output_dir`（即 `./train_sdf_dataset`）

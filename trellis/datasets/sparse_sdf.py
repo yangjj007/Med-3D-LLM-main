@@ -42,17 +42,27 @@ class SparseSDF(StandardDatasetBase):
         super().__init__(roots)
     
     def filter_metadata(self, metadata):
-        """Filter metadata to only include instances with sparse SDF computed."""
+        """Filter metadata to only include instances with sparse SDF computed.
+        
+        Supports both column naming conventions:
+        - 'sdf_computed': from sdf_voxelize.py output
+        - 'sparse_sdf_computed': from compute_sparse_sdf.py output (legacy)
+        """
         stats = {}
         
-        # Check if sparse_sdf_computed column exists
-        if 'sparse_sdf_computed' in metadata.columns:
+        # Check for SDF computed flag (support both naming conventions)
+        if 'sdf_computed' in metadata.columns:
+            metadata = metadata[metadata['sdf_computed'] == True]
+            stats['SDF computed'] = len(metadata)
+        elif 'sparse_sdf_computed' in metadata.columns:
             metadata = metadata[metadata['sparse_sdf_computed'] == True]
             stats['Sparse SDF computed'] = len(metadata)
         
         # Check if resolution-specific point count exists
         points_col = f'r{self.resolution}_num_points'
         if points_col in metadata.columns:
+            # Drop rows with NaN in points column before filtering
+            metadata = metadata[metadata[points_col].notna()]
             metadata = metadata[metadata[points_col] >= self.min_points]
             stats[f'Min {self.min_points} points at r{self.resolution}'] = len(metadata)
         
@@ -61,6 +71,10 @@ class SparseSDF(StandardDatasetBase):
     def get_instance(self, root: str, instance: str) -> Dict[str, Any]:
         """
         Load a single instance.
+        
+        Supports two directory layouts:
+        1. Flat layout (sdf_voxelize.py output): {root}/{sha256}_r{resolution}.npz
+        2. Subdirectory layout (legacy): {root}/sparse_sdf/{sha256}_r{resolution}.npz
         
         Args:
             root: Root directory
@@ -71,8 +85,11 @@ class SparseSDF(StandardDatasetBase):
                 - sparse_sdf: Tensor[N, 1]
                 - sparse_index: Tensor[N, 3]
         """
-        # Load sparse SDF data
-        sdf_path = os.path.join(root, 'sparse_sdf', f'{instance}_r{self.resolution}.npz')
+        # Load sparse SDF data - try flat layout first (sdf_voxelize.py output),
+        # then fall back to subdirectory layout (compute_sparse_sdf.py output)
+        sdf_path = os.path.join(root, f'{instance}_r{self.resolution}.npz')
+        if not os.path.exists(sdf_path):
+            sdf_path = os.path.join(root, 'sparse_sdf', f'{instance}_r{self.resolution}.npz')
         data = np.load(sdf_path)
         
         sparse_sdf = torch.from_numpy(data['sparse_sdf']).float()  # [N, 1]
