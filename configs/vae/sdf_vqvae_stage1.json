@@ -45,7 +45,7 @@
             "max_epoch": 1,
             "batch_size_per_gpu": 32,
             "batch_split": 1,
-            "disable_snapshot": true,
+            "disable_snapshot": false,
             "optimizer": {
                 "name": "AdamW",
                 "args": {
