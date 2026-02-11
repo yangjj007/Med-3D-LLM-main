@@ -8,7 +8,7 @@
                 "vq_epsilon": 1e-5,
                 "use_kmeans_reinit": true,
                 "kmeans_interval": 100,
-                "reservoir_size": 16384,
+                "reservoir_size": 4096,
                 "resolution": 64,
                 "model_channels": 512,
                 "latent_channels": 16,
