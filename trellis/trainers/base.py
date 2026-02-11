@@ -322,27 +322,20 @@ class Trainer:
 
         # Gather results
         if self.world_size > 1:
+            backend = dist.get_backend() if dist.is_initialized() else None
             for key in samples.keys():
-                # Ensure the tensor is on CUDA before gathering (nccl backend requires CUDA tensors)
-                # Store original device to move back after gathering
-                original_device = samples[key]['value'].device
-                was_on_cpu = not samples[key]['value'].is_cuda
-                
-                if was_on_cpu:
-                    # Move to the local GPU for gathering
-                    samples[key]['value'] = samples[key]['value'].to(f'cuda:{self.local_rank}')
-                
-                samples[key]['value'] = samples[key]['value'].contiguous()
+                value = samples[key]['value'].contiguous()
+                # NCCL only supports CUDA tensors. Some visualize paths may return CPU tensors.
+                if backend == 'nccl' and not value.is_cuda:
+                    value = value.to(self.device, non_blocking=True)
+
                 if self.is_master:
-                    all_images = [torch.empty_like(samples[key]['value']) for _ in range(self.world_size)]
+                    all_images = [torch.empty_like(value) for _ in range(self.world_size)]
                 else:
                     all_images = []
-                dist.gather(samples[key]['value'], all_images, dst=0)
+                dist.gather(value, all_images, dst=0)
                 if self.is_master:
                     samples[key]['value'] = torch.cat(all_images, dim=0)[:num_samples]
-                    # Move to CPU immediately after gathering to free GPU memory
-                    if was_on_cpu:
-                        samples[key]['value'] = samples[key]['value'].cpu()
 
         # Save images
         if self.is_master:
