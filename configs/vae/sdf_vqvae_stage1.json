@@ -7,7 +7,7 @@
                 "vq_decay": 0.99,
                 "vq_epsilon": 1e-5,
                 "use_kmeans_reinit": true,
-                "kmeans_interval": 100,
+                "kmeans_interval": 99,
                 "reservoir_size": 4096,
                 "resolution": 64,
                 "model_channels": 512,
@@ -43,8 +43,8 @@
             "pretrained_vae_path": "./vae_weights/sparse_vae_512.pth",
             "max_steps": 100000,
             "max_epoch": 1,
-            "batch_size_per_gpu": 32,
-            "batch_split": 1,
+            "batch_size_per_gpu": 8,
+            "batch_split": 2,
             "disable_snapshot": false,
             "optimizer": {
                 "name": "AdamW",
@@ -85,4 +85,3 @@
         }
     }
 }
-
