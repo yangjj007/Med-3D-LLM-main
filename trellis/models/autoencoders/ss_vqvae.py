@@ -789,6 +789,23 @@ class SparseSDFVQVAE(nn.Module):
         self.decoder.load_state_dict(decoder_dict, strict=False)
         print(f"   ✅ Decoder 加载完成")
         
+        # 强制将encoder和decoder转换为正确的dtype
+        # 这样可以确保即使checkpoint中的权重是float16，也能正确转换
+        print(f"\n🔧 检查并修正 dtype...")
+        if not self.encoder.use_fp16:
+            print(f"   Encoder use_fp16=False，转换为 float32")
+            self.encoder.convert_to_fp32()
+        else:
+            print(f"   Encoder use_fp16=True，转换为 float16")
+            self.encoder.convert_to_fp16()
+            
+        if not self.decoder.use_fp16:
+            print(f"   Decoder use_fp16=False，转换为 float32")
+            self.decoder.convert_to_fp32()
+        else:
+            print(f"   Decoder use_fp16=True，转换为 float16")
+            self.decoder.convert_to_fp16()
+        
         print(f"\n✅ Loaded pretrained VAE parameters")
         print(f"   Encoder: {len(encoder_state_dict)} parameters loaded")
         print(f"   Decoder: {len(decoder_state_dict)} parameters loaded")

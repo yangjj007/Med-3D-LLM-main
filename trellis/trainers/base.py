@@ -322,13 +322,18 @@ class Trainer:
 
         # Gather results
         if self.world_size > 1:
+            backend = dist.get_backend() if dist.is_initialized() else None
             for key in samples.keys():
-                samples[key]['value'] = samples[key]['value'].contiguous()
+                value = samples[key]['value'].contiguous()
+                # NCCL only supports CUDA tensors. Some visualize paths may return CPU tensors.
+                if backend == 'nccl' and not value.is_cuda:
+                    value = value.to(self.device, non_blocking=True)
+
                 if self.is_master:
-                    all_images = [torch.empty_like(samples[key]['value']) for _ in range(self.world_size)]
+                    all_images = [torch.empty_like(value) for _ in range(self.world_size)]
                 else:
                     all_images = []
-                dist.gather(samples[key]['value'], all_images, dst=0)
+                dist.gather(value, all_images, dst=0)
                 if self.is_master:
                     samples[key]['value'] = torch.cat(all_images, dim=0)[:num_samples]
 

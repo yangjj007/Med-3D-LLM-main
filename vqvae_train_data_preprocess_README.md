@@ -125,9 +125,12 @@ python train.py \
     --config configs/vae/sdf_vqvae_stage2.json \
     --output_dir outputs/sdf_vqvae_stage2 \
     --data_dir ./train_sdf_dataset \
+    --num_gpus 4 2>&1 | tee train2.log
+```
+
+```bash
     --load_dir outputs/sdf_vqvae_stage1 \
     --ckpt latest \
-    --num_gpus 4 2>&1 | tee train2.log
 ```
 
 注意：`--data_dir` 应指向 sdf_voxelize.py 的 `--output_dir`（即 `./train_sdf_dataset`）
