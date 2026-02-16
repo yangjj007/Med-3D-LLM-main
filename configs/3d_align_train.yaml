@@ -1,0 +1,52 @@
+# 3D-VL 对齐训练统一配置
+# 修改此文件即可调整训练与分布式参数；命令行参数可覆盖
+# 启动：bash scripts/run_3d_align_train.sh  或  python scripts/run_3d_align_train.py
+
+# === 路径 ===
+vl_model: "/yangjunjie/model_qwen3vl_2B"
+vae_config: "configs/vae/sdf_vqvae_stage2.json"
+vae_ckpt: "outputs/sdf_vqvae_stage2_1/ckpts/vqvae_step0000459.pt"
+data_dir: "train_sdf_dataset"
+output_dir: "outputs_3d_align"   # 父目录，训练保存到 output_dir/ep{epochs}_lr{lr}_bs{bs}_n{samples}_lora{r}/
+output_run: "ep2_lr1e-4_bs2_n500_lora8"  # 评估时指定要用的 run 子目录（训练完成后从 Output dir 复制）
+
+# === 训练参数 ===
+lr: 1.0e-4
+epochs: 2
+batch_size: 4              # 每卡 batch，多卡时全局 batch = batch_size * num_processes
+max_3d_tokens: 2048
+use_3d_pos: true
+projector_layers: 3
+
+# LoRA
+use_lora: true
+lora_r: 8
+
+# 文本 prompt
+prompt: "Describe this 3D shape in one sentence:"
+
+# === 数据参数 ===
+max_samples: 5000          # 0=全量
+dummy_data: false
+dummy_samples: 50
+data_format: "sdf_caption"
+
+# === 分布式 / Accelerate ===
+accelerate:
+  compute_environment: LOCAL_MACHINE
+  debug: false
+  distributed_type: MULTI_GPU
+  downcast_bf16: "no"
+  enable_cpu_affinity: false
+  gpu_ids: all
+  machine_rank: 0
+  main_training_function: main
+  mixed_precision: bf16
+  num_machines: 1
+  num_processes: 4         # GPU 数量
+  rdzv_backend: static
+  same_network: true
+  tpu_env: []
+  tpu_use_cluster: false
+  tpu_use_sudo: false
+  use_cpu: false

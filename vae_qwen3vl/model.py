@@ -162,12 +162,9 @@ class Qwen3VLWith3DBranch(nn.Module):
 
         batch_size = input_ids.shape[0]
         if feats_3d.dim() == 2:
-            feats_seq, mask_3d, coords_seq = prepare_3d_sequence(
-                feats_3d, coords_3d, max_3d_tokens=self.max_3d_tokens
+            feats_seq, mask_3d, coords_seq = prepare_3d_sequence_batched(
+                feats_3d, coords_3d, batch_size=batch_size, max_3d_tokens=self.max_3d_tokens
             )
-            feats_seq = feats_seq.unsqueeze(0)
-            mask_3d = mask_3d.unsqueeze(0)
-            coords_seq = coords_seq.unsqueeze(0)
         else:
             if feats_3d.dim() == 3:
                 feats_flat = feats_3d.reshape(-1, feats_3d.shape[-1])
@@ -186,6 +183,7 @@ class Qwen3VLWith3DBranch(nn.Module):
 
         embed_tokens = self.vl_model.get_input_embeddings()
         text_embeds = embed_tokens(input_ids)
+        embeds_3d = embeds_3d.to(text_embeds.dtype)
         seq_3d = embeds_3d.shape[1]
         combined_embeds = torch.cat([embeds_3d, text_embeds], dim=1)
         if attention_mask is not None:

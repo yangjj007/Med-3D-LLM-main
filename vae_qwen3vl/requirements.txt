@@ -1,5 +1,6 @@
 # For VAE + Qwen2-VL / Qwen3-VL 3D understanding
 torch>=2.0
 transformers>=4.47
-# Optional: LoRA fine-tuning
-# peft>=0.10
+accelerate>=0.25
+peft>=0.10
+pyyaml>=6.0

@@ -396,3 +396,17 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# === 本项目：数据与产出 ===
+.ipynb_checkpoints/
+train_sdf_dataset/
+train_sdf_dataset-old/
+M3D_Seg_processed/
+TRELLIS-500K/
+outputs/
+diffoctreerast1/
+kaolin/
+logs/
+configs/.train_error*.txt
+configs/accelerate.yaml
+*.so

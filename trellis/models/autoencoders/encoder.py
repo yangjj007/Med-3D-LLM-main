@@ -26,11 +26,12 @@ class SparseDownBlock3d(nn.Module):
         )
 
         self.down = sp.SparseDownsample(2)
+        # Use padding=None to get SubMConv3d (preserves voxel grid for spconv backend skip connection)
         self.out_layers = nn.Sequential(
-            sp.SparseConv3d(channels, self.out_channels, 3, padding=1),
+            sp.SparseConv3d(channels, self.out_channels, 3),
             sp.SparseGroupNorm32(num_groups, self.out_channels),
             sp.SparseSiLU(),
-            sp.SparseConv3d(self.out_channels, self.out_channels, 3, padding=1),
+            sp.SparseConv3d(self.out_channels, self.out_channels, 3),
         )
 
         if self.out_channels == channels:

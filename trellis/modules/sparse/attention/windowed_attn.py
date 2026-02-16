@@ -107,7 +107,12 @@ def sparse_windowed_scaled_dot_product_self_attention(
             q, k, v = qkv_feats.unbind(dim=2)                       # [B, N, H, C]
             out = xops.memory_efficient_attention(q, k, v)          # [B, N, H, C]
         elif ATTN == 'flash_attn':
+            orig_dtype = qkv_feats.dtype
+            if orig_dtype not in (torch.float16, torch.bfloat16):
+                qkv_feats = qkv_feats.to(torch.bfloat16)
             out = flash_attn.flash_attn_qkvpacked_func(qkv_feats)   # [B, N, H, C]
+            if orig_dtype not in (torch.float16, torch.bfloat16):
+                out = out.to(orig_dtype)
         else:
             raise ValueError(f"Unknown attention module: {ATTN}")
         out = out.reshape(B * N, H, C)                              # [M, H, C]
@@ -120,9 +125,14 @@ def sparse_windowed_scaled_dot_product_self_attention(
             mask = xops.fmha.BlockDiagonalMask.from_seqlens(seq_lens)
             out = xops.memory_efficient_attention(q, k, v, mask)[0] # [M, H, C]
         elif ATTN == 'flash_attn':
+            orig_dtype = qkv_feats.dtype
+            if orig_dtype not in (torch.float16, torch.bfloat16):
+                qkv_feats = qkv_feats.to(torch.bfloat16)
             cu_seqlens = torch.cat([torch.tensor([0]), torch.cumsum(torch.tensor(seq_lens), dim=0)], dim=0) \
                         .to(qkv.device).int()
             out = flash_attn.flash_attn_varlen_qkvpacked_func(qkv_feats, cu_seqlens, max(seq_lens)) # [M, H, C]
+            if orig_dtype not in (torch.float16, torch.bfloat16):
+                out = out.to(orig_dtype)
 
     out = out[bwd_indices]      # [T, H, C]
 

@@ -32,8 +32,8 @@ class SparseConv3d(nn.Module):
             # spconv was non-1 stride will break the contiguous of the output tensor, sort by the coords
             fwd = new_data.indices[:, 0].argsort()
             bwd = torch.zeros_like(fwd).scatter_(0, fwd, torch.arange(fwd.shape[0], device=fwd.device))
-            sorted_feats = new_data.features #[fwd]
-            sorted_coords = new_data.indices #[fwd]
+            sorted_feats = new_data.features[fwd]
+            sorted_coords = new_data.indices[fwd]
             unsorted_data = new_data
 
             indice_dict = new_data.indice_dict 

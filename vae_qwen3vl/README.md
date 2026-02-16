@@ -2,6 +2,33 @@
 
 This package connects the trained 3D VQ-VAE (SparseSDFVQVAE) to Qwen2-VL or Qwen3-VL for 3D understanding and mesh reconstruction. The representation sent to the LLM is the **codebook vector combination** (VQ-VAE output): we encode to discrete indices, then `feats = codebook(indices)`—not the raw encoder output. The same `encoding_indices` can be passed to `vae.Decode(encoding_indices)` to reconstruct mesh.
 
+---
+
+## 重要注意事项（使用前必读）
+
+| 类别 | 说明 |
+|------|------|
+| **环境变量** | 训练/推理前需设置 `export SPARSE_BACKEND=spconv`，否则稀疏张量后端可能报错。 |
+| **Projector 结构** | `projector_layers=1` 为单层 Linear；`projector_layers>=2` 才是 MLP。配置中 `projector_layers: 3` 表示 MLP。 |
+| **分布式训练** | 多卡 DDP 下通过 `getattr(model, "module", model)` 正确调用 `forward_with_3d`，无需手动处理。 |
+| **训练日志** | 日志写入 `logs/`，按时间与 rank 分别记录；控制台过滤 `[DEBUG]`，仅 rank 0 回显，避免多卡输出混乱。 |
+| **输出目录** | 训练结果按参数命名保存到 `output_dir/ep{epochs}_lr{lr}_bs{bs}_n{samples}_lora{r}/`，多次训练不会覆盖。 |
+| **eval 指定 run** | 评估时在 config 中设置 `output_run`（如 `ep2_lr1e-4_bs2_n500_lora8`）以加载对应子目录的 LoRA/projector。 |
+| **生成效果** | 若大量输出 "red robot" 等重复内容，可能是 VQ 码本利用不足、训练不足或数据问题，可增加 epochs、调大 `max_samples`。 |
+| **LoRA 评估** | 使用 LoRA 训练时，eval 需同时指定 `--projector_ckpt` 和 `--lora_dir`（或通过 `--config` 自动推断）。 |
+| **Chat 模板** | 训练与 eval 均使用 Qwen chat 模板 + `add_generation_prompt`，确保模型在 assistant 位置正确生成。 |
+
+---
+
+## 数据目录说明
+
+| 目录 | 用途 |
+|------|------|
+| **train_sdf_dataset** | 3D–文本对齐训练的数据源。含 `metadata.csv` 和 `{sha256}_r512.npz`（稀疏 SDF）。由 `dataset_toolkits/sdf_voxelize.py` 从 mesh（GLB）生成。当前约 **18,293** 个可训练样本（sdf_computed + r512 + captions + npz 存在）。 |
+| **M3D_Seg_processed** | **M3D-Seg 医学 CT 分割数据集**的预处理输出。每个子目录（如 0000、0001）含 `dataset_config.json`、`metadata.csv`、`processed/`，保存的是 CT 图像、器官掩码、分辨率适配等中间结果。由 `dataset_toolkits/process_m3d_seg_format.py` 处理 M3D-Seg 原始数据得到。与 `train_sdf_dataset` 是**不同数据流水线**，不直接用于本模块的 3D–VL 对齐训练。 |
+
+---
+
 ## Components
 
 - **vae_latent_extractor**: `extract_3d_latent(batch, vae_model)` returns `(feats [N, embed_dim], coords [N, 4])` where feats are codebook vectors. `extract_3d_latent_and_indices(...)` returns `(feats, coords, encoding_indices)` so you can use `encoding_indices` for mesh reconstruction.
@@ -110,6 +137,20 @@ Replace the dummy dataset with your 3D–text dataset (e.g. 3D captioning or QA)
 Encoder（VQ-VAE）已训练好后，用本小节完成 **3D–文本对齐**（只训练 projector，可选 LoRA）并**检验效果**。  
 **完整说明（数据格式、脚本参数、VAE 冻结、自定义数据集接入等）见 [TRAIN_ALIGNMENT.md](TRAIN_ALIGNMENT.md)。**
 
+### 0. 推荐工作流（配置文件 + 脚本）
+
+修改 `configs/3d_align_train.yaml` 后，通过脚本一键启动：
+
+```bash
+# 多卡训练
+bash scripts/run_3d_align_train.sh
+
+# 或单卡调试
+python scripts/run_3d_align_train.py --config configs/3d_align_train.yaml --debug
+```
+
+配置中可设置 `data_dir`、`max_samples`、`output_run` 等；训练完成后，将 config 中 `output_run` 改为实际生成的子目录名（如 `ep2_lr1e-4_bs2_n500_lora8`），再执行 eval。
+
 ### 1. 对齐训练
 
 - **数据**：每个样本需要「3D 表示」+「文本」（如描述/问答）。两种用法：
@@ -140,6 +181,9 @@ python vae_qwen3vl/train_finetune.py \
 **推荐：用脚本 `eval_3d_vl.py` 一次做完「生成 + 可选 mesh 保存」：**
 
 ```bash
+# 使用配置文件（与训练一致，自动加载 LoRA + projector + 真实数据）
+python vae_qwen3vl/eval_3d_vl.py --config configs/3d_align_train.yaml --output_dir ./eval_out
+
 # 仅 3D → 文本生成（无 data_path 时用随机 3D 做快速测试）
 python vae_qwen3vl/eval_3d_vl.py \
   --vae_config configs/vae/sdf_vqvae_stage1.json \
@@ -148,15 +192,14 @@ python vae_qwen3vl/eval_3d_vl.py \
   --vl_model Qwen/Qwen2-VL-2B-Instruct \
   --output_dir ./eval_out
 
+# 使用 LoRA 时需同时指定 lora_dir
+python vae_qwen3vl/eval_3d_vl.py ... --lora_dir outputs_3d_align/ep2_lr1e-4_bs2_n500_lora8/lora_final
+
+# 使用真实数据（与训练相同格式）
+python vae_qwen3vl/eval_3d_vl.py ... --data_dir train_sdf_dataset
+
 # 指定一个 3D 批次（.pt 里为 dict: sparse_sdf, sparse_index, batch_idx）
-python vae_qwen3vl/eval_3d_vl.py \
-  --vae_config configs/vae/sdf_vqvae_stage1.json \
-  --vae_ckpt path/to/vae.pt \
-  --projector_ckpt path/to/projector_final.pt \
-  --vl_model Qwen/Qwen2-VL-2B-Instruct \
-  --data_path path/to/one_batch.pt \
-  --prompt "Describe this 3D shape in one sentence:" \
-  --output_dir ./eval_out
+python vae_qwen3vl/eval_3d_vl.py ... --data_path path/to/one_batch.pt --prompt "Describe this 3D shape in one sentence:"
 
 # 同时做 mesh 重建并保存到 output_dir
 python vae_qwen3vl/eval_3d_vl.py ... --save_mesh --voxel_resolution 256
@@ -167,7 +210,9 @@ python vae_qwen3vl/eval_3d_vl.py ... --save_mesh --voxel_resolution 256
 
 ### 3. 自建 3D–文本数据集接入训练
 
-若不用 `--dummy_data`，需要实现自己的 `Dataset` 和 DataLoader，并替换 `train_finetune.py` 里 `else` 分支：
+**内置 SDF 数据集**：通过 config 设置 `data_dir: train_sdf_dataset` 和 `data_format: sdf_caption`，可使用 `SDF3DCaptionDataset`，要求目录内有 `metadata.csv`（含 sha256、captions、sdf_computed、r512_num_points 等列）及 `{sha256}_r512.npz`。可通过 `max_samples` 限制样本数（0 表示全量）。
+
+若不用 `--dummy_data` 且非 sdf_caption 格式，需要实现自己的 `Dataset` 和 DataLoader，并替换 `train_finetune.py` 里相应分支：
 
 - 每个 batch 要么包含 `feats_3d`、`coords_3d`（与 `model.projector.latent_dim` 一致），要么包含 `inputs_3d`（sparse_sdf, sparse_index, batch_idx）。
 - 同时提供 `input_ids`、`attention_mask`、`labels`（与 Qwen 文本格式一致，labels 中非生成部分可为 -100）。
