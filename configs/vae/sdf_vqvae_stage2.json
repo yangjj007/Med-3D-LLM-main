@@ -7,7 +7,7 @@
                 "vq_decay": 0.99,
                 "vq_epsilon": 1e-5,
                 "use_kmeans_reinit": true,
-                "kmeans_interval": 50,
+                "kmeans_interval": 49,
                 "reservoir_size": 4096,
                 "resolution": 64,
                 "model_channels": 512,
@@ -40,12 +40,12 @@
         "args": {
             "training_stage": 2,
             "num_workers": 32,
-            "pretrained_vae_path": "./outputs/ct_vqvae_stage1_2048/ckpts/vqvae_step0000600.pt",
+            "pretrained_vae_path": "./outputs/sdf_vqvae_stage1_0/ckpts/vqvae_step0000600.pt",
             "max_steps": 100000,
             "max_epoch": 1,
-            "batch_size_per_gpu": 16,
+            "batch_size_per_gpu": 4,
             "batch_split": 1,
-            "disable_snapshot": true,
+            "disable_snapshot": false,
             "optimizer": {
                 "name": "AdamW",
                 "args": {
@@ -65,7 +65,7 @@
                 }
             },
             "ema_rate": [0.9999],
-            "fp16_mode": "inflat_all",
+            "fp16_mode": "amp",
             "fp16_scale_growth": 0.001,
             "grad_clip": {
                 "name": "AdaptiveGradClipper",

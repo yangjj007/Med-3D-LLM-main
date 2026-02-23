@@ -71,22 +71,22 @@ view_keys,"该模型包含的视图列表 (如 axial, main, top, side)"
 
 ### 处理TRELLIS-500K数据：
 ```bash
-python dataset_toolkits/sdf_voxelize.py \
+CUDA_VISIBLE_DEVICES=1 python dataset_toolkits/sdf_voxelize.py \
     --format trellis500k \
     --input_dir ./TRELLIS-500K/ObjaverseXL/raw/hf-objaverse-v1 \
-    --output_dir ./train_sdf_dataset \
+    --output_dir ./train_sdf_dataset_0.5 \
     --resolutions 512 \
     --filter_aesthetic_score 4.0 \
-    --threshold_factor 0.01 \
+    --threshold_factor 0.5 \
     --max_workers 1
 
-python dataset_toolkits/sdf_voxelize.py \
+CUDA_VISIBLE_DEVICES=0 python dataset_toolkits/sdf_voxelize.py \
     --format trellis500k \
     --input_dir ./TRELLIS-500K/HSSD/raw/objects \
-    --output_dir ./train_sdf_dataset \
+    --output_dir ./train_sdf_dataset_0.5 \
     --resolutions 512 \
     --filter_aesthetic_score 4.0 \
-    --threshold_factor 0.01 \
+    --threshold_factor 0.5 \
     --max_workers 1
 ```
 
@@ -113,8 +113,8 @@ SparseSDF数据集类已适配sdf_voxelize.py的输出格式：
 export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/sdf_vqvae_stage1.json \
-    --output_dir outputs/sdf_vqvae_stage1 \
-    --data_dir ./train_sdf_dataset \
+    --output_dir outputs/sdf_vqvae_stage1_0 \
+    --data_dir ./train_sdf_dataset_0.5 \
     --num_gpus 4 2>&1 | tee train1.log
 ```
 
@@ -124,7 +124,7 @@ export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/sdf_vqvae_stage2.json \
     --output_dir outputs/sdf_vqvae_stage2 \
-    --data_dir ./train_sdf_dataset \
+    --data_dir ./train_sdf_dataset_0.5 \
     --num_gpus 4 2>&1 | tee train2.log
 ```
 
