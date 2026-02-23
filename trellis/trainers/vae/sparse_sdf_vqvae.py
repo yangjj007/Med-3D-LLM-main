@@ -542,6 +542,7 @@ class SparseSDF_VQVAETrainer(BasicTrainer):
             codebook_entropy=codebook_stats.get('entropy', 0.0),
             codebook_utilization_ratio=codebook_stats.get('utilization_ratio', 0.0),
             codebook_unique_count=codebook_stats.get('unique_count', 0),
+            codebook_batch_unique_count=codebook_stats.get('batch_unique_count', 0),
         )
         
         return terms, status

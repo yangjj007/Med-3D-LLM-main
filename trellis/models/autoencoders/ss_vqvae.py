@@ -158,37 +158,52 @@ class SparseVectorQuantizer(nn.Module):
         print(f"[DEBUG VQ] Min distances: mean={min_distances.mean().item():.6f}, std={min_distances.std().item():.6f}, median={min_distances.median().item():.6f}")
         
         encoding_indices = torch.argmin(distances, dim=1)  # [N]
-        unique_codes = torch.unique(encoding_indices)
-        print(f"[DEBUG VQ] Encoding indices: unique codes used={len(unique_codes)}/{self.num_embeddings}")
+        unique_codes_batch = torch.unique(encoding_indices)
+        print(f"[DEBUG VQ] Encoding indices: batch unique codes={len(unique_codes_batch)}/{self.num_embeddings}")
         
         # 统计每个码本被使用的次数
-        if len(unique_codes) < 100:  # 只在激活少时打印
+        if len(unique_codes_batch) < 100:
             counts = torch.bincount(encoding_indices, minlength=self.num_embeddings)
             used_counts = counts[counts > 0]
             print(f"[DEBUG VQ] Usage distribution: min={used_counts.min().item()}, max={used_counts.max().item()}, mean={used_counts.float().mean().item():.1f}")
         
-        # ============ 码本利用率统计 ============
-        # 计算每个码本的使用概率
-        encodings_onehot = F.one_hot(encoding_indices, self.num_embeddings).float()  # [N, K]
-        avg_probs = torch.mean(encodings_onehot, dim=0)  # [K] 每个码本被选中的平均概率
+        # ============ 码本利用率统计（按每个样本单独计算后取均值）============
+        batch_ids = z.coords[:, 0]  # [N] 每个体素所属的样本索引
+        unique_batch_ids = torch.unique(batch_ids)
+        num_samples = len(unique_batch_ids)
         
-        # 计算信息熵
+        sample_perplexities = []
+        sample_entropies = []
+        sample_unique_counts = []
         epsilon = 1e-10
-        entropy = -torch.sum(avg_probs * torch.log(avg_probs + epsilon))
         
-        # 计算困惑度
-        perplexity = torch.exp(entropy)
+        for bid in unique_batch_ids:
+            mask = batch_ids == bid
+            sample_indices = encoding_indices[mask]  # 当前样本的码本索引
+            
+            sample_unique = torch.unique(sample_indices)
+            sample_unique_counts.append(len(sample_unique))
+            
+            sample_onehot = F.one_hot(sample_indices, self.num_embeddings).float()
+            sample_probs = torch.mean(sample_onehot, dim=0)
+            sample_entropy = -torch.sum(sample_probs * torch.log(sample_probs + epsilon))
+            sample_entropies.append(sample_entropy.item())
+            sample_perplexities.append(torch.exp(sample_entropy).item())
         
-        # 计算活跃码本数量和比例
-        unique_count = len(unique_codes)
-        utilization_ratio = (unique_count / self.num_embeddings) * 100.0
+        avg_perplexity = sum(sample_perplexities) / num_samples
+        avg_entropy = sum(sample_entropies) / num_samples
+        avg_unique_count = sum(sample_unique_counts) / num_samples
+        avg_utilization_ratio = (avg_unique_count / self.num_embeddings) * 100.0
         
-        # 构建统计字典
+        print(f"[DEBUG VQ] Per-sample stats (mean of {num_samples} samples): "
+              f"unique={avg_unique_count:.1f}, perplexity={avg_perplexity:.2f}, entropy={avg_entropy:.4f}")
+        
         codebook_stats = {
-            'perplexity': perplexity.item(),
-            'entropy': entropy.item(),
-            'unique_count': unique_count,
-            'utilization_ratio': utilization_ratio,
+            'perplexity': avg_perplexity,
+            'entropy': avg_entropy,
+            'unique_count': avg_unique_count,
+            'utilization_ratio': avg_utilization_ratio,
+            'batch_unique_count': len(unique_codes_batch),
         }
         
         if only_return_indices:

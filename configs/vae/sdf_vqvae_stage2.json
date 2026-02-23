@@ -32,7 +32,7 @@
         "args": {
             "resolution": 512,
             "min_points": 100,
-            "max_points": 1000000
+            "max_points": 10000000
         }
     },
     "trainer": {
@@ -40,10 +40,10 @@
         "args": {
             "training_stage": 2,
             "num_workers": 32,
-            "pretrained_vae_path": "./outputs/sdf_vqvae_stage1_0/ckpts/vqvae_step0000600.pt",
+            "pretrained_vae_path": "./outputs/sdf_vqvae_stage1_512_0.5/ckpts/vqvae_step0000010.pt",
             "max_steps": 100000,
             "max_epoch": 1,
-            "batch_size_per_gpu": 4,
+            "batch_size_per_gpu": 2,
             "batch_split": 1,
             "disable_snapshot": false,
             "optimizer": {
@@ -85,4 +85,3 @@
         }
     }
 }
-

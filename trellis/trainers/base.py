@@ -574,17 +574,21 @@ class Trainer:
                         except:
                             codebook_size = None
                         
-                        print(f"\n📊 码本利用率统计:")
+                        print(f"\n📊 码本利用率统计 (per-sample 均值):")
                         if codebook_size is not None:
                             print(f"  - 困惑度 (Perplexity): {status_info['codebook_perplexity']:.2f} / {codebook_size}")
                         else:
                             print(f"  - 困惑度 (Perplexity): {status_info['codebook_perplexity']:.2f}")
                         print(f"  - 信息熵 (Entropy): {status_info['codebook_entropy']:.4f}")
-                        print(f"  - 活跃码本比例: {status_info['codebook_utilization_ratio']:.2f}%")
+                        print(f"  - 活跃码本比例 (per-sample): {status_info['codebook_utilization_ratio']:.2f}%")
                         if codebook_size is not None:
-                            print(f"  - 唯一码本数量: {status_info['codebook_unique_count']} / {codebook_size}")
+                            print(f"  - 唯一码本数量 (per-sample): {status_info['codebook_unique_count']:.1f} / {codebook_size}")
+                            if 'codebook_batch_unique_count' in status_info:
+                                print(f"  - 唯一码本数量 (batch整体): {status_info['codebook_batch_unique_count']:.0f} / {codebook_size}")
                         else:
-                            print(f"  - 唯一码本数量: {status_info['codebook_unique_count']}")
+                            print(f"  - 唯一码本数量 (per-sample): {status_info['codebook_unique_count']:.1f}")
+                            if 'codebook_batch_unique_count' in status_info:
+                                print(f"  - 唯一码本数量 (batch整体): {status_info['codebook_batch_unique_count']:.0f}")
                 
                 print(f"{'='*100}\n")
                 

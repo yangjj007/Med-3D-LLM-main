@@ -113,8 +113,8 @@ SparseSDF数据集类已适配sdf_voxelize.py的输出格式：
 export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/sdf_vqvae_stage1.json \
-    --output_dir outputs/sdf_vqvae_stage1_0 \
-    --data_dir ./train_sdf_dataset_0.5 \
+    --output_dir outputs/sdf_vqvae_stage1_512_0.5 \
+    --data_dir ./train_sdf_dataset/res512_thre0.5/ \
     --num_gpus 4 2>&1 | tee train1.log
 ```
 
@@ -123,13 +123,13 @@ python train.py \
 export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/sdf_vqvae_stage2.json \
-    --output_dir outputs/sdf_vqvae_stage2 \
-    --data_dir ./train_sdf_dataset_0.5 \
+    --output_dir outputs/sdf_vqvae_stage2_512_0.5 \
+    --data_dir ./train_sdf_dataset/res512_thre0.5/ \
     --num_gpus 4 2>&1 | tee train2.log
 ```
 
 ```bash
-    --load_dir outputs/sdf_vqvae_stage1 \
+    --load_dir outputs/sdf_vqvae_stage2_512_0.5 \
     --ckpt latest \
 ```
 
