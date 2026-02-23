@@ -137,10 +137,12 @@ class SparseSDF(StandardDatasetBase):
             'batch_idx': torch.cat(batch_indices, dim=0),
         }
     
+
     @torch.no_grad()
     def visualize_sample(self, sample: Dict[str, torch.Tensor]) -> torch.Tensor:
         """
-        Visualize sparse SDF samples by converting to dense voxel grids.
+        Visualize sparse SDF samples. Uses octree renderer if diffoctreerast is available,
+        otherwise falls back to simple point projection.
         
         Args:
             sample: Dictionary containing sparse_sdf, sparse_index, batch_idx
@@ -148,6 +150,11 @@ class SparseSDF(StandardDatasetBase):
         Returns:
             Tensor of shape [B, 3, H, W] for visualization (on the same device as input)
         """
+        try:
+            from diffoctreerast import OctreeVoxelRasterizer  # noqa: F401
+        except ImportError:
+            return self._visualize_simple(sample)
+
         from ..representations.octree import DfsOctree as Octree
         from ..renderers import OctreeRenderer
         import utils3d
@@ -156,13 +163,9 @@ class SparseSDF(StandardDatasetBase):
         sparse_index = sample['sparse_index']
         batch_idx = sample['batch_idx']
         
-        # Get the device from input tensors (for multi-GPU compatibility)
         device = sparse_sdf.device if isinstance(sparse_sdf, torch.Tensor) else torch.device('cuda')
-        
-        # Determine batch size
         batch_size = int(batch_idx.max().item() + 1)
         
-        # Setup renderer
         renderer = OctreeRenderer()
         renderer.rendering_options.resolution = 512
         renderer.rendering_options.near = 0.8
@@ -171,21 +174,18 @@ class SparseSDF(StandardDatasetBase):
         renderer.rendering_options.ssaa = 2
         renderer.pipe.primitive = 'voxel'
         
-        # Setup camera views
         yaws = [0, np.pi / 2, np.pi, 3 * np.pi / 2]
         pitch = [0, 0, 0, 0]
         
         images = []
         
-        for b in range(min(batch_size, 16)):  # Limit to 16 samples for memory
-            # Extract points for this batch
+        for b in range(min(batch_size, 16)):
             mask = batch_idx == b
-            coords = sparse_index[mask]  # [N, 3]
+            coords = sparse_index[mask]
             
             if len(coords) == 0:
                 continue
             
-            # Create octree representation
             representation = Octree(
                 depth=10,
                 aabb=[-0.5, -0.5, -0.5, 1, 1, 1],
@@ -195,7 +195,6 @@ class SparseSDF(StandardDatasetBase):
                 primitive_config={'solid': True},
             )
             
-            # Set positions (normalized to [0, 1])
             representation.position = coords.float() / self.resolution
             representation.depth = torch.full(
                 (representation.position.shape[0], 1),
@@ -204,7 +203,6 @@ class SparseSDF(StandardDatasetBase):
                 device=representation.position.device
             )
             
-            # Render 4 views
             batch_images = []
             for yaw, p in zip(yaws, pitch):
                 orig = torch.tensor([
@@ -229,7 +227,6 @@ class SparseSDF(StandardDatasetBase):
                 extrinsics = utils3d.torch.extrinsics_look_at(orig, target, up)
                 intrinsics = utils3d.torch.intrinsics_from_fov_xy(fov, fov)
                 
-                # Render
                 res = renderer.render(
                     representation,
                     extrinsics,
@@ -238,14 +235,12 @@ class SparseSDF(StandardDatasetBase):
                 )
                 batch_images.append(res['color'])
             
-            # Arrange in 2x2 grid
             top = torch.cat([batch_images[0], batch_images[1]], dim=2)
             bottom = torch.cat([batch_images[2], batch_images[3]], dim=2)
             grid = torch.cat([top, bottom], dim=1)
             images.append(grid)
         
         if len(images) == 0:
-            # Return empty image if no valid samples (on the correct device)
             return torch.zeros(1, 3, 512, 512, device=device)
         
         return torch.stack(images)

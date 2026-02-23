@@ -71,22 +71,22 @@ view_keys,"该模型包含的视图列表 (如 axial, main, top, side)"
 
 ### 处理TRELLIS-500K数据：
 ```bash
-CUDA_VISIBLE_DEVICES=1 python dataset_toolkits/sdf_voxelize.py \
+CUDA_VISIBLE_DEVICES=2 python dataset_toolkits/sdf_voxelize.py \
     --format trellis500k \
     --input_dir ./TRELLIS-500K/ObjaverseXL/raw/hf-objaverse-v1 \
-    --output_dir ./train_sdf_dataset_0.5 \
-    --resolutions 512 \
+    --output_dir ./train_sdf_dataset/res128_thre2 \
     --filter_aesthetic_score 4.0 \
-    --threshold_factor 0.5 \
+    --resolutions 128 \
+    --threshold_factor 2.0 \
     --max_workers 1
 
-CUDA_VISIBLE_DEVICES=0 python dataset_toolkits/sdf_voxelize.py \
+CUDA_VISIBLE_DEVICES=3 python dataset_toolkits/sdf_voxelize.py \
     --format trellis500k \
     --input_dir ./TRELLIS-500K/HSSD/raw/objects \
-    --output_dir ./train_sdf_dataset_0.5 \
-    --resolutions 512 \
+    --output_dir ./train_sdf_dataset/res128_thre2 \
     --filter_aesthetic_score 4.0 \
-    --threshold_factor 0.5 \
+    --resolutions 128 \
+    --threshold_factor 2.0 \
     --max_workers 1
 ```
 

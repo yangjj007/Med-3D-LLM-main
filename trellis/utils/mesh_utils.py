@@ -345,36 +345,36 @@ def dense_voxel_to_sparse_sdf(
     return result
 
 
-def mesh2index(
-    mesh: trimesh.Trimesh,
-    size: int = 1024,
-    factor: int = 8
-) -> torch.Tensor:
-    """
-    Convert mesh to latent index representation (downsampled sparse coordinates).
-    Used for hierarchical/progressive training.
+# def mesh2index(
+#     mesh: trimesh.Trimesh,
+#     size: int = 1024,
+#     factor: int = 8
+# ) -> torch.Tensor:
+#     """
+#     Convert mesh to latent index representation (downsampled sparse coordinates).
+#     Used for hierarchical/progressive training.
     
-    Args:
-        mesh: Input trimesh object
-        size: Full resolution
-        factor: Downsampling factor
+#     Args:
+#         mesh: Input trimesh object
+#         size: Full resolution
+#         factor: Downsampling factor
     
-    Returns:
-        Unique latent indices [N, 4] where first column is batch index (0)
-    """
-    # Use torch.from_numpy with copy to ensure contiguous arrays
-    vertices = torch.from_numpy(np.array(mesh.vertices, copy=True)).float().cuda() * 0.5
-    faces = torch.from_numpy(np.array(mesh.faces, copy=True)).int().cuda()
+#     Returns:
+#         Unique latent indices [N, 4] where first column is batch index (0)
+#     """
+#     # Use torch.from_numpy with copy to ensure contiguous arrays
+#     vertices = torch.from_numpy(np.array(mesh.vertices, copy=True)).float().cuda() * 0.5
+#     faces = torch.from_numpy(np.array(mesh.faces, copy=True)).int().cuda()
     
-    sdf = compute_valid_udf(vertices, faces, dim=size, threshold=4.0)
-    sdf = sdf.reshape(size, size, size).unsqueeze(0)
+#     sdf = compute_valid_udf(vertices, faces, dim=size, threshold=4.0)
+#     sdf = sdf.reshape(size, size, size).unsqueeze(0)
     
-    sparse_index = (sdf < 4/size).nonzero()
-    sparse_index[..., 1:] = sparse_index[..., 1:] // factor
-    latent_index = torch.unique(sparse_index, dim=0)
+#     sparse_index = (sdf < 4/size).nonzero()
+#     sparse_index[..., 1:] = sparse_index[..., 1:] // factor
+#     latent_index = torch.unique(sparse_index, dim=0)
     
-    return latent_index
+#     return latent_index
 
 
-# Alias for backward compatibility
-mesh2latent_index = mesh2index
+# # Alias for backward compatibility
+# mesh2latent_index = mesh2index
