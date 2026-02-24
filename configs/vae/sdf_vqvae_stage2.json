@@ -21,7 +21,7 @@
                 "window_size": 8,
                 "pe_mode": "ape",
                 "use_fp16": false,
-                "use_checkpoint": true,
+                "use_checkpoint": false,
                 "qk_rms_norm": false,
                 "representation_config": null
             }
