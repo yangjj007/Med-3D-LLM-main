@@ -290,15 +290,16 @@ class SparseSDFDecoder(SparseTransformerBase):
         return sp.SparseTensor(final_feats, final_coords)
 
     def upsamples(self, x, return_feat: bool = False):
-        dtype = x.dtype
+        input_dtype = x.feats.dtype  # 保存原始 dtype，最后转回
         for block in self.upsample:
             x = block(x)
-        x = x.type(dtype)
-
+        # out_layer 是 fp16，在转回 input_dtype 之前调用
         output = self.out_active(self.out_layer(x))
+        # 最后才转回原始 dtype
+        output = output.type(input_dtype)
 
         if return_feat:
-            return output, x
+            return output, x.type(input_dtype)
         else:
             return output
     
@@ -313,18 +314,22 @@ class SparseSDFDecoder(SparseTransformerBase):
         
         if self.chunk_size <= 1:
             print(f"[DEBUG SparseSDFDecoder.forward] chunk_size <= 1, processing {len(self.upsample)} upsample blocks")
+            input_dtype = x.feats.dtype  # 保存原始 dtype，最后转回
             for block_idx, block in enumerate(self.upsample):
                 print(f"[DEBUG SparseSDFDecoder.forward] Processing block {block_idx}, h.shape: {h.shape}, h.feats.shape: {h.feats.shape}")
                 print(f"[DEBUG SparseSDFDecoder.forward] Block {block_idx} input coords range: {h.coords.min(0).values} to {h.coords.max(0).values}")
                 h = block(h)
                 print(f"[DEBUG SparseSDFDecoder.forward] After block {block_idx}, h.shape: {h.shape}, h.feats.shape: {h.feats.shape}")
-            h = h.type(x.dtype)
 
+            # out_layer 是 fp16，必须在转回 input_dtype 之前调用
             if return_feat:
-                return self.out_active(self.out_layer(h)), h
+                result = self.out_active(self.out_layer(h))
+                return result.type(input_dtype), h.type(input_dtype)
         
             h = self.out_layer(h)
             h = self.out_active(h)
+            # 最后才转回原始 dtype
+            h = h.type(input_dtype)
             return h
         else:
             if self.training:

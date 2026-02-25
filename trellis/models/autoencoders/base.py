@@ -109,6 +109,8 @@ class SparseTransformerBase(nn.Module):
         self.apply(_basic_init)
 
     def forward(self, x: sp.SparseTensor, factor: float = None) -> sp.SparseTensor:
+        # 确保输入与模型权重 dtype 一致（fp16 模式下 input_layer 是 fp16）
+        x = x.type(self.dtype)
         h = self.input_layer(x)
         if self.pe_mode == "ape":
             h = h + self.pos_embedder(x.coords[:, 1:], factor)
