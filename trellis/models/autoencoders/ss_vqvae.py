@@ -147,7 +147,12 @@ class SparseVectorQuantizer(nn.Module):
         print(f"[DEBUG VQ] Near-zero codes (norm<0.01): {zero_codes}/{self.num_embeddings}")
         
         # z.feats: [N, embedding_dim]
-        z_flatten = z.feats  # [N, embedding_dim]
+        z_flatten_orig = z.feats  # [N, embedding_dim]，保留原始 dtype 用于 loss 计算
+        input_dtype = z_flatten_orig.dtype
+        emb_dtype = self.embeddings.weight.dtype
+        
+        # 将 z_flatten 转换为与 embeddings 相同的 dtype，避免 cdist dtype 不匹配
+        z_flatten = z_flatten_orig.to(emb_dtype)
         
         # 计算距离并找到最近的 codebook entry
         distances = torch.cdist(z_flatten, self.embeddings.weight)  # [N, num_embeddings]
@@ -211,28 +216,30 @@ class SparseVectorQuantizer(nn.Module):
             result = z.replace(encoding_indices.unsqueeze(-1).float())
             return result
         
-        # 量化
-        quantized_feats = self.embeddings(encoding_indices)  # [N, embedding_dim]
+        # 量化（embeddings 返回 emb_dtype）
+        quantized_feats = self.embeddings(encoding_indices)  # [N, embedding_dim]，dtype=emb_dtype
+        # 转回原始 dtype，保证后续 loss 和 straight-through 与 z_flatten_orig 一致
+        quantized_feats = quantized_feats.to(input_dtype)
         print(f"[DEBUG VQ] Quantized feats: min={quantized_feats.min().item():.6f}, max={quantized_feats.max().item():.6f}, mean={quantized_feats.mean().item():.6f}")
         
-        # 计算commitment loss（两种模式都需要）
-        commitment_loss = F.mse_loss(z_flatten, quantized_feats.detach())
+        # 计算commitment loss（两种模式都需要，均使用原始 dtype）
+        commitment_loss = F.mse_loss(z_flatten_orig, quantized_feats.detach())
         
         # 根据更新模式选择不同的处理方式
         if self.use_ema_update:
-            # EMA模式：在训练时调用EMA更新
+            # EMA模式：在训练时调用EMA更新（使用 emb_dtype 的 z_flatten）
             if self.training:
                 self._update_ema(encoding_indices, z_flatten)
             vq_loss = None  # EMA模式不需要vq_loss
             print(f"[DEBUG VQ] EMA mode - Commitment Loss: {commitment_loss.item():.6f}, VQ Loss: None")
         else:
             # 梯度模式：计算vq_loss用于反向传播
-            vq_loss = F.mse_loss(quantized_feats, z_flatten.detach())
+            vq_loss = F.mse_loss(quantized_feats, z_flatten_orig.detach())
             print(f"[DEBUG VQ] Gradient mode - VQ Loss: {vq_loss.item():.6f}, Commitment Loss: {commitment_loss.item():.6f}")
             print(f"[DEBUG VQ] VQ Loss requires_grad: {vq_loss.requires_grad}, Commitment Loss requires_grad: {commitment_loss.requires_grad}")
         
-        # Straight-through estimator
-        quantized_feats = z_flatten + (quantized_feats - z_flatten).detach()
+        # Straight-through estimator（均在原始 dtype 下执行）
+        quantized_feats = z_flatten_orig + (quantized_feats - z_flatten_orig).detach()
         
         # 创建新的 SparseTensor
         quantized = z.replace(quantized_feats)
