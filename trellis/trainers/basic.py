@@ -88,7 +88,8 @@ class BasicTrainer(Trainer):
                     device_ids=[self.local_rank],
                     output_device=self.local_rank,
                     bucket_cap_mb=128,
-                    find_unused_parameters=True
+                    find_unused_parameters=False,
+                    static_graph=True
                 )
                 for name, model in self.models.items()
             }
