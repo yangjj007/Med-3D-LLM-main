@@ -408,6 +408,8 @@ class SparseVectorQuantizer(nn.Module):
             z_flatten: encoder输出的特征向量 [N, embedding_dim]
         """
         print(f"[DEBUG EMA] === Starting EMA Update ===")
+        # EMA 统计全程在 float32 下进行，保证数值稳定；只在写回 embeddings.weight 时转换回原 dtype
+        z_flatten = z_flatten.float()
         print(f"[DEBUG EMA] Input z_flatten: shape={z_flatten.shape}, min={z_flatten.min().item():.6f}, max={z_flatten.max().item():.6f}, mean={z_flatten.mean().item():.6f}, std={z_flatten.std().item():.6f}")
         print(f"[DEBUG EMA] Encoding indices: shape={encoding_indices.shape}, unique codes={len(torch.unique(encoding_indices))}/{self.num_embeddings}")
         
@@ -458,13 +460,13 @@ class SparseVectorQuantizer(nn.Module):
         )
         print(f"[DEBUG EMA] Smoothed cluster size: min={smoothed_cluster_size.min().item():.6f}, max={smoothed_cluster_size.max().item():.6f}, mean={smoothed_cluster_size.mean():.6f}")
         
-        # 更新码本向量
-        # 对于使用过的码本（new_cluster_size > 0），用EMA更新
-        # 对于从未使用的码本（new_cluster_size == 0），保持初始值
-        new_embeddings = torch.zeros_like(self.embeddings.weight.data)
+        # 更新码本向量（在 float32 下计算，最后转回 embeddings 原有 dtype 再写回）
+        emb_dtype = self.embeddings.weight.data.dtype
+        new_embeddings = torch.zeros(self.num_embeddings, self.embedding_dim,
+                                     dtype=torch.float32, device=self.embeddings.weight.device)
         used_mask = new_cluster_size > 0
         new_embeddings[used_mask] = new_w[used_mask] / (smoothed_cluster_size[used_mask].unsqueeze(1) + 1e-7)
-        new_embeddings[~used_mask] = self.embeddings.weight.data[~used_mask]  # 保持未使用码本不变
+        new_embeddings[~used_mask] = self.embeddings.weight.data[~used_mask].float()  # 保持未使用码本不变
         
         print(f"[DEBUG EMA] NEW embeddings (all codes): min={new_embeddings.min().item():.6f}, max={new_embeddings.max().item():.6f}, mean={new_embeddings.mean().item():.6f}, std={new_embeddings.std().item():.6f}")
         print(f"[DEBUG EMA] Used codes: {used_mask.sum().item()}/{self.num_embeddings}, Unused codes: {(~used_mask).sum().item()}/{self.num_embeddings}")
@@ -474,9 +476,10 @@ class SparseVectorQuantizer(nn.Module):
         if len(updated_norms) > 0:
             print(f"[DEBUG EMA] Updated codes norms: min={updated_norms.min().item():.6f}, max={updated_norms.max().item():.6f}, mean={updated_norms.mean().item():.6f}")
         
-        self.embeddings.weight.data.copy_(new_embeddings)
+        # 写回 embeddings.weight，转换回原始 dtype（fp16 or fp32）
+        self.embeddings.weight.data.copy_(new_embeddings.to(emb_dtype))
         
-        # 更新buffer
+        # 更新buffer（buffer 本身是 float32，直接 copy）
         self.ema_cluster_size.copy_(new_cluster_size)
         self.ema_w.copy_(new_w)
         
