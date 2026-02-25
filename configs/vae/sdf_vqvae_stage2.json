@@ -21,7 +21,7 @@
                 "window_size": 8,
                 "pe_mode": "ape",
                 "use_fp16": false,
-                "use_checkpoint": false,
+                "use_checkpoint": true,
                 "qk_rms_norm": false,
                 "representation_config": null
             }
@@ -44,7 +44,7 @@
             "max_steps": 100000,
             "max_epoch": 1,
             "batch_size_per_gpu": 4,
-            "batch_split": 1,
+            "batch_split": 2,
             "disable_snapshot": false,
             "optimizer": {
                 "name": "AdamW",

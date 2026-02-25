@@ -167,15 +167,17 @@ class SparseSDFEncoder(SparseTransformerBase):
         print(f"[DEBUG Encoder.forward] After super().forward, h.feats.shape: {h.feats.shape}")
         print(f"[DEBUG Encoder.forward] After super().forward, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
         
-        h = h.type(dtype)
-        print(f"[DEBUG Encoder.forward] After type conversion, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}")
-        
+        # layer_norm 和 out_layer 都在 self.dtype (fp16) 下执行，避免类型不匹配
         h = h.replace(F.layer_norm(h.feats, h.feats.shape[-1:]))
         print(f"[DEBUG Encoder.forward] After layer_norm, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
         
         h = self.out_layer(h)
         print(f"[DEBUG Encoder.forward] After out_layer, h.feats.shape: {h.feats.shape}")
         print(f"[DEBUG Encoder.forward] After out_layer, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}, mean: {h.feats.mean().item():.6f}")
+        
+        # 最后才将结果转回原始 dtype (float32)
+        h = h.type(dtype)
+        print(f"[DEBUG Encoder.forward] After type conversion, h.feats min: {h.feats.min().item():.6f}, max: {h.feats.max().item():.6f}")
         
         # VQVAE: 分割成mean和logvar，但只返回mean（ShapeLLM方法）
         mean_feats, logvar_feats = torch.chunk(h.feats, 2, dim=-1)
