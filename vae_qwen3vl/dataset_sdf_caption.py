@@ -249,14 +249,17 @@ def collate_sdf_caption_discrete(
     _collate_t0 = time.time()
     vae_model = vae_model.to(device)
     vae_model.eval()
+    vae_dtype = next(vae_model.parameters()).dtype
     with torch.no_grad():
-        # 获取 VAE 模型的实际 dtype（bf16 混合精度下为 BFloat16）
-        _model_dtype = next(vae_model.parameters()).dtype
-        inputs_3d_device = {
-            k: v.to(device=device, dtype=_model_dtype) if isinstance(v, torch.Tensor) and v.is_floating_point()
-            else (v.to(device) if isinstance(v, torch.Tensor) else v)
-            for k, v in inputs_3d.items()
-        }
+        inputs_3d_device = {}
+        for k, v in inputs_3d.items():
+            if isinstance(v, torch.Tensor):
+                v = v.to(device)
+                if v.is_floating_point():
+                    v = v.to(dtype=vae_dtype)
+                inputs_3d_device[k] = v
+            else:
+                inputs_3d_device[k] = v
         encoding_indices = vae_model.Encode(inputs_3d_device)
     _t_vae = time.time()
     print(f"[DEBUG collate] VAE Encode took {_t_vae - _collate_t0:.3f}s", flush=True)
