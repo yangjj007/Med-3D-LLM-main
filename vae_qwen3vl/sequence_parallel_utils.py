@@ -23,9 +23,14 @@ def create_3d_mesh(
     world_size: Optional[int] = None,
 ):
     """
-    Create 3D DeviceMesh with dimensions (DP, TP, SP).
+    Create 3D DeviceMesh with dimensions (dp, sp, tp).
 
-    Order (dp, tp, sp) ensures ("dp", "tp") is contiguous for FSDP2+TP.
+    tp is the innermost (last) dimension, which is required by
+    ``parallelize_module``: "TP needs to be the innermost dimension on its
+    parent mesh."
+
+    Rank layout (C-order, tp fastest):
+        rank = dp * (sp_size * tp_size) + sp * tp_size + tp
 
     Returns:
         mesh_3d: Full 3D DeviceMesh
@@ -42,8 +47,8 @@ def create_3d_mesh(
         )
     mesh_3d = init_device_mesh(
         "cuda",
-        (dp_size, tp_size, sp_size),
-        mesh_dim_names=("dp", "tp", "sp"),
+        (dp_size, sp_size, tp_size),
+        mesh_dim_names=("dp", "sp", "tp"),
     )
     return mesh_3d, mesh_3d["dp"], mesh_3d["sp"], mesh_3d["tp"]
 

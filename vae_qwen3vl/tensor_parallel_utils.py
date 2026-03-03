@@ -63,17 +63,26 @@ def get_3d_mesh(
     world_size: Optional[int] = None,
 ):
     """
-    Create 3D device mesh (dp, tp, sp) for TP+SP hybrid.
+    Create 3D device mesh (dp, sp, tp) for TP+SP hybrid.
 
-    Dimension order (dp, tp, sp) is required for FSDP2+TP composition:
-    FSDP2 internally needs mesh[("dp", "tp")] for TP-parallelized layers.
-    ("dp", "tp") must be a contiguous subsequence of mesh_dim_names;
-    (dp, sp, tp) would make ("dp", "tp") invalid (sp in between).
+    Dimension order MUST be (dp, sp, tp) — tp innermost (last) — because
+    ``parallelize_module`` requires: "TP needs to be the innermost dimension
+    on its parent mesh."
 
-    Example: world_size=4, tp_size=2, sp_size=2 -> dp=1, mesh (1, 2, 2).
+    Note on FSDP2+TP composition:
+        FSDP2 also requires ("dp","tp") to be a *contiguous* subsequence of
+        the parent mesh dims when composing with TP.  With 3 dims this
+        conflicts: tp innermost → ("dp","tp") non-contiguous (sp is between).
+        Therefore, when SP is enabled, skip apply_fsdp2_dp() and use
+        register_dp_grad_hooks() for DP gradient synchronisation instead.
+
+    Rank layout (C-order, tp fastest):
+        rank = dp * (sp_size * tp_size) + sp * tp_size + tp
+
+    Example: world_size=8, tp_size=2, sp_size=2 → dp=2, mesh (2, 2, 2).
 
     Returns:
-        mesh_3d: Full 3D DeviceMesh (dp, tp, sp).
+        mesh_3d: Full 3D DeviceMesh (dp, sp, tp).
         dp_mesh, sp_mesh, tp_mesh: 1D sub-meshes.
     """
     from torch.distributed.device_mesh import init_device_mesh
@@ -85,11 +94,11 @@ def get_3d_mesh(
             f"world_size={world_size} must be divisible by tp_size*sp_size ({tp_size * sp_size})"
         )
     dp_size = world_size // (tp_size * sp_size)
-    # (dp, tp, sp) so that ("dp", "tp") is contiguous for FSDP2
+    # tp innermost (last dim) — required by parallelize_module
     mesh_3d = init_device_mesh(
         "cuda",
-        (dp_size, tp_size, sp_size),
-        mesh_dim_names=("dp", "tp", "sp"),
+        (dp_size, sp_size, tp_size),
+        mesh_dim_names=("dp", "sp", "tp"),
     )
     return mesh_3d, mesh_3d["dp"], mesh_3d["sp"], mesh_3d["tp"]
 
@@ -280,6 +289,68 @@ def apply_fsdp2_dp(
     print(
         f"[FSDP2] Data-parallel sharding applied: "
         f"{len(layers)} transformer layers + outer model wrapper.",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# DP gradient sync (used instead of FSDP2 when SP+TP are both active)
+# ---------------------------------------------------------------------------
+
+def register_dp_grad_hooks(model: nn.Module, dp_mesh) -> None:
+    """
+    Register per-parameter gradient hooks that all-reduce gradients across
+    the DP dimension.
+
+    Used when TP and SP are *both* active (3D mesh).  In that case FSDP2+TP
+    composition is not possible because the 3D mesh must be ordered
+    ("dp", "sp", "tp") for TP (innermost constraint), which makes ("dp","tp")
+    non-contiguous and breaks FSDP2's internal sub-mesh lookup.
+
+    For DTensor parameters (TP-sharded): all-reduces the local shard in-place
+    across dp ranks — each TP rank independently averages its own shard.
+    For regular parameters: all-reduces the full gradient across dp ranks.
+
+    Hooks fire on every ``backward()`` call, which is correct for gradient
+    accumulation: each micro-step's contribution is individually averaged,
+    and the results accumulate correctly.
+    """
+    try:
+        dp_group = dp_mesh.get_group()
+    except Exception:
+        dp_group = dp_mesh.get_group(mesh_dim=0)
+
+    if dp_group is None or dist.get_world_size(group=dp_group) <= 1:
+        print("[DP] dp_size=1, skipping gradient hook registration.", flush=True)
+        return
+
+    try:
+        from torch.distributed.tensor import DTensor as _DTensor
+    except ImportError:
+        _DTensor = None
+
+    n_hooked = 0
+    for param in model.parameters():
+        if not param.requires_grad:
+            continue
+
+        def _make_hook(grp, dtensor_cls):
+            def _hook(grad):
+                if grad is None:
+                    return grad
+                if dtensor_cls is not None and isinstance(grad, dtensor_cls):
+                    dist.all_reduce(grad._local_tensor, op=dist.ReduceOp.AVG, group=grp)
+                else:
+                    dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=grp)
+                return grad
+            return _hook
+
+        param.register_hook(_make_hook(dp_group, _DTensor))
+        n_hooked += 1
+
+    print(
+        f"[DP] Registered gradient hooks on {n_hooked} parameters "
+        f"for DP sync (dp_size={dp_mesh.size()}, no FSDP2).",
         flush=True,
     )
 
