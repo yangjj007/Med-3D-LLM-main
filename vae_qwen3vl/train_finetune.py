@@ -425,6 +425,11 @@ def main():
                 apply_tp_to_qwen3vl,
                 apply_fsdp2_dp,
             )
+            # FSDP2 要求所有参数具有统一的 dtype，否则会触发:
+            # AssertionError: FSDP expects uniform original parameter dtype but got {torch.bfloat16, torch.float32}
+            # vl_model 为 bfloat16，但 projector、vae_model、LoRA 可能为 float32，需统一。
+            target_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+            model = model.to(target_dtype)
             # In SFT+LoRA: LoRA wraps attention projections (q/k/v/o_proj).
             # Applying DTensor ColwiseParallel on top of peft LoRA layers causes
             # input-sharding mismatches in lora_A/B compute → skip attention TP.
