@@ -14,7 +14,6 @@ import os
 import json
 import random
 import time
-from contextlib import nullcontext
 import numpy as np
 import pandas as pd
 import torch
@@ -248,32 +247,22 @@ def collate_sdf_caption_discrete(
 
     # VAE Encode (no grad)
     _collate_t0 = time.time()
+    # torchsparse convolution path expects float32; enforce fp32 for VAE encode.
     vae_model = vae_model.to(device)
+    if next(vae_model.parameters()).dtype != torch.float32:
+        vae_model = vae_model.float()
     vae_model.eval()
-    vae_dtype = next(vae_model.parameters()).dtype
     with torch.no_grad():
         inputs_3d_device = {}
         for k, v in inputs_3d.items():
             if isinstance(v, torch.Tensor):
                 v = v.to(device)
                 if v.is_floating_point():
-                    v = v.to(dtype=vae_dtype)
+                    v = v.to(dtype=torch.float32)
                 inputs_3d_device[k] = v
             else:
                 inputs_3d_device[k] = v
-        # Encode 内部会构造新的稀疏特征，开启 autocast 以避免 Float/BFloat16 不一致。
-        use_autocast = (
-            torch.cuda.is_available()
-            and str(device).startswith("cuda")
-            and vae_dtype in (torch.float16, torch.bfloat16)
-        )
-        autocast_ctx = (
-            torch.autocast(device_type="cuda", dtype=vae_dtype)
-            if use_autocast
-            else nullcontext()
-        )
-        with autocast_ctx:
-            encoding_indices = vae_model.Encode(inputs_3d_device)
+        encoding_indices = vae_model.Encode(inputs_3d_device)
     _t_vae = time.time()
     print(f"[DEBUG collate] VAE Encode took {_t_vae - _collate_t0:.3f}s", flush=True)
 
