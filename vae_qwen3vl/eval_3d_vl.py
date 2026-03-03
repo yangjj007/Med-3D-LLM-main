@@ -16,8 +16,8 @@ import argparse
 import os
 import re
 
-# 确保 3D-VL 评估使用 spconv（新终端直接 python 运行时不会走 shell 脚本的 export）
-os.environ.setdefault("SPARSE_BACKEND", "spconv")
+# 确保 3D-VL 评估使用 torchsparse（新终端直接 python 运行时不会走 shell 脚本的 export）
+os.environ.setdefault("SPARSE_BACKEND", "torchsparse")
 
 import sys
 import json

@@ -19,7 +19,7 @@ import os
 import re
 import sys
 
-os.environ.setdefault("SPARSE_BACKEND", "spconv")
+os.environ.setdefault("SPARSE_BACKEND", "torchsparse")
 
 import numpy as np
 import torch

@@ -1,7 +1,18 @@
-# 3D-VL 变长 3D Token 训练（Variable-Length）
-# 保留 VAE 全部点（约 8k~12k），Morton 排序 + 动态 padding，软上限 15000。
-# 建议：batch_size=1 + gradient_accumulation_steps 4~8，开启 use_flash_attn_2、use_gradient_checkpointing。
-# 启动：export SPARSE_BACKEND=spconv && python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml
+# 3D-VL 变长 3D Token 训练（Variable-Length）+ 张量并行（Tensor Parallel）
+#
+# 改造说明：
+#   - 从 Accelerate+DeepSpeed ZeRO-2 迁移到 PyTorch DTensor TP=2 + FSDP2 DP=2
+#   - TP=2 将每个 transformer 层的注意力头数和 MLP 宽度各拆一半到两块 GPU
+#   - FSDP2 在 DP 维度做参数分片，替代 ZeRO-2
+#   - GC 不再受 warmup+DeepSpeed 兼容性 bug 影响，无条件启用
+#
+# 启动方式（4 卡）：
+#   export SPARSE_BACKEND=torchsparse
+#   torchrun --nproc_per_node=4 vae_qwen3vl/train_finetune.py \
+#       --config configs/3d_align_train_variable_length.yaml \
+#       > align_debug.log 2>&1
+#
+# 或：python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml
 
 # === 路径（请按本机路径修改）===
 vl_model: "/yangjunjie/model_qwen3vl_2B"
@@ -19,11 +30,18 @@ max_length_variable: 32768
 reconstruction_ratio: 0.0
 training_stage: "warmup"
 
-# === 显存与 batch（变长序列长，建议单卡 bs=1 + 梯度累积）===
+# === 张量并行配置 ===
+# Qwen3-VL 2B GQA 有 2 个 KV 头，因此最大 TP 度为 2。
+# 4 卡：TP=2 + DP=2（两个 TP 组各含 2 块 GPU，组内参数并行，组间数据并行）
+tensor_parallel_size: 2
+
+# === 显存与 batch ===
+# TP=2 + FSDP2 约降低每卡峰值激活内存 2 倍，加上 GC 后可承受更长序列。
+# gradient_accumulation_steps 等效 global batch = DP=2 × bs=1 × accum=8 = 16
 batch_size: 1
 gradient_accumulation_steps: 8
 use_flash_attn_2: true
-use_gradient_checkpointing: true   # 关闭试试能否加速（以显存换时间）
+use_gradient_checkpointing: true   # TP 模式下 GC 无条件生效（无 DeepSpeed 兼容性 bug）
 
 # === 训练参数 ===
 lr: 1.0e-4
@@ -50,8 +68,9 @@ dummy_data: false
 dummy_samples: 50
 data_format: "sdf_caption"
 
-# === Accelerate（可多卡 + DeepSpeed 降显存）===
-use_deepspeed: true        # 变长序列显存大，建议开启 ZeRO-2 分片
+# === Accelerate（legacy，tensor_parallel_size>1 时不生效）===
+# 保留此节供 tensor_parallel_size=1 的单卡/DDP fallback 使用。
+use_deepspeed: false       # TP+FSDP2 取代 DeepSpeed；如需 fallback 可改回 true
 accelerate:
   compute_environment: LOCAL_MACHINE
   debug: false
@@ -63,7 +82,7 @@ accelerate:
   main_training_function: main
   mixed_precision: bf16
   num_machines: 1
-  num_processes: 4          # 多卡时改为 GPU 数，配合 use_deepspeed 降低每卡显存
+  num_processes: 4
   rdzv_backend: static
   same_network: true
   tpu_env: []

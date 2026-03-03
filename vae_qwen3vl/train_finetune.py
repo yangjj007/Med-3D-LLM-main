@@ -8,16 +8,19 @@ import argparse
 import os
 import time
 
-# 确保 3D-VL 训练使用 spconv（新终端直接 python 运行时不会走 shell 脚本的 export）
-os.environ.setdefault("SPARSE_BACKEND", "spconv")
+# 确保 3D-VL 训练使用 torchsparse（新终端直接 python 运行时不会走 shell 脚本的 export）
+os.environ.setdefault("SPARSE_BACKEND", "torchsparse")
 
 import sys
 import json
 from datetime import datetime
 
+import contextlib
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 # Add project root for trellis
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -237,6 +240,10 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation (recommend 4~8 for variable-length with batch_size=1)")
     parser.add_argument("--use_flash_attn_2", action="store_true", help="Use Flash Attention 2 for long sequences (variable-length)")
     parser.add_argument("--use_gradient_checkpointing", action="store_true", help="Gradient checkpointing to save VRAM (variable-length)")
+    parser.add_argument("--tensor_parallel_size", type=int, default=1,
+                        help="Tensor parallel degree (1=disabled; 2=TP+FSDP2 2D parallel). "
+                             "For Qwen3-VL 2B with GQA (2 KV heads) max is 2. "
+                             "With 4 GPUs: tp=2 gives TP=2 + DP=2.")
     args, remaining = parser.parse_known_args()
     known_keys = {a.dest for a in parser._actions if a.dest != "help"}
     if args.config and os.path.isfile(args.config):
@@ -247,19 +254,63 @@ def main():
     else:
         args = parser.parse_args(remaining if remaining else [])
 
-    accelerator = Accelerator(
-        gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
-        mixed_precision="bf16" if torch.cuda.is_available() else "no",
-    ) if ACCELERATE_AVAILABLE else None
-    device = accelerator.device if accelerator is not None else (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
-    if accelerator is not None:
-        set_seed(42)
-        accelerator.print(f"Accelerate: {accelerator.num_processes} processes, device={device}")
+    # -----------------------------------------------------------------------
+    # Distributed setup: TP+FSDP2 path vs. legacy Accelerate path
+    # -----------------------------------------------------------------------
+    tp_size = getattr(args, "tensor_parallel_size", 1)
+    use_tp = tp_size > 1
+    tp_mesh = None
+    dp_mesh = None
+    mesh_2d = None
+
+    if use_tp:
+        # Native torch.distributed init (torchrun sets LOCAL_RANK / RANK / WORLD_SIZE)
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        world_size = dist.get_world_size()
+        global_rank = dist.get_rank()
+        is_main_process = (global_rank == 0)
+
+        from torch.distributed.device_mesh import init_device_mesh
+        dp_size = world_size // tp_size
+        if world_size % tp_size != 0:
+            raise ValueError(
+                f"world_size={world_size} must be divisible by "
+                f"tensor_parallel_size={tp_size}"
+            )
+        mesh_2d = init_device_mesh(
+            "cuda", (dp_size, tp_size), mesh_dim_names=("dp", "tp")
+        )
+        dp_mesh = mesh_2d["dp"]
+        tp_mesh = mesh_2d["tp"]
+        accelerator = None
+        torch.manual_seed(42)
+        if is_main_process:
+            print(
+                f"[TP] world_size={world_size} tp_size={tp_size} dp_size={dp_size} "
+                f"global_rank={global_rank} local_rank={local_rank}",
+                flush=True,
+            )
+    else:
+        accelerator = Accelerator(
+            gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
+            mixed_precision="bf16" if torch.cuda.is_available() else "no",
+        ) if ACCELERATE_AVAILABLE else None
+        device = accelerator.device if accelerator is not None else (
+            torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        )
+        is_main_process = (accelerator is None or accelerator.is_main_process)
+        if accelerator is not None:
+            set_seed(42)
+            accelerator.print(f"Accelerate: {accelerator.num_processes} processes, device={device}")
 
     output_base = args.output_dir or os.path.join(PROJECT_ROOT, "outputs_3d_align")
     args.output_dir = os.path.join(output_base, _make_output_subdir(args))
-    if accelerator is None or accelerator.is_main_process:
-        (accelerator.print if accelerator else print)(f"Output dir: {args.output_dir}")
+    if is_main_process:
+        print(f"Output dir: {args.output_dir}", flush=True)
     os.makedirs(args.output_dir, exist_ok=True)
 
     rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", 0)))
@@ -269,8 +320,8 @@ def main():
     _orig_stdout = sys.stdout
     _log_tee = _training_log_stream(log_path, _orig_stdout, echo_to_console=(rank == 0))
     sys.stdout = _log_tee
-    if accelerator is None or accelerator.is_main_process:
-        (accelerator.print if accelerator else print)(f"[Train] Full log -> {log_path}")
+    if is_main_process:
+        print(f"[Train] Full log -> {log_path}", flush=True)
 
     metrics_file = None
     use_discrete = getattr(args, "use_discrete_3d_tokens", False)
@@ -304,20 +355,24 @@ def main():
         )
         model = model.to(device)
         use_gc = bool(getattr(args, "use_gradient_checkpointing", False))
-        is_deepspeed = bool(
-            accelerator is not None
-            and getattr(accelerator.state, "distributed_type", None) == DistributedType.DEEPSPEED
-        )
-        if use_gc and training_stage == "warmup" and is_deepspeed:
-            # DeepSpeed ZeRO-2 + warmup(仅少量参数可训练) 与 gradient checkpointing 组合下，
-            # 部分版本会在 backward 统计参数时触发 NoneType.next_functions 异常。
-            (accelerator.print if accelerator else print)(
-                "[Warn] Disable gradient checkpointing for warmup+DeepSpeed to avoid backward hook error."
+        if not use_tp:
+            # Legacy Accelerate/DeepSpeed path: disable GC when warmup+DeepSpeed to
+            # avoid NoneType.next_functions backward hook error in ZeRO-2.
+            is_deepspeed = bool(
+                accelerator is not None
+                and getattr(accelerator.state, "distributed_type", None) == DistributedType.DEEPSPEED
             )
-            use_gc = False
+            if use_gc and training_stage == "warmup" and is_deepspeed:
+                print(
+                    "[Warn] Disable gradient checkpointing for warmup+DeepSpeed "
+                    "to avoid backward hook error.", flush=True
+                )
+                use_gc = False
+        # TP mode: no DeepSpeed, GC is always safe — apply unconditionally.
+        # GC must be enabled BEFORE FSDP2 wrapping so FSDP2 tracks recompute boundaries.
         if use_gc and hasattr(model.vl_model, "gradient_checkpointing_enable"):
             model.vl_model.gradient_checkpointing_enable()
-            # HF 模型在 gradient checkpointing 下常需该开关，确保可训练参数可正确参与反传。
+            # Required for HF models under GC so trainable params backprop correctly.
             if hasattr(model.vl_model, "enable_input_require_grads"):
                 model.vl_model.enable_input_require_grads()
         if use_discrete:
@@ -358,9 +413,30 @@ def main():
                     if "lora" in name:
                         p.requires_grad = True
                 use_lora_applied = True
-                (accelerator.print if accelerator else print)("LoRA applied successfully.")
+                print("LoRA applied successfully.", flush=True)
             except ImportError:
-                (accelerator.print if accelerator else print)("peft not installed; skipping LoRA")
+                print("peft not installed; skipping LoRA", flush=True)
+
+        # -------------------------------------------------------------------
+        # Tensor Parallelism + FSDP2 setup (TP mode only)
+        # -------------------------------------------------------------------
+        if use_tp:
+            from vae_qwen3vl.tensor_parallel_utils import (
+                apply_tp_to_qwen3vl,
+                apply_fsdp2_dp,
+            )
+            # In SFT+LoRA: LoRA wraps attention projections (q/k/v/o_proj).
+            # Applying DTensor ColwiseParallel on top of peft LoRA layers causes
+            # input-sharding mismatches in lora_A/B compute → skip attention TP.
+            # MLP layers (gate/up/down_proj) are unmodified → always apply TP.
+            apply_attn_tp = not use_lora_applied
+            apply_tp_to_qwen3vl(
+                model.vl_model,
+                tp_mesh,
+                apply_to_attention=apply_attn_tp,
+                apply_to_mlp=True,
+            )
+            apply_fsdp2_dp(model, dp_mesh)
 
         opt = torch.optim.AdamW(
             [p for p in model.parameters() if p.requires_grad],
@@ -374,12 +450,27 @@ def main():
                 max_3d_tokens=min(256, args.max_3d_tokens),
                 latent_dim=latent_dim,
             )
-            dataloader = DataLoader(
-                dataset,
-                batch_size=args.batch_size,
-                shuffle=True,
-                collate_fn=lambda b: collate_3d_text(b, latent_dim=latent_dim),
-            )
+            if use_tp:
+                _sampler = DistributedSampler(
+                    dataset,
+                    num_replicas=dp_mesh.size(),
+                    rank=dp_mesh.get_local_rank(),
+                    shuffle=True,
+                    drop_last=True,
+                )
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=args.batch_size,
+                    sampler=_sampler,
+                    collate_fn=lambda b: collate_3d_text(b, latent_dim=latent_dim),
+                )
+            else:
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=args.batch_size,
+                    shuffle=True,
+                    collate_fn=lambda b: collate_3d_text(b, latent_dim=latent_dim),
+                )
         elif args.data_dir:
             from vae_qwen3vl.dataset_sdf_caption import (
                 SDF3DCaptionDataset,
@@ -415,19 +506,38 @@ def main():
                 )
             else:
                 collate_fn = lambda b: collate_sdf_caption(b, tokenizer, prompt=args.prompt, max_length=256)
-            dataloader = DataLoader(
-                dataset,
-                batch_size=args.batch_size,
-                shuffle=True,
-                collate_fn=collate_fn,
-                num_workers=0,
-            )
+            if use_tp:
+                # TP mode: shard data across DP ranks only (TP-group peers see same data)
+                dp_rank = dp_mesh.get_local_rank()
+                dp_world = dp_mesh.size()
+                _sampler = DistributedSampler(
+                    dataset,
+                    num_replicas=dp_world,
+                    rank=dp_rank,
+                    shuffle=True,
+                    drop_last=True,
+                )
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=args.batch_size,
+                    sampler=_sampler,
+                    collate_fn=collate_fn,
+                    num_workers=0,
+                )
+            else:
+                dataloader = DataLoader(
+                    dataset,
+                    batch_size=args.batch_size,
+                    shuffle=True,
+                    collate_fn=collate_fn,
+                    num_workers=0,
+                )
         else:
             if use_discrete:
                 raise ValueError("Discrete 3D token mode requires --data_dir (no dummy_data path).")
             raise ValueError("Provide --dummy_data or --data_dir. Use --dummy_data for a quick test.")
 
-        if accelerator is not None:
+        if not use_tp and accelerator is not None:
             model, opt, dataloader = accelerator.prepare(model, opt, dataloader)
 
         # LR scheduler (cosine with warmup)
@@ -440,106 +550,191 @@ def main():
                 scheduler = get_cosine_schedule_with_warmup(
                     opt, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps
                 )
-                if accelerator is not None:
+                if not use_tp and accelerator is not None:
                     scheduler = accelerator.prepare(scheduler)
-                _pr = accelerator.print if accelerator is not None else print
-                _pr(f"LR scheduler: cosine, warmup {num_warmup_steps} / {num_training_steps} steps")
+                if is_main_process:
+                    print(f"LR scheduler: cosine, warmup {num_warmup_steps} / {num_training_steps} steps", flush=True)
             except ImportError:
                 pass
 
-        _print = accelerator.print if accelerator is not None else print
+        def _print(*a, **kw):
+            if is_main_process:
+                print(*a, **kw)
+
+        def _barrier():
+            if use_tp:
+                dist.barrier()
+            elif accelerator is not None:
+                accelerator.wait_for_everyone()
+
+        grad_accum_steps = getattr(args, "gradient_accumulation_steps", 1)
         model.train()
-        # 多卡时 model 被 DDP 包装，需用 .module 调用自定义方法 forward_with_3d
+        # FSDP2 does not add a .module wrapper; DDP (Accelerate) does.
+        # Use getattr fallback so both paths work.
         _model = getattr(model, "module", model)
         global_step = 0
         # 训练指标记录（仅 main process），用于可视化
         metrics_path = os.path.join(args.output_dir, "training_metrics.jsonl")
-        metrics_file = open(metrics_path, "w", encoding="utf-8") if (accelerator is None or accelerator.is_main_process) else None
+        metrics_file = open(metrics_path, "w", encoding="utf-8") if is_main_process else None
+        grad_clip = getattr(args, "grad_clip", 0.0)
+        _accum_loss = 0.0  # accumulates loss for logging averaged over accum window
+        _accum_count = 0
+        opt.zero_grad()  # zero once before the accumulation loop
+
         for epoch in range(args.epochs):
             _epoch_t0 = time.time()
+            # Update DistributedSampler epoch so shuffle is different each epoch
+            if use_tp and hasattr(dataloader, "sampler") and hasattr(dataloader.sampler, "set_epoch"):
+                dataloader.sampler.set_epoch(epoch)
+
             for step, batch in enumerate(dataloader):
                 _step_t0 = time.time()
                 batch = {k: _to_device(v, device) for k, v in batch.items()}
                 _t_data = time.time()
                 use_inputs_3d = "inputs_3d" in batch and batch["inputs_3d"] is not None
-                if use_discrete or not use_inputs_3d:
-                    outputs = _model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch.get("attention_mask"),
-                        labels=batch["labels"],
-                    )
-                elif use_inputs_3d:
-                    outputs = _model.forward_with_3d(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        labels=batch["labels"],
-                        inputs_3d=batch["inputs_3d"],
-                    )
+
+                # BF16 autocast:
+                #   TP path: explicit torch.autocast required (no Accelerate wrapper)
+                #   Accelerate path: Accelerate applies mixed_precision="bf16" internally,
+                #                    but an extra autocast doesn't hurt correctness
+                #   CPU path: no-op (nullcontext)
+                if torch.cuda.is_available():
+                    _ctx = torch.autocast("cuda", dtype=torch.bfloat16)
                 else:
-                    outputs = _model.forward_with_3d(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        labels=batch["labels"],
-                        feats_3d=batch["feats_3d"],
-                        coords_3d=batch["coords_3d"],
-                    )
+                    _ctx = contextlib.nullcontext()
+                with _ctx:
+                    if use_discrete or not use_inputs_3d:
+                        outputs = _model(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch.get("attention_mask"),
+                            labels=batch["labels"],
+                        )
+                    elif use_inputs_3d:
+                        outputs = _model.forward_with_3d(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                            labels=batch["labels"],
+                            inputs_3d=batch["inputs_3d"],
+                        )
+                    else:
+                        outputs = _model.forward_with_3d(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                            labels=batch["labels"],
+                            feats_3d=batch["feats_3d"],
+                            coords_3d=batch["coords_3d"],
+                        )
+
                 _t_fwd = time.time()
                 loss = getattr(outputs, "loss", None) or outputs.get("loss")
-                opt.zero_grad()
-                if accelerator is not None:
-                    accelerator.backward(loss)
+                # Scale loss for gradient accumulation
+                scaled_loss = loss / grad_accum_steps
+
+                if use_tp:
+                    scaled_loss.backward()
+                elif accelerator is not None:
+                    accelerator.backward(scaled_loss)
                 else:
-                    loss.backward()
+                    scaled_loss.backward()
+
                 _t_bwd = time.time()
-                grad_clip = getattr(args, "grad_clip", 0.0)
-                if grad_clip > 0:
-                    if accelerator is not None:
-                        accelerator.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-                    else:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
-                opt.step()
-                if scheduler is not None:
-                    scheduler.step()
-                _t_opt = time.time()
-                global_step += 1
-                if metrics_file is not None:
-                    lr = opt.param_groups[0]["lr"] if opt.param_groups else 0.0
-                    metrics_file.write(json.dumps({"step": global_step, "epoch": epoch, "loss": round(loss.item(), 6), "lr": lr}) + "\n")
-                    metrics_file.flush()
-                if step % 10 == 0:
-                    _print(f"Epoch {epoch} step {step} loss {loss.item():.4f}")
-                if step < 5 or step % 50 == 0:
-                    _print(f"[DEBUG step] ep={epoch} step={step} "
-                           f"data={_t_data-_step_t0:.2f}s fwd={_t_fwd-_t_data:.2f}s "
-                           f"bwd={_t_bwd-_t_fwd:.2f}s opt={_t_opt-_t_bwd:.2f}s "
-                           f"total={_t_opt-_step_t0:.2f}s")
-            raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
-            if accelerator is None or accelerator.is_main_process:
-                if raw_model.projector is not None:
-                    ckpt_path = os.path.join(args.output_dir, f"projector_epoch{epoch}.pt")
-                    torch.save(raw_model.projector.state_dict(), ckpt_path)
-                    _print(f"Saved {ckpt_path}")
-                if use_discrete:
+                _accum_loss += loss.detach().float().item()
+                _accum_count += 1
+
+                is_last_accum = (_accum_count % grad_accum_steps == 0) or (step == len(dataloader) - 1)
+                if is_last_accum:
+                    if grad_clip > 0:
+                        if use_tp:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                        elif accelerator is not None:
+                            accelerator.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                    opt.step()
+                    if scheduler is not None:
+                        scheduler.step()
+                    opt.zero_grad()
+                    global_step += 1
+                    _t_opt = time.time()
+
+                    avg_loss = _accum_loss / _accum_count
+                    _accum_loss = 0.0
+                    _accum_count = 0
+
+                    if metrics_file is not None:
+                        lr = opt.param_groups[0]["lr"] if opt.param_groups else 0.0
+                        metrics_file.write(
+                            json.dumps({
+                                "step": global_step, "epoch": epoch,
+                                "loss": round(avg_loss, 6), "lr": lr,
+                            }) + "\n"
+                        )
+                        metrics_file.flush()
+                    if global_step % 10 == 0:
+                        _print(f"Epoch {epoch} step {step} global_step {global_step} loss {avg_loss:.4f}")
+                    if step < 5 or global_step % 50 == 0:
+                        _print(
+                            f"[DEBUG step] ep={epoch} step={step} gs={global_step} "
+                            f"data={_t_data-_step_t0:.2f}s fwd={_t_fwd-_t_data:.2f}s "
+                            f"bwd={_t_bwd-_t_fwd:.2f}s opt={_t_opt-_t_bwd:.2f}s "
+                            f"total={_t_opt-_step_t0:.2f}s"
+                        )
+
+            # --- End-of-epoch checkpoint ---
+            _barrier()
+            ckpt_path = os.path.join(args.output_dir, f"projector_epoch{epoch}.pt")
+            if use_tp:
+                from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp
+                if _model.projector is not None:
+                    save_projector_tp(model, ckpt_path, is_main=is_main_process)
+                if use_discrete and is_main_process:
                     tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
                     tokenizer.save_pretrained(tok_path)
                     _print(f"Saved tokenizer to {tok_path}")
                 if use_lora_applied:
                     lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
-                    raw_model.vl_model.save_pretrained(lora_dir)
+                    save_lora_tp(model, lora_dir, is_main=is_main_process)
                     _print(f"Saved LoRA to {lora_dir}")
-            if accelerator is not None:
-                accelerator.wait_for_everyone()
+            else:
+                raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
+                if is_main_process:
+                    if raw_model.projector is not None:
+                        torch.save(raw_model.projector.state_dict(), ckpt_path)
+                        _print(f"Saved {ckpt_path}")
+                    if use_discrete:
+                        tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
+                        tokenizer.save_pretrained(tok_path)
+                        _print(f"Saved tokenizer to {tok_path}")
+                    if use_lora_applied:
+                        lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
+                        raw_model.vl_model.save_pretrained(lora_dir)
+                        _print(f"Saved LoRA to {lora_dir}")
+            _barrier()
 
-        raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
-        if accelerator is None or accelerator.is_main_process:
-            if raw_model.projector is not None:
-                torch.save(raw_model.projector.state_dict(), os.path.join(args.output_dir, "projector_final.pt"))
-            if use_discrete:
+        # --- Final checkpoint ---
+        _barrier()
+        final_proj_path = os.path.join(args.output_dir, "projector_final.pt")
+        if use_tp:
+            from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp
+            if _model.projector is not None:
+                save_projector_tp(model, final_proj_path, is_main=is_main_process)
+            if use_discrete and is_main_process:
                 tokenizer.save_pretrained(os.path.join(args.output_dir, "tokenizer_final"))
             if use_lora_applied:
-                lora_final_dir = os.path.join(args.output_dir, "lora_final")
-                raw_model.vl_model.save_pretrained(lora_final_dir)
-                _print(f"Saved LoRA final to {lora_final_dir}")
+                save_lora_tp(model, os.path.join(args.output_dir, "lora_final"), is_main=is_main_process)
+                _print("Saved LoRA final.")
+        else:
+            raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
+            if is_main_process:
+                if raw_model.projector is not None:
+                    torch.save(raw_model.projector.state_dict(), final_proj_path)
+                if use_discrete:
+                    tokenizer.save_pretrained(os.path.join(args.output_dir, "tokenizer_final"))
+                if use_lora_applied:
+                    lora_final_dir = os.path.join(args.output_dir, "lora_final")
+                    raw_model.vl_model.save_pretrained(lora_final_dir)
+                    _print(f"Saved LoRA final to {lora_final_dir}")
+        if is_main_process:
             with open(os.path.join(args.output_dir, "train_args.json"), "w") as f:
                 json.dump(vars(args), f, indent=2)
             _print("Done.")

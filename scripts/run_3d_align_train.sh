@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 PROJECT_ROOT=$(pwd)
 
 CONFIG="${1:-${PROJECT_ROOT}/configs/3d_align_train.yaml}"
-export SPARSE_BACKEND=spconv
+export SPARSE_BACKEND=torchsparse
 
 echo "=== 3D-VL 对齐训练 ==="
 echo "Config: $CONFIG"
