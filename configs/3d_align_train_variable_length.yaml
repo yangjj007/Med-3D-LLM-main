@@ -13,7 +13,7 @@ output_dir: "outputs_3d_align"
 # === 离散 + 变长 3D ===
 use_discrete_3d_tokens: true
 use_variable_length_3d_tokens: true
-max_safe_3d_length: 15000
+max_safe_3d_length: 30000
 coord_max_3d: 64
 max_length_variable: 32768
 reconstruction_ratio: 0.0
@@ -26,7 +26,7 @@ use_flash_attn_2: true
 use_gradient_checkpointing: true   # 关闭试试能否加速（以显存换时间）
 
 # === 训练参数 ===
-lr: 1.0e-4
+lr: 1.0e-4S
 epochs: 2
 max_3d_tokens: 512
 truncate_mode: "head"

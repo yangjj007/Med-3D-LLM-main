@@ -6,6 +6,7 @@ Variable-length 3D tokenization: use all VAE output points (no grid pooling).
 """
 
 from typing import List, Optional, Tuple
+import time
 import numpy as np
 import torch
 
@@ -14,29 +15,24 @@ import torch
 DEFAULT_MAX_SAFE_LENGTH = 15000
 
 
-def _morton_code_3d(x: int, y: int, z: int, bits: int = 10) -> int:
-    """Compute Morton (Z-order) code for (x, y, z), each in [0, 2^bits - 1]."""
-    code = 0
-    for i in range(bits):
-        code |= ((x >> i) & 1) << (3 * i)
-        code |= ((y >> i) & 1) << (3 * i + 1)
-        code |= ((z >> i) & 1) << (3 * i + 2)
-    return code
-
-
 def morton_sort_indices(coords_xyz: np.ndarray, coord_max: int = 512) -> np.ndarray:
     """
     Return permutation indices that sort points by Morton (Z-order) curve.
-    coords_xyz: [N, 3] int, (x, y, z). coord_max: max coordinate value (e.g. 512 or 8).
+    Vectorized: no per-point Python loop.
+    coords_xyz: [N, 3] int, (x, y, z). coord_max: max coordinate value (e.g. 512 or 64).
     """
     n = coords_xyz.shape[0]
     if n == 0:
         return np.array([], dtype=np.int64)
     bits = max(1, int(np.ceil(np.log2(coord_max + 1))))
+    x = coords_xyz[:, 0].astype(np.int64)
+    y = coords_xyz[:, 1].astype(np.int64)
+    z = coords_xyz[:, 2].astype(np.int64)
     codes = np.zeros(n, dtype=np.int64)
-    for i in range(n):
-        x, y, z = int(coords_xyz[i, 0]), int(coords_xyz[i, 1]), int(coords_xyz[i, 2])
-        codes[i] = _morton_code_3d(x, y, z, bits)
+    for i in range(bits):
+        codes |= ((x >> i) & 1) << (3 * i)
+        codes |= ((y >> i) & 1) << (3 * i + 1)
+        codes |= ((z >> i) & 1) << (3 * i + 2)
     return np.argsort(codes)
 
 
@@ -46,7 +42,8 @@ def fps_downsample_indices(
     start_idx: Optional[int] = None,
 ) -> torch.Tensor:
     """
-    Farthest Point Sampling: return indices of num_sample points.
+    Farthest Point Sampling with incremental min-distance tracking.
+    O(N * num_sample) instead of O(N * num_sample^2).
     coords_xyz: [N, 3]. Returns long tensor of shape [num_sample].
     """
     N = coords_xyz.shape[0]
@@ -54,16 +51,18 @@ def fps_downsample_indices(
         return torch.arange(N, device=coords_xyz.device, dtype=torch.long)
     if start_idx is None:
         start_idx = 0
-    selected = [start_idx]
     pts = coords_xyz.float()
-    for _ in range(num_sample - 1):
-        # [N, 3] vs [len(selected), 3] -> min dist [N]
-        chosen = pts[selected]
-        dists = torch.cdist(pts, chosen).min(dim=1).values
-        # Farthest from current set
-        next_idx = dists.argmax().item()
-        selected.append(next_idx)
-    return torch.tensor(selected, device=coords_xyz.device, dtype=torch.long)
+    selected = torch.zeros(num_sample, dtype=torch.long, device=pts.device)
+    selected[0] = start_idx
+    min_dists = torch.full((N,), float("inf"), device=pts.device)
+
+    for i in range(1, num_sample):
+        last_pt = pts[selected[i - 1]].unsqueeze(0)          # [1, 3]
+        dists_to_last = ((pts - last_pt) ** 2).sum(dim=1)     # [N]
+        min_dists = torch.minimum(min_dists, dists_to_last)
+        selected[i] = min_dists.argmax()
+
+    return selected
 
 
 def encoding_indices_to_variable_length_sequence(
@@ -102,16 +101,21 @@ def encoding_indices_to_variable_length_sequence(
     xyz_b = coords[mask][:, 1:4]
 
     N = idx_b.shape[0]
+    print(f"[DEBUG varlen] batch_idx={batch_idx} N={N} (max_safe={max_safe_length})", flush=True)
     if N > max_safe_length:
+        t0 = time.time()
         xyz_cpu = xyz_b.cpu().float()
         fps_idx = fps_downsample_indices(xyz_cpu, max_safe_length)
         idx_b = idx_b[fps_idx]
         xyz_b = xyz_b[fps_idx]
         N = idx_b.shape[0]
+        print(f"[DEBUG varlen]   FPS {N} -> {max_safe_length} took {time.time()-t0:.2f}s", flush=True)
 
+    t0 = time.time()
     xyz_np = xyz_b.cpu().numpy().astype(np.int64)
     order = morton_sort_indices(xyz_np, coord_max=coord_max)
     idx_np = idx_b.cpu().numpy()
+    print(f"[DEBUG varlen]   Morton sort {N} pts took {time.time()-t0:.3f}s", flush=True)
     return idx_np[order]
 
 

@@ -123,8 +123,10 @@ python train.py \
 export ATTN_BACKEND=xformers
 python train.py \
     --config configs/vae/sdf_vqvae_stage2.json \
-    --output_dir outputs/sdf_vqvae_stage2_512_0.5 \
+    --output_dir outputs/sdf_vqvae_stage2_512_0.5-amp \
     --data_dir ./train_sdf_dataset/res512_thre0.5/ \
+    --load_dir outputs/sdf_vqvae_stage2_512_0.5-amp \
+    --ckpt latest \
     --num_gpus 4 2>&1 | tee train2.log
 ```
 

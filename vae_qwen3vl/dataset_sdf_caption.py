@@ -13,6 +13,7 @@ Discrete-token path: use collate_sdf_caption_discrete with vae_model to produce
 import os
 import json
 import random
+import time
 import numpy as np
 import pandas as pd
 import torch
@@ -245,6 +246,7 @@ def collate_sdf_caption_discrete(
     }
 
     # VAE Encode (no grad)
+    _collate_t0 = time.time()
     vae_model = vae_model.to(device)
     vae_model.eval()
     with torch.no_grad():
@@ -253,6 +255,8 @@ def collate_sdf_caption_discrete(
             for k, v in inputs_3d.items()
         }
         encoding_indices = vae_model.Encode(inputs_3d_device)
+    _t_vae = time.time()
+    print(f"[DEBUG collate] VAE Encode took {_t_vae - _collate_t0:.3f}s", flush=True)
 
     batch_size = len(batch)
     if use_variable_length_3d:
@@ -268,6 +272,8 @@ def collate_sdf_caption_discrete(
             encoding_indices, batch_size
         )
         mesh_strings = [pooled_sequence_to_mesh_token_string(p) for p in pooled_list]
+    _t_seq = time.time()
+    print(f"[DEBUG collate] Sequence gen took {_t_seq - _t_vae:.3f}s  mesh_str_lens={[len(s) for s in mesh_strings]}", flush=True)
 
     messages_list = []
     for i, b in enumerate(batch):
@@ -288,6 +294,7 @@ def collate_sdf_caption_discrete(
     if use_variable_length_3d and max_length_variable is not None:
         effective_max_length = max(max_length, max_length_variable)
 
+    _t_tok0 = time.time()
     text = tokenizer.apply_chat_template(
         messages_list,
         tokenize=False,
@@ -295,6 +302,8 @@ def collate_sdf_caption_discrete(
     )
     if isinstance(text, str):
         text = [text]
+    _t_template = time.time()
+    print(f"[DEBUG collate] Chat template took {_t_template - _t_tok0:.3f}s  text_lens={[len(t) for t in text]}", flush=True)
 
     enc = tokenizer(
         text,
@@ -306,6 +315,8 @@ def collate_sdf_caption_discrete(
     )
     input_ids = enc["input_ids"]
     attention_mask = enc["attention_mask"]
+    _t_tokenize = time.time()
+    print(f"[DEBUG collate] Tokenizer encode took {_t_tokenize - _t_template:.3f}s  input_ids.shape={input_ids.shape}", flush=True)
 
     labels = input_ids.clone()
     pad_id = (
@@ -314,7 +325,6 @@ def collate_sdf_caption_discrete(
         else tokenizer.eos_token_id
     )
     labels[labels == pad_id] = -100
-    # Mask user (3D + prompt) per sample so only assistant content is supervised
     for i in range(batch_size):
         try:
             prefix_tokens = tokenizer.apply_chat_template(
@@ -330,6 +340,9 @@ def collate_sdf_caption_discrete(
                 labels[i, :prefix_len] = -100
         except Exception:
             pass
+    _t_labels = time.time()
+    print(f"[DEBUG collate] Label masking took {_t_labels - _t_tokenize:.3f}s", flush=True)
+    print(f"[DEBUG collate] TOTAL collate took {_t_labels - _collate_t0:.3f}s", flush=True)
 
     return {
         "input_ids": input_ids,

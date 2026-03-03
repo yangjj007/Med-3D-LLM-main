@@ -6,6 +6,7 @@ Supports multi-GPU training via HuggingFace Accelerate.
 
 import argparse
 import os
+import time
 
 # 确保 3D-VL 训练使用 spconv（新终端直接 python 运行时不会走 shell 脚本的 export）
 os.environ.setdefault("SPARSE_BACKEND", "spconv")
@@ -439,11 +440,13 @@ def main():
         metrics_path = os.path.join(args.output_dir, "training_metrics.jsonl")
         metrics_file = open(metrics_path, "w", encoding="utf-8") if (accelerator is None or accelerator.is_main_process) else None
         for epoch in range(args.epochs):
+            _epoch_t0 = time.time()
             for step, batch in enumerate(dataloader):
+                _step_t0 = time.time()
                 batch = {k: _to_device(v, device) for k, v in batch.items()}
+                _t_data = time.time()
                 use_inputs_3d = "inputs_3d" in batch and batch["inputs_3d"] is not None
                 if use_discrete or not use_inputs_3d:
-                    # Discrete path: batch has input_ids, attention_mask, labels only
                     outputs = _model(
                         input_ids=batch["input_ids"],
                         attention_mask=batch.get("attention_mask"),
@@ -464,13 +467,14 @@ def main():
                         feats_3d=batch["feats_3d"],
                         coords_3d=batch["coords_3d"],
                     )
+                _t_fwd = time.time()
                 loss = getattr(outputs, "loss", None) or outputs.get("loss")
                 opt.zero_grad()
                 if accelerator is not None:
                     accelerator.backward(loss)
                 else:
                     loss.backward()
-                # Gradient clipping
+                _t_bwd = time.time()
                 grad_clip = getattr(args, "grad_clip", 0.0)
                 if grad_clip > 0:
                     if accelerator is not None:
@@ -480,14 +484,19 @@ def main():
                 opt.step()
                 if scheduler is not None:
                     scheduler.step()
+                _t_opt = time.time()
                 global_step += 1
-                # 记录指标（用于可视化）
                 if metrics_file is not None:
                     lr = opt.param_groups[0]["lr"] if opt.param_groups else 0.0
                     metrics_file.write(json.dumps({"step": global_step, "epoch": epoch, "loss": round(loss.item(), 6), "lr": lr}) + "\n")
                     metrics_file.flush()
                 if step % 10 == 0:
                     _print(f"Epoch {epoch} step {step} loss {loss.item():.4f}")
+                if step < 5 or step % 50 == 0:
+                    _print(f"[DEBUG step] ep={epoch} step={step} "
+                           f"data={_t_data-_step_t0:.2f}s fwd={_t_fwd-_t_data:.2f}s "
+                           f"bwd={_t_bwd-_t_fwd:.2f}s opt={_t_opt-_t_bwd:.2f}s "
+                           f"total={_t_opt-_step_t0:.2f}s")
             raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
             if accelerator is None or accelerator.is_main_process:
                 if raw_model.projector is not None:

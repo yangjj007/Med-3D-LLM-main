@@ -74,7 +74,7 @@
 ### 3.1 环境与前置
 
 - **Python**：3.8+，`torch`、`transformers`、`accelerate`、`peft`、`pyyaml`（见项目 requirements）。
-- **必设**：`export SPARSE_BACKEND=spconv`（训练/评估前都要）。
+- **必设**：`export SPARSE_BACKEND=torchsparse`（训练/评估前都要）。
 - **必备**：
   - **VAE**：`vae_config` + `vae_ckpt`（离散/变长必填）。
   - **数据**：`data_dir` 下 `*.npz`（SDF）+ `metadata.csv`（含 `captions`）。
@@ -85,15 +85,15 @@
 **1）离散固定 512，Stage1 warmup（单卡）**
 
 ```bash
-export SPARSE_BACKEND=spconv
-python scripts/run_3d_align_train.py --config configs/3d_align_train_discrete_warmup.yaml
+export SPARSE_BACKEND=torchsparse
+python scripts/run_3d_align_train.py --config configs/3d_align_train_discrete_warmup.yaml > align_debug.log 2>&1
 ```
 
 **2）变长 3D（VAE 出多少点就多少点，不池化）**
 
 ```bash
-export SPARSE_BACKEND=spconv
-python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml
+export SPARSE_BACKEND=torchsparse
+python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml > align_debug.log 2>&1
 ```
 
 **3）多卡 + 降显存（DeepSpeed ZeRO-2）**
@@ -101,8 +101,8 @@ python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_le
 在对应 YAML 中设 `use_deepspeed: true`、`num_processes: <GPU数>`，然后同样：
 
 ```bash
-export SPARSE_BACKEND=spconv
-python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml
+export SPARSE_BACKEND=torchsparse
+python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml > align_debug.log 2>&1
 ```
 
 ### 3.3 配置要点速查
@@ -120,7 +120,7 @@ python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_le
 
 ### 4.1 环境与依赖
 
-- **SPARSE_BACKEND=spconv**：未设置时稀疏运算可能走错后端或报错，**所有训练/评估命令前都要 export**。
+- **SPARSE_BACKEND=torchsparse**：未设置时稀疏运算可能走错后端或报错，**所有训练/评估命令前都要 export**。
 - **Flash Attention 2**：`use_flash_attn_2: true` 需安装 `flash-attn`（部分环境需从源码编译）。
 - **DeepSpeed**：`use_deepspeed: true` 需 `pip install deepspeed`；多卡时 ZeRO-2 可显著降低每卡显存。
 
