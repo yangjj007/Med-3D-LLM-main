@@ -1,7 +1,7 @@
 """
-Sequence Parallelism utilities for 3D mesh (DP, SP, TP).
+Sequence Parallelism utilities for 3D mesh (DP, TP, SP).
 
-- create_3d_mesh: Create DeviceMesh with (DP, SP, TP) dimensions
+- create_3d_mesh: Create DeviceMesh with (DP, TP, SP) dimensions
 - get_sp_group: Get ProcessGroup for SP ring communication
 - split_for_sp: Split batch along sequence dimension for SP
 - sp_cross_entropy_loss: Distributed cross-entropy over SP ranks
@@ -23,7 +23,9 @@ def create_3d_mesh(
     world_size: Optional[int] = None,
 ):
     """
-    Create 3D DeviceMesh with dimensions (DP, SP, TP).
+    Create 3D DeviceMesh with dimensions (DP, TP, SP).
+
+    Order (dp, tp, sp) ensures ("dp", "tp") is contiguous for FSDP2+TP.
 
     Returns:
         mesh_3d: Full 3D DeviceMesh
@@ -40,8 +42,8 @@ def create_3d_mesh(
         )
     mesh_3d = init_device_mesh(
         "cuda",
-        (dp_size, sp_size, tp_size),
-        mesh_dim_names=("dp", "sp", "tp"),
+        (dp_size, tp_size, sp_size),
+        mesh_dim_names=("dp", "tp", "sp"),
     )
     return mesh_3d, mesh_3d["dp"], mesh_3d["sp"], mesh_3d["tp"]
 
@@ -51,8 +53,9 @@ _sp_group_cache: Dict[Tuple[int, ...], Any] = {}
 
 def get_sp_group_from_mesh(mesh_3d) -> Optional[Any]:
     """
-    Get ProcessGroup for SP ring communication from 3D mesh (dp, sp, tp).
+    Get ProcessGroup for SP ring communication from 3D mesh (dp, tp, sp).
     Each (dp, tp) slice has an SP group - ranks that share (dp, tp) and form a ring.
+    Rank layout: rank = dp * (tp_size * sp_size) + tp * sp_size + sp
     """
     sp_mesh = mesh_3d["sp"]
     tp_mesh = mesh_3d["tp"]
@@ -70,12 +73,15 @@ def get_sp_group_from_mesh(mesh_3d) -> Optional[Any]:
         pass
     world_size = dist.get_world_size()
     my_rank = dist.get_rank()
-    my_dp = my_rank // (sp_size * tp_size)
-    my_tp = my_rank % tp_size
+    # rank = dp * (tp_size * sp_size) + tp * sp_size + sp
+    my_sp = my_rank % sp_size
+    rest = my_rank // sp_size
+    my_tp = rest % tp_size
+    my_dp = rest // tp_size
     cache_key = (dp_size, sp_size, tp_size, my_dp, my_tp)
     if cache_key not in _sp_group_cache:
         ranks = [
-            my_dp * (sp_size * tp_size) + s * tp_size + my_tp
+            my_dp * (tp_size * sp_size) + my_tp * sp_size + s
             for s in range(sp_size)
         ]
         _sp_group_cache[cache_key] = dist.new_group(ranks)

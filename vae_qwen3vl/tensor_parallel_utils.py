@@ -63,12 +63,17 @@ def get_3d_mesh(
     world_size: Optional[int] = None,
 ):
     """
-    Create 3D device mesh (dp, sp, tp) for TP+SP hybrid.
+    Create 3D device mesh (dp, tp, sp) for TP+SP hybrid.
+
+    Dimension order (dp, tp, sp) is required for FSDP2+TP composition:
+    FSDP2 internally needs mesh[("dp", "tp")] for TP-parallelized layers.
+    ("dp", "tp") must be a contiguous subsequence of mesh_dim_names;
+    (dp, sp, tp) would make ("dp", "tp") invalid (sp in between).
 
     Example: world_size=4, tp_size=2, sp_size=2 -> dp=1, mesh (1, 2, 2).
 
     Returns:
-        mesh_3d: Full 3D DeviceMesh (dp, sp, tp).
+        mesh_3d: Full 3D DeviceMesh (dp, tp, sp).
         dp_mesh, sp_mesh, tp_mesh: 1D sub-meshes.
     """
     from torch.distributed.device_mesh import init_device_mesh
@@ -80,10 +85,11 @@ def get_3d_mesh(
             f"world_size={world_size} must be divisible by tp_size*sp_size ({tp_size * sp_size})"
         )
     dp_size = world_size // (tp_size * sp_size)
+    # (dp, tp, sp) so that ("dp", "tp") is contiguous for FSDP2
     mesh_3d = init_device_mesh(
         "cuda",
-        (dp_size, sp_size, tp_size),
-        mesh_dim_names=("dp", "sp", "tp"),
+        (dp_size, tp_size, sp_size),
+        mesh_dim_names=("dp", "tp", "sp"),
     )
     return mesh_3d, mesh_3d["dp"], mesh_3d["sp"], mesh_3d["tp"]
 
