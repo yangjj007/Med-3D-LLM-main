@@ -491,10 +491,15 @@ def main():
                     raise ValueError("Discrete 3D token mode requires --vae_config and --vae_ckpt for collate encoding.")
                 reconstruction_ratio = getattr(args, "reconstruction_ratio", 0.0)
                 use_variable_length_3d = getattr(args, "use_variable_length_3d_tokens", False)
+                # TP+FSDP: vae_model is wrapped (params are DTensors); collate needs plain tensors.
+                # Use a separate unwrapped VAE instance for collate when use_tp.
+                vae_for_collate = vae_model
+                if use_tp:
+                    vae_for_collate = load_vae_from_config(args.vae_config, args.vae_ckpt, str(device))
                 collate_fn = lambda b: collate_sdf_caption_discrete(
                     b,
                     tokenizer,
-                    vae_model,
+                    vae_for_collate,
                     device,
                     prompt=args.prompt,
                     max_length=2048,
