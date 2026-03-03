@@ -26,6 +26,7 @@ if PROJECT_ROOT not in sys.path:
 
 try:
     from accelerate import Accelerator
+    from accelerate.utils import DistributedType
     from accelerate.utils import set_seed
     ACCELERATE_AVAILABLE = True
 except ImportError:
@@ -302,8 +303,23 @@ def main():
             **vl_kwargs,
         )
         model = model.to(device)
-        if getattr(args, "use_gradient_checkpointing", False) and hasattr(model.vl_model, "gradient_checkpointing_enable"):
+        use_gc = bool(getattr(args, "use_gradient_checkpointing", False))
+        is_deepspeed = bool(
+            accelerator is not None
+            and getattr(accelerator.state, "distributed_type", None) == DistributedType.DEEPSPEED
+        )
+        if use_gc and training_stage == "warmup" and is_deepspeed:
+            # DeepSpeed ZeRO-2 + warmup(仅少量参数可训练) 与 gradient checkpointing 组合下，
+            # 部分版本会在 backward 统计参数时触发 NoneType.next_functions 异常。
+            (accelerator.print if accelerator else print)(
+                "[Warn] Disable gradient checkpointing for warmup+DeepSpeed to avoid backward hook error."
+            )
+            use_gc = False
+        if use_gc and hasattr(model.vl_model, "gradient_checkpointing_enable"):
             model.vl_model.gradient_checkpointing_enable()
+            # HF 模型在 gradient checkpointing 下常需该开关，确保可训练参数可正确参与反传。
+            if hasattr(model.vl_model, "enable_input_require_grads"):
+                model.vl_model.enable_input_require_grads()
         if use_discrete:
             resize_token_embeddings_and_init_mesh(model, tokenizer)
 
