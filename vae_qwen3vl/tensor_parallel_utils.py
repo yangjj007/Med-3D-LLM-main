@@ -64,17 +64,31 @@ def get_tp_dp_mesh(tp_size: int, world_size: Optional[int] = None):
 def _get_llm_layers(vl_model: nn.Module) -> nn.ModuleList:
     """
     Extract the transformer decoder layer list from Qwen2-VL or Qwen3-VL.
-    Structure: model.model.layers
+
+    Structure for Qwen2-VL / Qwen3-VL:
+      - model.model.language_model.layers  (standard VL structure)
+      - model.model.layers                (fallback for older/different layouts)
+    When wrapped by PeftModel:
+      - model.base_model.model.language_model.layers
     """
-    inner = getattr(vl_model, "model", None)
-    if inner is None:
-        raise AttributeError(
-            "Cannot find 'model' attribute in vl_model. "
-            "Expected Qwen2VLForConditionalGeneration or Qwen3VLForConditionalGeneration."
-        )
-    layers = getattr(inner, "layers", None)
+    # Handle PeftModel wrapper: get underlying base model first
+    m = vl_model
+    if hasattr(m, "base_model") and hasattr(m.base_model, "model"):
+        m = m.base_model.model
+    else:
+        m = getattr(m, "model", None)
+        if m is None:
+            raise AttributeError(
+                "Cannot find 'model' attribute in vl_model. "
+                "Expected Qwen2VLForConditionalGeneration or Qwen3VLForConditionalGeneration."
+            )
+    # Qwen2-VL / Qwen3-VL: layers live under language_model
+    layers = getattr(getattr(m, "language_model", m), "layers", None)
     if layers is None:
-        raise AttributeError("Cannot find 'model.layers' in vl_model.")
+        raise AttributeError(
+            "Cannot find 'model.language_model.layers' or 'model.layers' in vl_model. "
+            "Ensure you are using Qwen2-VL or Qwen3-VL from transformers."
+        )
     return layers
 
 
