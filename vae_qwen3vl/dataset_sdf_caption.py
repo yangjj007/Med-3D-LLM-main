@@ -14,6 +14,7 @@ import os
 import json
 import random
 import time
+from contextlib import nullcontext
 import numpy as np
 import pandas as pd
 import torch
@@ -260,7 +261,19 @@ def collate_sdf_caption_discrete(
                 inputs_3d_device[k] = v
             else:
                 inputs_3d_device[k] = v
-        encoding_indices = vae_model.Encode(inputs_3d_device)
+        # Encode 内部会构造新的稀疏特征，开启 autocast 以避免 Float/BFloat16 不一致。
+        use_autocast = (
+            torch.cuda.is_available()
+            and str(device).startswith("cuda")
+            and vae_dtype in (torch.float16, torch.bfloat16)
+        )
+        autocast_ctx = (
+            torch.autocast(device_type="cuda", dtype=vae_dtype)
+            if use_autocast
+            else nullcontext()
+        )
+        with autocast_ctx:
+            encoding_indices = vae_model.Encode(inputs_3d_device)
     _t_vae = time.time()
     print(f"[DEBUG collate] VAE Encode took {_t_vae - _collate_t0:.3f}s", flush=True)
 
