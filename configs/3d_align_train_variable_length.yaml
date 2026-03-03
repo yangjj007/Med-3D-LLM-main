@@ -30,10 +30,10 @@ max_length_variable: 32768
 reconstruction_ratio: 0.0
 training_stage: "warmup"
 
-# === 张量并行配置 ===
-# Qwen3-VL 2B GQA 有 2 个 KV 头，因此最大 TP 度为 2。
-# 4 卡：TP=2 + DP=2（两个 TP 组各含 2 块 GPU，组内参数并行，组间数据并行）
+# === 张量并行 + 序列并行 ===
+# TP=2 + SP=2: 4 GPU 上 DP=1, 序列切分到 2 卡，模型切分到 2 卡，显著降低 30k token 反向显存
 tensor_parallel_size: 2
+sequence_parallel_size: 2
 
 # === 显存与 batch ===
 # TP=2 + FSDP2 约降低每卡峰值激活内存 2 倍，加上 GC 后可承受更长序列。
@@ -82,7 +82,7 @@ accelerate:
   main_training_function: main
   mixed_precision: bf16
   num_machines: 1
-  num_processes: 4
+  num_processes: 4   # 4 GPU: TP=2 + SP=2
   rdzv_backend: static
   same_network: true
   tpu_env: []

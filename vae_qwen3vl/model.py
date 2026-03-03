@@ -6,6 +6,7 @@ produce 3D token embeddings that are prepended to text and fed to the LLM.
 from typing import Optional, Dict, Any, Tuple, Union
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 
 from .projector import Projector3D
 from .sequence_3d import prepare_3d_sequence, prepare_3d_sequence_batched
@@ -84,6 +85,7 @@ class Qwen3VLWith3DBranch(nn.Module):
         if vae_model is not None:
             for p in vae_model.parameters():
                 p.requires_grad = False
+        self.sp_group = None
 
     def get_3d_embeds(
         self,
@@ -250,13 +252,24 @@ class Qwen3VLWith3DBranch(nn.Module):
                 feats_3d=feats_3d,
                 coords_3d=coords_3d,
             )
-        return self.vl_model(
+        sp_group = getattr(self, "sp_group", None)
+        if sp_group is not None and input_ids is not None:
+            from .sequence_parallel_utils import split_for_sp
+            batch = {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+            batch = split_for_sp(batch, sp_group)
+            input_ids = batch["input_ids"]
+            attention_mask = batch.get("attention_mask")
+            labels = batch.get("labels")
+        outputs = self.vl_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pixel_values=pixel_values,
             labels=labels,
             **kwargs,
         )
+        if sp_group is not None and "loss" in outputs and outputs["loss"] is not None:
+            dist.all_reduce(outputs["loss"], op=dist.ReduceOp.AVG, group=sp_group)
+        return outputs
 
     def generate(self, **kwargs):
         return self.vl_model.generate(**kwargs)

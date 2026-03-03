@@ -244,6 +244,9 @@ def main():
                         help="Tensor parallel degree (1=disabled; 2=TP+FSDP2 2D parallel). "
                              "For Qwen3-VL 2B with GQA (2 KV heads) max is 2. "
                              "With 4 GPUs: tp=2 gives TP=2 + DP=2.")
+    parser.add_argument("--sequence_parallel_size", type=int, default=1,
+                        help="Sequence parallel degree (1=disabled). TP+SP hybrid: "
+                             "e.g. 4 GPUs with tp=2, sp=2 -> DP=1, SP=2, TP=2.")
     args, remaining = parser.parse_known_args()
     known_keys = {a.dest for a in parser._actions if a.dest != "help"}
     if args.config and os.path.isfile(args.config):
@@ -258,10 +261,14 @@ def main():
     # Distributed setup: TP+FSDP2 path vs. legacy Accelerate path
     # -----------------------------------------------------------------------
     tp_size = getattr(args, "tensor_parallel_size", 1)
+    sp_size = getattr(args, "sequence_parallel_size", 1)
     use_tp = tp_size > 1
+    use_sp = sp_size > 1
     tp_mesh = None
     dp_mesh = None
     mesh_2d = None
+    mesh_3d = None
+    sp_group = None
 
     if use_tp:
         # Native torch.distributed init (torchrun sets LOCAL_RANK / RANK / WORLD_SIZE)
@@ -274,26 +281,41 @@ def main():
         global_rank = dist.get_rank()
         is_main_process = (global_rank == 0)
 
-        from torch.distributed.device_mesh import init_device_mesh
-        dp_size = world_size // tp_size
-        if world_size % tp_size != 0:
-            raise ValueError(
-                f"world_size={world_size} must be divisible by "
-                f"tensor_parallel_size={tp_size}"
+        if use_sp:
+            from vae_qwen3vl.tensor_parallel_utils import get_3d_mesh
+            from vae_qwen3vl.sequence_parallel_utils import get_sp_group_from_mesh
+            mesh_3d, dp_mesh, sp_mesh, tp_mesh = get_3d_mesh(tp_size, sp_size, world_size)
+            sp_group = get_sp_group_from_mesh(mesh_3d)
+            accelerator = None
+            torch.manual_seed(42)
+            if is_main_process:
+                dp_sz = dp_mesh.size()
+                print(
+                    f"[TP+SP] world_size={world_size} tp={tp_size} sp={sp_size} dp={dp_sz} "
+                    f"global_rank={global_rank} local_rank={local_rank}",
+                    flush=True,
+                )
+        else:
+            from torch.distributed.device_mesh import init_device_mesh
+            dp_size = world_size // tp_size
+            if world_size % tp_size != 0:
+                raise ValueError(
+                    f"world_size={world_size} must be divisible by "
+                    f"tensor_parallel_size={tp_size}"
+                )
+            mesh_2d = init_device_mesh(
+                "cuda", (dp_size, tp_size), mesh_dim_names=("dp", "tp")
             )
-        mesh_2d = init_device_mesh(
-            "cuda", (dp_size, tp_size), mesh_dim_names=("dp", "tp")
-        )
-        dp_mesh = mesh_2d["dp"]
-        tp_mesh = mesh_2d["tp"]
-        accelerator = None
-        torch.manual_seed(42)
-        if is_main_process:
-            print(
-                f"[TP] world_size={world_size} tp_size={tp_size} dp_size={dp_size} "
-                f"global_rank={global_rank} local_rank={local_rank}",
-                flush=True,
-            )
+            dp_mesh = mesh_2d["dp"]
+            tp_mesh = mesh_2d["tp"]
+            accelerator = None
+            torch.manual_seed(42)
+            if is_main_process:
+                print(
+                    f"[TP] world_size={world_size} tp_size={tp_size} dp_size={dp_size} "
+                    f"global_rank={global_rank} local_rank={local_rank}",
+                    flush=True,
+                )
     else:
         accelerator = Accelerator(
             gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
@@ -418,7 +440,7 @@ def main():
                 print("peft not installed; skipping LoRA", flush=True)
 
         # -------------------------------------------------------------------
-        # Tensor Parallelism + FSDP2 setup (TP mode only)
+        # Tensor Parallelism + Sequence Parallelism + FSDP2 (TP mode only)
         # -------------------------------------------------------------------
         if use_tp:
             from vae_qwen3vl.tensor_parallel_utils import (
@@ -427,13 +449,9 @@ def main():
             )
             # FSDP2 要求所有参数具有统一的 dtype，否则会触发:
             # AssertionError: FSDP expects uniform original parameter dtype but got {torch.bfloat16, torch.float32}
-            # vl_model 为 bfloat16，但 projector、vae_model、LoRA 可能为 float32，需统一。
             target_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
             model = model.to(target_dtype)
             # In SFT+LoRA: LoRA wraps attention projections (q/k/v/o_proj).
-            # Applying DTensor ColwiseParallel on top of peft LoRA layers causes
-            # input-sharding mismatches in lora_A/B compute → skip attention TP.
-            # MLP layers (gate/up/down_proj) are unmodified → always apply TP.
             apply_attn_tp = not use_lora_applied
             apply_tp_to_qwen3vl(
                 model.vl_model,
@@ -441,6 +459,10 @@ def main():
                 apply_to_attention=apply_attn_tp,
                 apply_to_mlp=True,
             )
+            if use_sp and sp_group is not None:
+                from vae_qwen3vl.sequence_parallel_utils import apply_sp_attention_patch
+                apply_sp_attention_patch(model, sp_group)
+                model.sp_group = sp_group
             apply_fsdp2_dp(model, dp_mesh)
 
         # DTensor + AdamW foreach kernels are not fully supported yet

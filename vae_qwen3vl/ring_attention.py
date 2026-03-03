@@ -1,0 +1,294 @@
+"""
+Ring Attention for Sequence Parallelism.
+
+Implements causal Ring Attention by passing K,V in a ring across SP ranks.
+Each rank computes attention of its local Q against all past K,V chunks,
+merging results with online softmax. Compatible with GQA (no head splitting).
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+import torch.distributed as dist
+from typing import Optional, Tuple, Any
+
+
+def _get_sp_rank_size(sp_group: Any) -> Tuple[int, int]:
+    """Get rank and world size within SP group."""
+    if sp_group is None:
+        return 0, 1
+    return dist.get_rank(group=sp_group), dist.get_world_size(group=sp_group)
+
+
+def _ring_send_recv(
+    send_tensor: torch.Tensor,
+    recv_tensor: torch.Tensor,
+    sp_group: Any,
+) -> None:
+    """Send send_tensor to next rank, receive into recv_tensor from prev rank."""
+    sp_rank, sp_size = _get_sp_rank_size(sp_group)
+    if sp_size <= 1:
+        return
+    try:
+        my_group_rank = dist.get_rank(group=sp_group)
+        world = dist.get_world_size(group=sp_group)
+    except Exception:
+        my_group_rank = sp_rank
+        world = sp_size
+    next_rank = (my_group_rank + 1) % world
+    prev_rank = (my_group_rank - 1 + world) % world
+
+    req_recv = dist.irecv(recv_tensor, src=prev_rank, group=sp_group)
+    req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
+    req_recv.wait()
+    req_send.wait()
+
+
+def _flash_attn_single_chunk(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    causal: bool,
+    scale: Optional[float] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute attention for one Q,K,V chunk. Returns (out, lse)."""
+    # q, k, v: [B, S, H, D]
+    head_dim = q.size(-1)
+    if scale is None:
+        scale = 1.0 / (head_dim ** 0.5)
+    try:
+        from flash_attn import flash_attn_func
+        out, lse = flash_attn_func(q, k, v, causal=causal, softmax_scale=scale)
+        return out, lse
+    except ImportError:
+        # Fallback to SDPA when flash_attn not installed
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=causal,
+            scale=scale,
+        )
+        # SDPA doesn't return LSE; for online softmax we need it. Approximate.
+        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+        if causal:
+            S = scores.size(-1)
+            mask = torch.triu(
+                torch.ones(S, S, device=scores.device, dtype=torch.bool),
+                diagonal=1,
+            )
+            scores = scores.masked_fill(mask, float("-inf"))
+        lse = torch.logsumexp(scores.float(), dim=-1, keepdim=True).to(scores.dtype)
+        return out, lse
+
+
+def _online_softmax_merge(
+    out_accum: torch.Tensor,
+    lse_accum: torch.Tensor,
+    out_new: torch.Tensor,
+    lse_new: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Merge new attention output into accumulated using online softmax."""
+    # out_accum, lse_accum: accumulated so far
+    # out_new, lse_new: from new chunk
+    lse_max = torch.maximum(lse_accum, lse_new)
+    exp_old = torch.exp(lse_accum - lse_max)
+    exp_new = torch.exp(lse_new - lse_max)
+    out_accum = out_accum * exp_old + out_new * exp_new
+    lse_accum = lse_max + torch.log(exp_old + exp_new)
+    return out_accum, lse_accum
+
+
+class RingFlashAttnFunc(torch.autograd.Function):
+    """
+    Ring Flash Attention: causal attention with K,V passed in a ring.
+    Forward: each rank attends its Q to all past K,V chunks via ring.
+    Backward: gradient of O w.r.t. Q,K,V propagated through ring.
+    """
+
+    @staticmethod
+    def forward(
+        ctx: Any,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        sp_group: Any,
+        causal: bool = True,
+        softmax_scale: Optional[float] = None,
+    ) -> torch.Tensor:
+        sp_rank, sp_size = _get_sp_rank_size(sp_group)
+        if sp_size <= 1:
+            out, lse = _flash_attn_single_chunk(q, k, v, causal=causal, scale=softmax_scale)
+            ctx.save_for_backward(q, k, v, lse)
+            ctx.chunk_outputs = [out]
+            ctx.chunk_lses = [lse]
+            ctx.sp_group = sp_group
+            ctx.causal = causal
+            ctx.softmax_scale = softmax_scale
+            return out
+
+        head_dim = q.size(-1)
+        scale = softmax_scale if softmax_scale is not None else 1.0 / (head_dim ** 0.5)
+
+        out_acc = torch.zeros_like(q)
+        lse_acc = torch.full(
+            (q.size(0), q.size(1), q.size(2), 1),
+            float("-inf"),
+            device=q.device,
+            dtype=q.dtype,
+        )
+        if q.dtype == torch.bfloat16:
+            lse_acc = lse_acc.float()
+
+        cur_k = k.clone()
+        cur_v = v.clone()
+        recv_k = torch.empty_like(k)
+        recv_v = torch.empty_like(v)
+
+        chunk_outputs = []
+        chunk_lses = []
+        chunk_ks = []
+        chunk_vs = []
+
+        for step in range(sp_size):
+            src_rank = (sp_rank - step + sp_size) % sp_size
+            use_chunk = src_rank <= sp_rank
+            is_self = src_rank == sp_rank
+
+            if use_chunk:
+                attn_out, chunk_lse = _flash_attn_single_chunk(
+                    q, cur_k, cur_v, causal=is_self, scale=scale
+                )
+                out_acc, lse_acc = _online_softmax_merge(out_acc, lse_acc, attn_out, chunk_lse)
+                chunk_outputs.append(attn_out)
+                chunk_lses.append(chunk_lse)
+                chunk_ks.append(cur_k.clone())
+                chunk_vs.append(cur_v.clone())
+
+            if step < sp_size - 1:
+                _ring_send_recv(cur_k, recv_k, sp_group)
+                _ring_send_recv(cur_v, recv_v, sp_group)
+                cur_k, recv_k = recv_k, cur_k
+                cur_v, recv_v = recv_v, cur_v
+
+        ctx.save_for_backward(q, *chunk_ks, *chunk_vs)
+        ctx.chunk_outputs = chunk_outputs
+        ctx.chunk_lses = chunk_lses
+        ctx.sp_group = sp_group
+        ctx.causal = causal
+        ctx.softmax_scale = scale
+        return out_acc
+
+    @staticmethod
+    def backward(
+        ctx: Any,
+        grad_out: torch.Tensor,
+    ) -> Tuple[Optional[torch.Tensor], ...]:
+        saved = ctx.saved_tensors
+        q = saved[0]
+        n = len(ctx.chunk_outputs)
+        chunk_ks = list(saved[1 : 1 + n])
+        chunk_vs = list(saved[1 + n : 1 + 2 * n])
+        chunk_outputs = ctx.chunk_outputs
+        chunk_lses = ctx.chunk_lses
+        sp_group = ctx.sp_group
+        causal = ctx.causal
+        scale = ctx.softmax_scale
+
+        sp_rank, sp_size = _get_sp_rank_size(sp_group)
+        if sp_size <= 1:
+            k, v = chunk_ks[0], chunk_vs[0]
+            grad_q, grad_k, grad_v = _flash_attn_bwd(
+                grad_out, chunk_outputs[0], q, k, v, chunk_lses[0], causal, scale
+            )
+            return grad_q, grad_k, grad_v, None, None, None
+
+        lse_final = chunk_lses[-1]
+        if isinstance(lse_final, torch.Tensor) and lse_final.dtype == torch.bfloat16:
+            lse_final = lse_final.float()
+        weights = [
+            torch.exp(ls.float() - lse_final) if hasattr(ls, "float") else torch.exp(ls - lse_final)
+            for ls in chunk_lses
+        ]
+        if chunk_lses[0].dtype == torch.bfloat16:
+            weights = [w.to(grad_out.dtype) for w in weights]
+
+        grad_q = torch.zeros_like(q)
+        grad_k = torch.zeros_like(chunk_ks[0])
+        grad_v = torch.zeros_like(chunk_vs[0])
+        to_send_k = torch.zeros_like(chunk_ks[0])
+        to_send_v = torch.zeros_like(chunk_vs[0])
+        prev_rank = (sp_rank - 1 + sp_size) % sp_size
+
+        for i, (out_i, k_i, v_i, lse_i, w_i) in enumerate(zip(chunk_outputs, chunk_ks, chunk_vs, chunk_lses, weights)):
+            src_rank = (sp_rank - i + sp_size) % sp_size
+            is_self = src_rank == sp_rank
+            grad_chunk = grad_out * w_i
+            gq, gk, gv = _flash_attn_bwd(grad_chunk, out_i, q, k_i, v_i, lse_i, causal=is_self, scale=scale)
+            grad_q = grad_q + gq
+            if src_rank == sp_rank:
+                grad_k = grad_k + gk
+                grad_v = grad_v + gv
+            elif src_rank == prev_rank:
+                to_send_k = to_send_k + gk
+                to_send_v = to_send_v + gv
+
+        if sp_size > 1:
+            recv_k = torch.empty_like(chunk_ks[0])
+            recv_v = torch.empty_like(chunk_vs[0])
+            _ring_send_recv(to_send_k, recv_k, sp_group)
+            _ring_send_recv(to_send_v, recv_v, sp_group)
+            grad_k = grad_k + recv_k
+            grad_v = grad_v + recv_v
+        return grad_q, grad_k, grad_v, None, None, None
+
+
+def _flash_attn_bwd(
+    dout: torch.Tensor,
+    out: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    lse: torch.Tensor,
+    causal: bool,
+    scale: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Backward of attention: dL/dQ, dL/dK, dL/dV. Recompute scores for SDPA-style backward."""
+    head_dim = q.size(-1)
+    sc = scale if scale else 1.0 / (head_dim ** 0.5)
+    scores = torch.matmul(q, k.transpose(-2, -1)) * sc
+    if causal:
+        S = scores.size(-1)
+        mask = torch.triu(torch.ones(S, S, device=q.device, dtype=torch.bool), diagonal=1)
+        scores = scores.masked_fill(mask, float("-inf"))
+    probs = F.softmax(scores.float(), dim=-1).to(scores.dtype)
+    dv = torch.matmul(probs.transpose(-2, -1), dout)
+    dP = torch.matmul(dout, v.transpose(-2, -1))
+    d_scores = probs * (dP - (probs * dP).sum(dim=-1, keepdim=True))
+    dq = torch.matmul(d_scores, k) * sc
+    dk = torch.matmul(d_scores.transpose(-2, -1), q) * sc
+    return dq, dk, dv
+
+
+def ring_flash_attn(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    sp_group: Any = None,
+    causal: bool = True,
+    softmax_scale: Optional[float] = None,
+) -> torch.Tensor:
+    """
+    Ring Flash Attention. Call this from patched attention forward.
+
+    Args:
+        q, k, v: [B, S_local, H, D] - local chunk (S_local = S / SP_size)
+        sp_group: ProcessGroup for SP dimension, or None for no parallelism
+        causal: use causal mask for self-chunk
+        softmax_scale: attention scale (default 1/sqrt(head_dim))
+
+    Returns:
+        attn_output: [B, S_local, H, D]
+    """
+    return RingFlashAttnFunc.apply(q, k, v, sp_group, causal, softmax_scale)
