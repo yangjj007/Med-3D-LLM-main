@@ -443,22 +443,17 @@ def main():
             )
             apply_fsdp2_dp(model, dp_mesh)
 
-        # TP+FSDP: AdamW 的 weight_decay 会触发 _foreach_mul_(device_params, scalar)，
-        # 导致 "DTensor does not support cross-mesh operation yet!"。与 grad_clip 类似，强制禁用。
-        eff_weight_decay = args.weight_decay
-        if use_tp and args.weight_decay > 0:
-            if is_main_process:
-                print(
-                    "[Warn] TP+FSDP 下 AdamW weight_decay 与 DTensor 不兼容（_foreach_mul_ 跨 mesh），"
-                    "已禁用 weight_decay。若需正则化请使用非 TP 模式。",
-                    flush=True,
-                )
-            eff_weight_decay = 0.0
-
+        # DTensor + AdamW foreach kernels are not fully supported yet
+        # (e.g., aten._foreach_mul_.Scalar cross-mesh), so disable foreach
+        # explicitly in TP+FSDP mode.
+        adamw_kwargs = {}
+        if use_tp:
+            adamw_kwargs["foreach"] = False
         opt = torch.optim.AdamW(
             [p for p in model.parameters() if p.requires_grad],
             lr=args.lr,
-            weight_decay=eff_weight_decay,
+            weight_decay=args.weight_decay,
+            **adamw_kwargs,
         )
 
         if args.dummy_data:
