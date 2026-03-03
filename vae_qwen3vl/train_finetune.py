@@ -587,6 +587,16 @@ def main():
         metrics_path = os.path.join(args.output_dir, "training_metrics.jsonl")
         metrics_file = open(metrics_path, "w", encoding="utf-8") if is_main_process else None
         grad_clip = getattr(args, "grad_clip", 0.0)
+        # TP+FSDP: clip_grad_norm_ 会触发 "DTensor does not support cross-mesh operation"
+        # (aten._foreach_norm)，已知限制。强制禁用 grad_clip 以避免崩溃。
+        if use_tp and grad_clip > 0:
+            if is_main_process:
+                print(
+                    "[Warn] TP+FSDP 下 clip_grad_norm_ 与 DTensor 不兼容，已禁用梯度裁剪 (grad_clip→0)。"
+                    " 若需裁剪请使用非 TP 模式。",
+                    flush=True,
+                )
+            grad_clip = 0.0
         _accum_loss = 0.0  # accumulates loss for logging averaged over accum window
         _accum_count = 0
         opt.zero_grad()  # zero once before the accumulation loop
