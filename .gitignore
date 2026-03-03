@@ -410,3 +410,5 @@ logs/
 configs/.train_error*.txt
 configs/accelerate.yaml
 *.so
+experiment/
+outputs_3d_align/

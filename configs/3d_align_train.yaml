@@ -5,33 +5,53 @@
 # === 路径 ===
 vl_model: "/yangjunjie/model_qwen3vl_2B"
 vae_config: "configs/vae/sdf_vqvae_stage2.json"
-vae_ckpt: "outputs/sdf_vqvae_stage2_1/ckpts/vqvae_step0000459.pt"
-data_dir: "train_sdf_dataset"
+vae_ckpt: "outputs/sdf_vqvae_stage2_512_0.5-amp/ckpts/vqvae_step0000100.pt"
+data_dir: "train_sdf_dataset/res512_thre0.5"
 output_dir: "outputs_3d_align"   # 父目录，训练保存到 output_dir/ep{epochs}_lr{lr}_bs{bs}_n{samples}_lora{r}/
-output_run: "ep2_lr1e-4_bs2_n500_lora8"  # 评估时指定要用的 run 子目录（训练完成后从 Output dir 复制）
+output_run: "ep30_lr5e-5_bs2_nall_lora16_20260226_132718"  # 评估时指定要用的 run 子目录（训练完成后从 Output dir 复制）
 
 # === 训练参数 ===
-lr: 1.0e-4
-epochs: 2
-batch_size: 4              # 每卡 batch，多卡时全局 batch = batch_size * num_processes
-max_3d_tokens: 2048
+lr: 5.0e-5
+epochs: 30
+batch_size: 2              # 每卡 batch，多卡时全局 batch = batch_size * num_processes
+max_3d_tokens: 8192   # 连续特征路径用；离散 token 路径固定 512（8^3），此项可忽略
+truncate_mode: "random_sample"  # 超长时截断方式：head=取前L个；random_sample=随机采样L个（保留空间覆盖、防OOM）
 use_3d_pos: true
 projector_layers: 3
+# 离散 3D token 路径（8x8x8 空间池化 + 扩表，无 Projector）
+use_discrete_3d_tokens: false   # true = 使用离散 mesh token，需 data_dir + vae
+# 变长 3D：保留 VAE 全部点（约 8k~12k），Morton 排序 + 动态 padding，仅异常长时 FPS 截断
+use_variable_length_3d_tokens: false  # true = 变长序列（需 use_discrete_3d_tokens）
+max_safe_3d_length: 15000       # 软上限：仅当点数 > 此值才 FPS 降到该长度
+coord_max_3d: 64                # Morton 坐标范围（当前 trellis VAE 输出 64^3 latent；若 VAE 输出 512^3 则改为 512）
+max_length_variable: 32768      # 变长时 tokenizer 最大长度，避免截断
+reconstruction_ratio: 0.3       # 3D 重建任务占比 (0..1)，仅 use_discrete_3d_tokens 时有效
+training_stage: "sft"           # warmup = 只训 embed+lm_head；sft = LoRA + embed
+gradient_accumulation_steps: 1  # 变长建议 batch_size=1 + 4~8 以等效大 batch
+use_flash_attn_2: false        # 变长序列建议 true（需安装 flash-attn）
+use_gradient_checkpointing: false  # 变长建议 true 省显存
+weight_decay: 0.01
+grad_clip: 1.0
+use_lr_scheduler: true
+warmup_ratio: 0.05
 
 # LoRA
 use_lora: true
-lora_r: 8
+lora_r: 16
+lora_alpha: 32             # 2*r
+lora_dropout: 0.1
 
 # 文本 prompt
 prompt: "Describe this 3D shape in one sentence:"
 
 # === 数据参数 ===
-max_samples: 5000          # 0=全量
+max_samples: 0             # 0=全量
 dummy_data: false
 dummy_samples: 50
 data_format: "sdf_caption"
 
-# === 分布式 / Accelerate ===
+# === 分布式 / Accelerate（降低显存可开 use_deepspeed）===
+use_deepspeed: false       # true = 使用 DeepSpeed ZeRO-2 分片优化器/梯度，降低每卡显存
 accelerate:
   compute_environment: LOCAL_MACHINE
   debug: false

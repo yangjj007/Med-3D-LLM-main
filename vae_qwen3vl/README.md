@@ -12,8 +12,8 @@ This package connects the trained 3D VQ-VAE (SparseSDFVQVAE) to Qwen2-VL or Qwen
 | **Projector 结构** | `projector_layers=1` 为单层 Linear；`projector_layers>=2` 才是 MLP。配置中 `projector_layers: 3` 表示 MLP。 |
 | **分布式训练** | 多卡 DDP 下通过 `getattr(model, "module", model)` 正确调用 `forward_with_3d`，无需手动处理。 |
 | **训练日志** | 日志写入 `logs/`，按时间与 rank 分别记录；控制台过滤 `[DEBUG]`，仅 rank 0 回显，避免多卡输出混乱。 |
-| **输出目录** | 训练结果按参数命名保存到 `output_dir/ep{epochs}_lr{lr}_bs{bs}_n{samples}_lora{r}/`，多次训练不会覆盖。 |
-| **eval 指定 run** | 评估时在 config 中设置 `output_run`（如 `ep2_lr1e-4_bs2_n500_lora8`）以加载对应子目录的 LoRA/projector。 |
+| **输出目录** | 训练结果保存到 `output_dir/ep{epochs}_lr{lr}_bs{bs}_n{samples}_lora{r}_{时间戳}/`，多次训练不覆盖。 |
+| **eval 指定 run** | 评估时在 config 中设置 `output_run` 为实际训练子目录名（含时间戳，如 `ep10_lr5e-5_bs4_nall_lora16_20260216_143022`）。 |
 | **生成效果** | 若大量输出 "red robot" 等重复内容，可能是 VQ 码本利用不足、训练不足或数据问题，可增加 epochs、调大 `max_samples`。 |
 | **LoRA 评估** | 使用 LoRA 训练时，eval 需同时指定 `--projector_ckpt` 和 `--lora_dir`（或通过 `--config` 自动推断）。 |
 | **Chat 模板** | 训练与 eval 均使用 Qwen chat 模板 + `add_generation_prompt`，确保模型在 assistant 位置正确生成。 |
@@ -132,92 +132,134 @@ Replace the dummy dataset with your 3D–text dataset (e.g. 3D captioning or QA)
 
 ---
 
-## 对齐训练与效果检验（Encoder 已训练好后）
+## 训练指令
 
-Encoder（VQ-VAE）已训练好后，用本小节完成 **3D–文本对齐**（只训练 projector，可选 LoRA）并**检验效果**。  
-**完整说明（数据格式、脚本参数、VAE 冻结、自定义数据集接入等）见 [TRAIN_ALIGNMENT.md](TRAIN_ALIGNMENT.md)。**
+在项目根目录执行。需先准备好 VAE 权重与数据，并修改 `configs/3d_align_train.yaml` 中的路径（`vl_model`、`vae_ckpt`、`data_dir`）。
 
-### 0. 推荐工作流（配置文件 + 脚本）
-
-修改 `configs/3d_align_train.yaml` 后，通过脚本一键启动：
+### 多卡训练（推荐）
 
 ```bash
-# 多卡训练
 bash scripts/run_3d_align_train.sh
+```
 
-# 或单卡调试
+### 单卡调试
+
+```bash
 python scripts/run_3d_align_train.py --config configs/3d_align_train.yaml --debug
 ```
 
-配置中可设置 `data_dir`、`max_samples`、`output_run` 等；训练完成后，将 config 中 `output_run` 改为实际生成的子目录名（如 `ep2_lr1e-4_bs2_n500_lora8`），再执行 eval。
-
-### 1. 对齐训练
-
-- **数据**：每个样本需要「3D 表示」+「文本」（如描述/问答）。两种用法：
-  - **方式 A**：用 VAE 先抽好码本特征，每个样本为 `(feats_3d [N, latent_dim], coords_3d [N, 4], input_ids, attention_mask, labels)`，DataLoader 的 `collate_fn` 用 `collate_3d_text(batch, latent_dim=model.projector.latent_dim)`。
-  - **方式 B**：直接提供原始 3D 批次，每个样本为 `(inputs_3d: {sparse_sdf, sparse_index, batch_idx}, input_ids, attention_mask, labels)`；`forward_with_3d(..., inputs_3d=batch["inputs_3d"])` 会在内部用 VAE 得到码本 feats（与 Decode 同源）。
-- **命令示例**（项目根目录下）：
+### 指定配置文件
 
 ```bash
-# 必须：指定已训练好的 VAE 配置与权重；输出里会保存 projector 权重
-python vae_qwen3vl/train_finetune.py \
-  --vl_model Qwen/Qwen2-VL-2B-Instruct \
-  --vae_config configs/vae/sdf_vqvae_stage1.json \
-  --vae_ckpt path/to/your_trained_vae.pt \
-  --output_dir ./outputs_3d_vl \
-  --max_3d_tokens 2048 \
-  --use_3d_pos \
-  --epochs 3 --batch_size 4 --lr 1e-4
+bash scripts/run_3d_align_train.sh configs/3d_align_train.yaml
 ```
 
-- 若要对 LLM 做轻量微调，可加 `--use_lora --lora_r 8`（需安装 peft）。
-- 训练结束后，projector 权重在 `--output_dir` 下，例如 `projector_final.pt`。
+### 训练输出
 
-### 2. 效果检验
+- 保存目录：`output_dir/ep{epochs}_lr{lr}_bs{bs}_n{samples}_lora{r}_{时间戳}/`
+- 日志：`logs/train_{时间戳}_rank{rank}.log`
+- 权重：`projector_final.pt`、`lora_final/`（若启用 LoRA）
+- 指标：`training_metrics.jsonl`（每步 step / epoch / loss / lr），用于画曲线
 
-- **3D → 文本生成**：用训练好的 VAE + projector 做推理，看模型能否根据 3D 生成合理描述。
-- **Mesh 重建**：用同一 3D 的 `encoding_indices` 做 `vae.Decode`，确认能稳定重建 mesh，说明 3D 理解与重建共用同一套码本表示。
+### 可视化训练进度
 
-**推荐：用脚本 `eval_3d_vl.py` 一次做完「生成 + 可选 mesh 保存」：**
+训练结束后（或中途）用同一 run 目录下的 `training_metrics.jsonl` 画 loss 与学习率曲线：
 
 ```bash
-# 使用配置文件（与训练一致，自动加载 LoRA + projector + 真实数据）
+# 指定 run 目录（自动找 training_metrics.jsonl）
+python vae_qwen3vl/plot_training.py --run_dir outputs_3d_align/ep10_lr5e-5_bs4_nall_lora16_20260219_023800
+
+# 或直接指定指标文件
+python vae_qwen3vl/plot_training.py --metrics outputs_3d_align/xxx/training_metrics.jsonl --out ./curve.png
+
+# 对 loss 做 10% 窗口平滑
+python vae_qwen3vl/plot_training.py --run_dir outputs_3d_align/xxx --smooth 0.1
+```
+
+图片会保存到 run 目录下的 `training_curve.png`（需安装 `matplotlib`）。
+
+**收敛过程动态刷新（边训练边看图）**：在训练**进行中**另开一个终端，对同一 `run_dir` 加 `--live`，会弹窗并每隔几秒重读 `training_metrics.jsonl` 重绘曲线，实时看收敛；同时会更新 run 目录下的 `training_curve.png`。按 Ctrl+C 结束动态刷新。
+
+```bash
+# 终端 1：正常启动训练
+python vae_qwen3vl/train_finetune.py ...
+
+# 终端 2：指定与上面相同的 output_dir（即 run_dir），加 --live
+python vae_qwen3vl/plot_training.py --run_dir outputs_3d_align/你的run目录 --live
+
+# 可选：刷新间隔（秒）、平滑
+python vae_qwen3vl/plot_training.py --run_dir outputs_3d_align/xxx --live --interval 3 --smooth 0.1
+```
+
+---
+
+## 测试 / 评估指令
+
+在项目根目录执行。评估前需将 `configs/3d_align_train.yaml` 中的 `output_run` 设为本次训练的实际子目录名（如 `ep10_lr5e-5_bs4_nall_lora16_20260216_143022`）。
+
+### 使用配置文件（推荐）
+
+```bash
+python vae_qwen3vl/eval_3d_vl.py --config configs/3d_align_train.yaml
+```
+
+从 config 自动加载 VAE、projector、LoRA、data_dir 等，输出写入 `output_dir/output_run/eval_out/`。
+
+### 指定输出目录
+
+```bash
 python vae_qwen3vl/eval_3d_vl.py --config configs/3d_align_train.yaml --output_dir ./eval_out
-
-# 仅 3D → 文本生成（无 data_path 时用随机 3D 做快速测试）
-python vae_qwen3vl/eval_3d_vl.py \
-  --vae_config configs/vae/sdf_vqvae_stage1.json \
-  --vae_ckpt path/to/your_trained_vae.pt \
-  --projector_ckpt path/to/projector_final.pt \
-  --vl_model Qwen/Qwen2-VL-2B-Instruct \
-  --output_dir ./eval_out
-
-# 使用 LoRA 时需同时指定 lora_dir
-python vae_qwen3vl/eval_3d_vl.py ... --lora_dir outputs_3d_align/ep2_lr1e-4_bs2_n500_lora8/lora_final
-
-# 使用真实数据（与训练相同格式）
-python vae_qwen3vl/eval_3d_vl.py ... --data_dir train_sdf_dataset
-
-# 指定一个 3D 批次（.pt 里为 dict: sparse_sdf, sparse_index, batch_idx）
-python vae_qwen3vl/eval_3d_vl.py ... --data_path path/to/one_batch.pt --prompt "Describe this 3D shape in one sentence:"
-
-# 同时做 mesh 重建并保存到 output_dir
-python vae_qwen3vl/eval_3d_vl.py ... --save_mesh --voxel_resolution 256
 ```
 
-- 生成结果会写在 `{output_dir}/generated.txt`。
-- 使用 `--save_mesh` 时，会用当前 3D 的 `encoding_indices` 走 `Decode` → `sparse2mesh`，并在 `output_dir` 下保存 `.obj`，用于肉眼或下游检查重建质量。
+### 限制评估样本数
 
-### 3. 自建 3D–文本数据集接入训练
+```bash
+python vae_qwen3vl/eval_3d_vl.py --config configs/3d_align_train.yaml --max_eval_samples 50
+```
 
-**内置 SDF 数据集**：通过 config 设置 `data_dir: train_sdf_dataset` 和 `data_format: sdf_caption`，可使用 `SDF3DCaptionDataset`，要求目录内有 `metadata.csv`（含 sha256、captions、sdf_computed、r512_num_points 等列）及 `{sha256}_r512.npz`。可通过 `max_samples` 限制样本数（0 表示全量）。
+### 保存 mesh 重建
 
-若不用 `--dummy_data` 且非 sdf_caption 格式，需要实现自己的 `Dataset` 和 DataLoader，并替换 `train_finetune.py` 里相应分支：
+```bash
+python vae_qwen3vl/eval_3d_vl.py --config configs/3d_align_train.yaml --save_mesh
+```
 
-- 每个 batch 要么包含 `feats_3d`、`coords_3d`（与 `model.projector.latent_dim` 一致），要么包含 `inputs_3d`（sparse_sdf, sparse_index, batch_idx）。
-- 同时提供 `input_ids`、`attention_mask`、`labels`（与 Qwen 文本格式一致，labels 中非生成部分可为 -100）。
+### 不使用 config，手动指定路径
 
-这样即可在 Encoder 已固定的前提下，只训练对齐层并系统检验 3D 理解与 mesh 重建效果。
+```bash
+python vae_qwen3vl/eval_3d_vl.py \
+  --vae_config configs/vae/sdf_vqvae_stage2.json \
+  --vae_ckpt outputs/sdf_vqvae_stage2_1/ckpts/vqvae_step0000459.pt \
+  --projector_ckpt outputs_3d_align/ep10_lr5e-5_bs4_nall_lora16_xxx/projector_final.pt \
+  --lora_dir outputs_3d_align/ep10_lr5e-5_bs4_nall_lora16_xxx/lora_final \
+  --vl_model /path/to/model_qwen3vl_2B \
+  --data_dir train_sdf_dataset \
+  --projector_layers 3 \
+  --output_dir ./eval_out
+```
+
+### 评估结果
+
+- `eval_results.jsonl`：每行包含 `idx`、`generated`、`gt_caption`
+- `generated.txt`：仅单样本时生成
+- `recon_mesh_*.obj`：`--save_mesh` 时保存 mesh 重建
+
+---
+
+## 配置说明
+
+主要参数在 `configs/3d_align_train.yaml` 中：
+
+| 参数 | 说明 |
+|------|------|
+| `vl_model` | Qwen3-VL 模型路径 |
+| `vae_ckpt` | VAE 权重路径 |
+| `data_dir` | SDF 数据集目录（含 metadata.csv、*.npz） |
+| `output_run` | 评估时使用的训练子目录名（带时间戳） |
+| `epochs` | 训练轮数 |
+| `max_samples` | 0=全量，>0 限制样本数 |
+| `projector_layers` | Projector MLP 层数（须与训练一致） |
+
+**完整说明**（数据格式、脚本参数、VAE 冻结、自定义数据集）见 [TRAIN_ALIGNMENT.md](TRAIN_ALIGNMENT.md)。
 
 ## Dependencies
 

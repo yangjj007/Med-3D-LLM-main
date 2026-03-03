@@ -14,10 +14,48 @@ Usage:
 
 import argparse
 import os
+import re
+
+# 确保 3D-VL 评估使用 spconv（新终端直接 python 运行时不会走 shell 脚本的 export）
+os.environ.setdefault("SPARSE_BACKEND", "spconv")
+
 import sys
 import json
 
 import torch
+
+
+def _resolve_latest_projector_ckpt(run_dir: str) -> str | None:
+    """若 run_dir 下无 projector_final.pt，则返回 epoch 最大的 projector_epoch{N}.pt，否则返回 None。"""
+    import glob
+    pattern = os.path.join(run_dir, "projector_epoch*.pt")
+    files = glob.glob(pattern)
+    best_epoch, best_path = -1, None
+    for p in files:
+        name = os.path.basename(p)
+        m = re.match(r"projector_epoch(\d+)\.pt", name)
+        if m and os.path.isfile(p):
+            e = int(m.group(1))
+            if e > best_epoch:
+                best_epoch, best_path = e, p
+    return best_path
+
+
+def _resolve_latest_lora_dir(run_dir: str) -> str | None:
+    """若 run_dir 下无 lora_final 目录，则返回 epoch 最大的 lora_epoch{N} 目录，否则返回 None。"""
+    if not os.path.isdir(run_dir):
+        return None
+    best_epoch, best_path = -1, None
+    for name in os.listdir(run_dir):
+        m = re.match(r"lora_epoch(\d+)$", name)
+        if not m:
+            continue
+        p = os.path.join(run_dir, name)
+        if os.path.isdir(p):
+            e = int(m.group(1))
+            if e > best_epoch:
+                best_epoch, best_path = e, p
+    return best_path
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -75,8 +113,11 @@ def _to_device(x, device):
     return x
 
 
-def _run_generation(model, inputs_3d, tokenizer, prompt, max_new_tokens, device):
+def _run_generation(model, inputs_3d, tokenizer, prompt, max_new_tokens, device, vae_model=None):
     """Run 3D -> text generation for one sample. Returns (generated_text, encoding_indices)."""
+    if getattr(model, "use_discrete_3d_tokens", False) and vae_model is not None:
+        return _run_generation_discrete(model, inputs_3d, tokenizer, prompt, max_new_tokens, device, vae_model)
+
     with torch.no_grad():
         embeds_3d, mask_3d, encoding_indices = model.get_3d_embeds_and_encoding_indices(inputs_3d, device=device)
     seq_3d = embeds_3d.shape[1]
@@ -117,6 +158,38 @@ def _run_generation(model, inputs_3d, tokenizer, prompt, max_new_tokens, device)
     return text, encoding_indices
 
 
+def _run_generation_discrete(model, inputs_3d, tokenizer, prompt, max_new_tokens, device, vae_model):
+    """Discrete 3D token path: VAE Encode -> 8x8x8 pool -> mesh string -> tokenize -> generate. Returns (generated_text, encoding_indices)."""
+    from vae_qwen3vl.vae_latent_extractor import extract_3d_latent_and_indices
+    from vae_qwen3vl.spatial_pool_3d import (
+        encoding_indices_to_pooled_sequence,
+        pooled_sequence_to_mesh_token_string,
+    )
+    with torch.no_grad():
+        inputs_3d_dev = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs_3d.items()}
+        encoding_indices = vae_model.Encode(inputs_3d_dev)
+    pooled = encoding_indices_to_pooled_sequence(encoding_indices, 0)
+    mesh_str = pooled_sequence_to_mesh_token_string(pooled)
+    user_content = mesh_str + "\n" + prompt
+    prefix = tokenizer.apply_chat_template(
+        [{"role": "user", "content": user_content}, {"role": "assistant", "content": ""}],
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    input_ids = torch.tensor([prefix], dtype=torch.long, device=device)
+    with torch.no_grad():
+        out = model.vl_model.generate(
+            input_ids=input_ids,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        )
+    prompt_len = input_ids.shape[1]
+    generated_ids = out[:, prompt_len:] if out.shape[1] > prompt_len else out
+    text = tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
+    return text, encoding_indices
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate 3D-VL: generation and optional mesh reconstruction")
     parser.add_argument("--config", type=str, default=None, help="Path to YAML config (e.g. configs/3d_align_train.yaml)")
@@ -136,9 +209,13 @@ def main():
     parser.add_argument("--voxel_resolution", type=int, default=256)
     parser.add_argument("--mc_threshold", type=float, default=0.2)
     parser.add_argument("--max_3d_tokens", type=int, default=2048)
+    parser.add_argument("--truncate_mode", type=str, default=None, choices=["head", "random_sample"],
+                        help="When 3D tokens exceed max_3d_tokens: head=first L; random_sample=randomly sample L (default from config or head)")
     parser.add_argument("--use_3d_pos", action="store_true", default=None, help="Use 3D positional encoding")
+    parser.add_argument("--projector_layers", type=int, default=None, help="Projector MLP layers (须与训练一致，默认 1)")
     args, remaining = parser.parse_known_args()
 
+    run_d = None
     # Load config
     if args.config:
         cfg_path = args.config if os.path.isabs(args.config) else os.path.join(PROJECT_ROOT, args.config)
@@ -146,7 +223,7 @@ def main():
         cfg_path = None
     if cfg_path and os.path.isfile(cfg_path):
         cfg = _load_config(cfg_path, PROJECT_ROOT)
-        for k in ("vl_model", "vae_config", "vae_ckpt", "data_dir", "prompt", "max_3d_tokens"):
+        for k in ("vl_model", "vae_config", "vae_ckpt", "data_dir", "prompt", "max_3d_tokens", "projector_layers", "truncate_mode"):
             if k in cfg and getattr(args, k, None) is None:
                 setattr(args, k, cfg[k])
         def _run_dir():
@@ -159,20 +236,38 @@ def main():
             return out_d
 
         run_d = _run_dir()
+        if os.path.isdir(run_d) and os.path.isdir(os.path.join(run_d, "tokenizer_final")):
+            args.use_discrete_3d_tokens = True
         if args.output_dir is None or args.output_dir == "./eval_3d_vl_out":
             args.output_dir = os.path.join(run_d, "eval_out")
         args.use_3d_pos = args.use_3d_pos if args.use_3d_pos is not None else cfg.get("use_3d_pos", False)
         if args.projector_ckpt is None:
             args.projector_ckpt = os.path.join(run_d, "projector_final.pt")
+        # 若无 final（训练未跑完），自动选 epoch 最大的 projector
+        if not os.path.isfile(args.projector_ckpt):
+            latest = _resolve_latest_projector_ckpt(run_d)
+            if latest:
+                args.projector_ckpt = latest
+                print(f"[Eval] projector_final.pt 不存在，使用最新 epoch: {os.path.basename(args.projector_ckpt)}")
         if args.lora_dir is None and cfg.get("use_lora"):
             args.lora_dir = os.path.join(run_d, "lora_final")
+        # 若无 lora_final，自动选 epoch 最大的 lora_epoch{N}
+        if args.lora_dir and not os.path.isdir(args.lora_dir):
+            latest_lora = _resolve_latest_lora_dir(run_d)
+            if latest_lora:
+                args.lora_dir = latest_lora
+                print(f"[Eval] lora_final 不存在，使用最新 epoch: {os.path.basename(args.lora_dir)}")
         if args.data_dir is None:
             args.data_dir = cfg.get("data_dir")
     if args.use_3d_pos is None:
         args.use_3d_pos = False
 
-    if not args.vae_config or not args.vae_ckpt or not args.projector_ckpt:
-        parser.error("Require --vae_config, --vae_ckpt, --projector_ckpt (or --config)")
+    use_discrete = getattr(args, "use_discrete_3d_tokens", False)
+
+    if not args.vae_config or not args.vae_ckpt:
+        parser.error("Require --vae_config, --vae_ckpt (or --config)")
+    if not use_discrete and not args.projector_ckpt:
+        parser.error("Require --projector_ckpt (or --config) unless evaluating discrete-token run")
 
     args.vl_model = args.vl_model or "Qwen/Qwen2-VL-2B-Instruct"
     if args.data_dir and not os.path.isabs(args.data_dir):
@@ -181,17 +276,22 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     vae_model = load_vae_from_config(args.vae_config, args.vae_ckpt, device)
-    from vae_qwen3vl import Qwen3VLWith3DBranch
+    from vae_qwen3vl import Qwen3VLWith3DBranch, resize_token_embeddings_and_init_mesh
 
+    projector_layers = args.projector_layers if args.projector_layers is not None else 1
     model = Qwen3VLWith3DBranch(
         model_name_or_path=args.vl_model,
         vae_model=vae_model,
         max_3d_tokens=args.max_3d_tokens,
         use_3d_pos=args.use_3d_pos,
+        projector_num_layers=projector_layers,
         torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+        truncate_mode=args.truncate_mode or "head",
+        use_discrete_3d_tokens=use_discrete,
     )
-    ckpt = torch.load(args.projector_ckpt, map_location="cpu")
-    model.projector.load_state_dict(ckpt, strict=True)
+    if not use_discrete and model.projector is not None:
+        ckpt = torch.load(args.projector_ckpt, map_location="cpu")
+        model.projector.load_state_dict(ckpt, strict=True)
 
     if args.lora_dir and os.path.isdir(args.lora_dir):
         try:
@@ -208,9 +308,13 @@ def main():
         tokenizer = model.vl_model.get_tokenizer() if hasattr(model.vl_model, "get_tokenizer") else None
     except Exception:
         tokenizer = None
-    if tokenizer is None:
+    from transformers import AutoTokenizer
+    if use_discrete and run_d and os.path.isdir(os.path.join(run_d, "tokenizer_final")):
+        tokenizer = AutoTokenizer.from_pretrained(os.path.join(run_d, "tokenizer_final"), trust_remote_code=True)
+        resize_token_embeddings_and_init_mesh(model, tokenizer)
+        print("Loaded expanded tokenizer from run and resized model embeddings")
+    elif tokenizer is None:
         try:
-            from transformers import AutoTokenizer
             tokenizer = AutoTokenizer.from_pretrained(args.vl_model, trust_remote_code=True)
         except Exception:
             from transformers import Qwen2VLProcessor
@@ -256,7 +360,7 @@ def main():
     results = []
     for idx, (inputs_3d, gt_caption) in enumerate(samples):
         generated, encoding_indices = _run_generation(
-            model, inputs_3d, tokenizer, args.prompt, args.max_new_tokens, device
+            model, inputs_3d, tokenizer, args.prompt, args.max_new_tokens, device, vae_model=vae_model
         )
         results.append({"idx": idx, "generated": generated, "gt_caption": gt_caption or ""})
         print(f"[{idx}] Generated: {generated[:80]}{'...' if len(generated) > 80 else ''}")

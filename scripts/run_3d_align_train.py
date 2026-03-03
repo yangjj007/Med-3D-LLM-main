@@ -45,11 +45,24 @@ def main():
         print("Config is empty")
         sys.exit(1)
 
-    # Write accelerate config
-    acc_cfg = cfg.get("accelerate", {})
+    # Write accelerate config（可选 DeepSpeed ZeRO-2 降低每卡显存）
+    acc_cfg = dict(cfg.get("accelerate", {}))
     if args.debug:
-        acc_cfg = {**acc_cfg, "num_processes": 1}
+        acc_cfg["num_processes"] = 1
         print("Debug 模式: 单卡运行 (num_processes=1)")
+    if cfg.get("use_deepspeed", False):
+        acc_cfg["distributed_type"] = "DEEPSPEED"
+        acc_cfg.setdefault("fsdp_config", {})
+        grad_accum = cfg.get("gradient_accumulation_steps", 1)
+        grad_clip = cfg.get("grad_clip", 0.0) or 1.0
+        acc_cfg["deepspeed_config"] = {
+            "gradient_accumulation_steps": grad_accum,
+            "gradient_clipping": grad_clip,
+            "offload_optimizer_device": "none",
+            "offload_param_device": "none",
+            "zero_stage": 2,
+        }
+        print(f"DeepSpeed ZeRO-2 已启用（gradient_accumulation_steps={grad_accum}, gradient_clipping={grad_clip}）")
     acc_path = os.path.join(PROJECT_ROOT, "configs", "accelerate.yaml")
     os.makedirs(os.path.dirname(acc_path), exist_ok=True)
     with open(acc_path, "w", encoding="utf-8") as f:

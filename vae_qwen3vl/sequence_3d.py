@@ -1,9 +1,14 @@
 """
 Prepare 3D latent sequence for LLM: sort by (z, y, x), truncate or pad to
 max_3d_tokens, and build attention_mask. Supports batched (batch_idx in coords).
+
+Truncate modes when sequence is longer than max_3d_tokens:
+  - "head": take the first L tokens after sort (original behavior).
+  - "random_sample": randomly sample L tokens without replacement, preserving
+    spatial spread for better understanding while avoiding OOM.
 """
 
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Literal
 import torch
 import numpy as np
 
@@ -31,6 +36,7 @@ def prepare_3d_sequence(
     max_3d_tokens: int = 2048,
     pad_value: float = 0.0,
     sort: bool = True,
+    truncate_mode: Literal["head", "random_sample"] = "head",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Turn (feats, coords) into fixed-length token sequence and mask for LLM.
@@ -38,15 +44,17 @@ def prepare_3d_sequence(
     Args:
         feats: [N, 16] continuous latent.
         coords: [N, 4] (batch_idx, x, y, z).
-        max_3d_tokens: Target sequence length; longer sequences are truncated
-                       (or downsampled), shorter are padded.
+        max_3d_tokens: Target sequence length. If <= 0: no truncation, output length = N (use all).
+                       If > 0: longer sequences truncated, shorter padded to max_3d_tokens.
         pad_value: Value to use for padding feats.
         sort: Whether to sort by (batch_idx, z, y, x) before truncate/pad.
+        truncate_mode: When N > max_3d_tokens, "head" = take first L tokens;
+                       "random_sample" = randomly sample L tokens (better spatial coverage, avoids OOM).
 
     Returns:
-        feats_out: [max_3d_tokens, 16] padded/truncated.
-        attention_mask: [max_3d_tokens] bool, True where valid (not padding).
-        coords_out: [max_3d_tokens, 4] padded (padding coords can be 0); optional for pos encoding.
+        feats_out: [L, 16] with L = max_3d_tokens (or N when max_3d_tokens <= 0).
+        attention_mask: [L] bool, True where valid (not padding).
+        coords_out: [L, 4] padded (padding coords can be 0); optional for pos encoding.
     """
     N, C = feats.shape
     device = feats.device
@@ -54,12 +62,21 @@ def prepare_3d_sequence(
     if sort:
         coords, feats = _sort_coords_feats(coords, feats)
 
-    if N >= max_3d_tokens:
-        feats = feats[:max_3d_tokens]
-        coords = coords[:max_3d_tokens]
-        attention_mask = torch.ones(max_3d_tokens, dtype=torch.bool, device=device)
+    # max_3d_tokens <= 0: 不截断，有多少用多少，仅当需要对齐长度时才 pad（由 batched 调用时传入 target_len）
+    target_len = max_3d_tokens if max_3d_tokens > 0 else N
+
+    if N >= target_len:
+        if truncate_mode == "random_sample":
+            perm = torch.randperm(N, device=device)
+            idx = perm[:target_len]
+            feats = feats[idx]
+            coords = coords[idx]
+        else:
+            feats = feats[:target_len]
+            coords = coords[:target_len]
+        attention_mask = torch.ones(target_len, dtype=torch.bool, device=device)
     else:
-        pad_len = max_3d_tokens - N
+        pad_len = target_len - N
         feats = torch.cat([
             feats,
             torch.full((pad_len, C), pad_value, dtype=feats.dtype, device=device),
@@ -83,12 +100,32 @@ def prepare_3d_sequence_batched(
     max_3d_tokens: int = 2048,
     pad_value: float = 0.0,
     sort: bool = True,
+    truncate_mode: Literal["head", "random_sample"] = "head",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Batched version: coords have coords[:, 0] = batch_idx. Produces
-    feats [batch_size, max_3d_tokens, 16], attention_mask [batch_size, max_3d_tokens].
+    feats [batch_size, L, 16], attention_mask [batch_size, L].
+    When max_3d_tokens <= 0: L = batch max length (no truncation, pad only to batch max).
+    When max_3d_tokens > 0: L = min(max_3d_tokens, batch_max) — 比上限少则有多少进多少不填充，多则截断。
+    truncate_mode: passed to prepare_3d_sequence when truncating each sample.
     """
     device = feats.device
+    # 先算每个样本点数与 batch 内最大长度
+    per_sample_len = []
+    for b in range(batch_size):
+        mask_b = (coords[:, 0] == b)
+        per_sample_len.append(mask_b.sum().item())
+    batch_actual_max = max(max(per_sample_len), 1)
+
+    # 确定本 batch 使用的序列长度 L
+    if max_3d_tokens is not None and max_3d_tokens <= 0:
+        target_len = batch_actual_max  # 不截断，按 batch 内实际最大
+    else:
+        # 打开截断时：L = min(上限, batch 实际最大)，不把短 batch 填充到上限
+        cap = max_3d_tokens if max_3d_tokens and max_3d_tokens > 0 else batch_actual_max
+        target_len = min(cap, batch_actual_max)
+    target_len = max(target_len, 1)
+
     out_feats = []
     out_mask = []
     out_coords = []
@@ -101,7 +138,7 @@ def prepare_3d_sequence_batched(
         else:
             fb = feats.new_zeros(0, feats.shape[-1])
             cb = coords.new_zeros(0, 4)
-        fb, mb, cob = prepare_3d_sequence(fb, cb, max_3d_tokens, pad_value, sort)
+        fb, mb, cob = prepare_3d_sequence(fb, cb, target_len, pad_value, sort, truncate_mode=truncate_mode)
         out_feats.append(fb)
         out_mask.append(mb)
         out_coords.append(cob)

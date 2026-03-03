@@ -658,6 +658,12 @@ def main():
         default=None,
         help='Filter objects with aesthetic score below this value (TRELLIS-500K only)'
     )
+    parser.add_argument(
+        '--max_samples',
+        type=int,
+        default=None,
+        help='Only process this many samples (default: process all). Uses first N rows after filters.'
+    )
     
     args = parser.parse_args()
     
@@ -671,6 +677,7 @@ def main():
     print(f"Output directory: {args.output_dir}")
     print(f"Resolutions: {resolutions}")
     print(f"Threshold factor: {args.threshold_factor}")
+    print(f"Max samples: {args.max_samples if args.max_samples is not None else 'all'}")
     print(f"Skip existing: {not args.no_skip}")
     
     # Load metadata based on format
@@ -695,6 +702,11 @@ def main():
     if len(metadata) == 0:
         print("\n❌ No data found in metadata")
         return 1
+    
+    # Limit to max_samples if specified
+    if args.max_samples is not None:
+        metadata = metadata.head(args.max_samples)
+        print(f"  Limited to first {args.max_samples} samples")
     
     # Process dataset
     try:

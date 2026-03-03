@@ -42,11 +42,15 @@ class Qwen3VLWith3DBranch(nn.Module):
         projector_num_layers: int = 1,
         torch_dtype: Optional[torch.dtype] = None,
         use_vl_model: Optional[nn.Module] = None,
+        truncate_mode: str = "head",
+        use_discrete_3d_tokens: bool = False,
         **vl_kwargs,
     ):
         super().__init__()
         self.vae_model = vae_model
         self.max_3d_tokens = max_3d_tokens
+        self.truncate_mode = truncate_mode
+        self.use_discrete_3d_tokens = use_discrete_3d_tokens
         if torch_dtype is None:
             torch_dtype = torch.float32
         if use_vl_model is not None:
@@ -64,16 +68,19 @@ class Qwen3VLWith3DBranch(nn.Module):
         ) or getattr(
             getattr(self.vl_config, "text_config", None), "hidden_size", 1024
         )
-        if vae_model is not None and hasattr(vae_model, "vq") and hasattr(vae_model.vq, "embeddings"):
-            latent_dim = vae_model.vq.embeddings.weight.shape[1]
-        self.projector = Projector3D(
-            latent_dim=latent_dim,
-            hidden_size=hidden_size,
-            num_layers=projector_num_layers,
-            use_3d_pos=use_3d_pos,
-            pos_mode="sinusoidal",
-            max_coord=64,
-        )
+        if use_discrete_3d_tokens:
+            self.projector = None
+        else:
+            if vae_model is not None and hasattr(vae_model, "vq") and hasattr(vae_model.vq, "embeddings"):
+                latent_dim = vae_model.vq.embeddings.weight.shape[1]
+            self.projector = Projector3D(
+                latent_dim=latent_dim,
+                hidden_size=hidden_size,
+                num_layers=projector_num_layers,
+                use_3d_pos=use_3d_pos,
+                pos_mode="sinusoidal",
+                max_coord=64,
+            )
         if vae_model is not None:
             for p in vae_model.parameters():
                 p.requires_grad = False
@@ -91,9 +98,11 @@ class Qwen3VLWith3DBranch(nn.Module):
         Returns: embeddings [seq_len, hidden_size] or [B, seq_len, hidden_size],
                  attention_mask [seq_len] or [B, seq_len].
         """
+        if self.use_discrete_3d_tokens or self.projector is None:
+            raise RuntimeError("get_3d_embeds is for projector path only; use discrete token input_ids for discrete mode.")
         if feats.dim() == 2:
             feats, attention_mask_3d, coords_out = prepare_3d_sequence(
-                feats, coords, max_3d_tokens=self.max_3d_tokens
+                feats, coords, max_3d_tokens=self.max_3d_tokens, truncate_mode=self.truncate_mode
             )
             feats = feats.unsqueeze(0)
             attention_mask_3d = attention_mask_3d.unsqueeze(0)
@@ -121,13 +130,15 @@ class Qwen3VLWith3DBranch(nn.Module):
             attention_mask_3d: [1, seq_len] mask for 3D tokens.
             encoding_indices: SparseTensor to pass to vae_model.Decode(...).
         """
+        if self.use_discrete_3d_tokens or self.projector is None:
+            raise RuntimeError("get_3d_embeds_and_encoding_indices is for projector path only.")
         if self.vae_model is None:
             raise ValueError("vae_model is required for get_3d_embeds_and_encoding_indices.")
         feats_3d, coords_3d, encoding_indices = extract_3d_latent_and_indices(
             inputs_3d, self.vae_model, device=device
         )
         feats_seq, mask_3d, coords_seq = prepare_3d_sequence(
-            feats_3d, coords_3d, max_3d_tokens=self.max_3d_tokens
+            feats_3d, coords_3d, max_3d_tokens=self.max_3d_tokens, truncate_mode=self.truncate_mode
         )
         feats_seq = feats_seq.unsqueeze(0).to(device)
         mask_3d = mask_3d.unsqueeze(0).to(device)
@@ -149,7 +160,10 @@ class Qwen3VLWith3DBranch(nn.Module):
         or precomputed feats_3d [B, N, latent_dim] and coords_3d [B, N, 4].
         When inputs_3d + vae_model are used, outputs include encoding_indices_3d
         for mesh reconstruction via vae_model.Decode(encoding_indices_3d).
+        Not used in discrete-token mode (use forward with input_ids only).
         """
+        if self.use_discrete_3d_tokens or self.projector is None:
+            raise RuntimeError("forward_with_3d is for projector path only; use forward(input_ids=..., labels=...) for discrete mode.")
         encoding_indices = None
         if inputs_3d is not None and self.vae_model is not None:
             feats_3d, coords_3d, encoding_indices = extract_3d_latent_and_indices(
@@ -163,7 +177,8 @@ class Qwen3VLWith3DBranch(nn.Module):
         batch_size = input_ids.shape[0]
         if feats_3d.dim() == 2:
             feats_seq, mask_3d, coords_seq = prepare_3d_sequence_batched(
-                feats_3d, coords_3d, batch_size=batch_size, max_3d_tokens=self.max_3d_tokens
+                feats_3d, coords_3d, batch_size=batch_size, max_3d_tokens=self.max_3d_tokens,
+                truncate_mode=self.truncate_mode
             )
         else:
             if feats_3d.dim() == 3:
@@ -173,7 +188,8 @@ class Qwen3VLWith3DBranch(nn.Module):
                 coords_flat = torch.cat([b_idx.unsqueeze(1).to(coords_flat.dtype), coords_flat[:, 1:4]], dim=1)
                 feats_3d, coords_3d = feats_flat, coords_flat
             feats_seq, mask_3d, coords_seq = prepare_3d_sequence_batched(
-                feats_3d, coords_3d, batch_size=batch_size, max_3d_tokens=self.max_3d_tokens
+                feats_3d, coords_3d, batch_size=batch_size, max_3d_tokens=self.max_3d_tokens,
+                truncate_mode=self.truncate_mode
             )
         if feats_seq.device != input_ids.device:
             feats_seq = feats_seq.to(input_ids.device)

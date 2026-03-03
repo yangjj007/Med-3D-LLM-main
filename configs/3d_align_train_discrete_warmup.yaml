@@ -1,0 +1,61 @@
+# 3D-VL 离散 Token 对齐 - Stage 1 词汇扫盲（Warmup）
+# 只训 input_embeddings + lm_head，其余冻结；单卡即可，无需 LoRA。
+# 启动：export SPARSE_BACKEND=spconv && python scripts/run_3d_align_train.py --config configs/3d_align_train_discrete_warmup.yaml
+
+# === 路径（请按本机路径修改）===
+vl_model: "/yangjunjie/model_qwen3vl_2B"
+vae_config: "configs/vae/sdf_vqvae_stage2.json"
+vae_ckpt: "outputs/sdf_vqvae_stage2_512_0.5-amp/ckpts/vqvae_step0000100.pt"
+data_dir: "train_sdf_dataset/res512_thre0.5"
+output_dir: "outputs_3d_align"
+
+# === Stage 1 训练参数 ===
+lr: 1.0e-4
+epochs: 2
+batch_size: 2
+max_3d_tokens: 512         # 离散路径固定 512，此项仅作占位
+truncate_mode: "head"
+use_3d_pos: false          # 离散路径无 Projector，忽略
+projector_layers: 1        # 离散路径不建 Projector，忽略
+use_discrete_3d_tokens: true
+reconstruction_ratio: 0.0   # Stage 1 仅 caption，不混重建
+training_stage: "warmup"
+weight_decay: 0.01
+grad_clip: 1.0
+use_lr_scheduler: true
+warmup_ratio: 0.05
+
+# Stage 1 不挂 LoRA（脚本仅在 training_stage=sft 时挂载）
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.1
+
+# 文本 prompt
+prompt: "Describe this 3D shape in one sentence:"
+
+# === 数据参数 ===
+max_samples: 0             # 0=全量
+dummy_data: false
+dummy_samples: 50
+data_format: "sdf_caption"
+
+# === 分布式 / Accelerate（Stage 1 默认单卡，便于直接跑通）===
+accelerate:
+  compute_environment: LOCAL_MACHINE
+  debug: false
+  distributed_type: MULTI_GPU
+  downcast_bf16: "no"
+  enable_cpu_affinity: false
+  gpu_ids: all
+  machine_rank: 0
+  main_training_function: main
+  mixed_precision: bf16
+  num_machines: 1
+  num_processes: 1         # Stage 1 单卡即可；多卡可改为 4
+  rdzv_backend: static
+  same_network: true
+  tpu_env: []
+  tpu_use_cluster: false
+  tpu_use_sudo: false
+  use_cpu: false

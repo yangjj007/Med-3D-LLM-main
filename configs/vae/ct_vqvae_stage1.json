@@ -32,7 +32,7 @@
         "args": {
             "resolution": 512,
             "min_points": 100,
-            "max_points": 250000
+            "max_points": 1000000
         }
     },
     "trainer": {

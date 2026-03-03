@@ -1,0 +1,72 @@
+# 3D-VL 变长 3D Token 训练（Variable-Length）
+# 保留 VAE 全部点（约 8k~12k），Morton 排序 + 动态 padding，软上限 15000。
+# 建议：batch_size=1 + gradient_accumulation_steps 4~8，开启 use_flash_attn_2、use_gradient_checkpointing。
+# 启动：export SPARSE_BACKEND=spconv && python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml
+
+# === 路径（请按本机路径修改）===
+vl_model: "/yangjunjie/model_qwen3vl_2B"
+vae_config: "configs/vae/sdf_vqvae_stage2.json"
+vae_ckpt: "outputs/sdf_vqvae_stage2_512_0.5-amp/ckpts/vqvae_step0000100.pt"
+data_dir: "train_sdf_dataset/res512_thre0.5"
+output_dir: "outputs_3d_align"
+
+# === 离散 + 变长 3D ===
+use_discrete_3d_tokens: true
+use_variable_length_3d_tokens: true
+max_safe_3d_length: 15000
+coord_max_3d: 64
+max_length_variable: 32768
+reconstruction_ratio: 0.0
+training_stage: "warmup"
+
+# === 显存与 batch（变长序列长，建议单卡 bs=1 + 梯度累积）===
+batch_size: 1
+gradient_accumulation_steps: 8
+use_flash_attn_2: true
+use_gradient_checkpointing: true   # 关闭试试能否加速（以显存换时间）
+
+# === 训练参数 ===
+lr: 1.0e-4
+epochs: 2
+max_3d_tokens: 512
+truncate_mode: "head"
+use_3d_pos: false
+projector_layers: 1
+weight_decay: 0.01
+grad_clip: 1.0
+use_lr_scheduler: true
+warmup_ratio: 0.05
+
+use_lora: true
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.1
+
+prompt: "Describe this 3D shape in one sentence:"
+
+# === 数据 ===
+max_samples: 0
+dummy_data: false
+dummy_samples: 50
+data_format: "sdf_caption"
+
+# === Accelerate（可多卡 + DeepSpeed 降显存）===
+use_deepspeed: false        # 变长序列显存大，建议开启 ZeRO-2 分片
+accelerate:
+  compute_environment: LOCAL_MACHINE
+  debug: false
+  distributed_type: MULTI_GPU
+  downcast_bf16: "no"
+  enable_cpu_affinity: false
+  gpu_ids: all
+  machine_rank: 0
+  main_training_function: main
+  mixed_precision: bf16
+  num_machines: 1
+  num_processes: 4          # 多卡时改为 GPU 数，配合 use_deepspeed 降低每卡显存
+  rdzv_backend: static
+  same_network: true
+  tpu_env: []
+  tpu_use_cluster: false
+  tpu_use_sudo: false
+  use_cpu: false

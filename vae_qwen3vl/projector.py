@@ -106,6 +106,7 @@ class Projector3D(nn.Module):
             self.proj = nn.Sequential(*layers)
         self.use_3d_pos = use_3d_pos
         self.pos_encoder = PositionEncoder3D(hidden_size, max_coord, pos_mode) if use_3d_pos else None
+        self.ln = nn.LayerNorm(hidden_size)  # 对齐 3D 与 text embedding 尺度，缓解模式塌缩
 
     def forward(
         self,
@@ -122,4 +123,4 @@ class Projector3D(nn.Module):
         out = self.proj(feats)
         if self.use_3d_pos and self.pos_encoder is not None and coords is not None:
             out = out + self.pos_encoder(coords)
-        return out
+        return self.ln(out)
