@@ -250,8 +250,11 @@ def collate_sdf_caption_discrete(
     vae_model = vae_model.to(device)
     vae_model.eval()
     with torch.no_grad():
+        # 获取 VAE 模型的实际 dtype（bf16 混合精度下为 BFloat16）
+        _model_dtype = next(vae_model.parameters()).dtype
         inputs_3d_device = {
-            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            k: v.to(device=device, dtype=_model_dtype) if isinstance(v, torch.Tensor) and v.is_floating_point()
+            else (v.to(device) if isinstance(v, torch.Tensor) else v)
             for k, v in inputs_3d.items()
         }
         encoding_indices = vae_model.Encode(inputs_3d_device)

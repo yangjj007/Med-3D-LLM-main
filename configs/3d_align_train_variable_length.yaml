@@ -51,7 +51,7 @@ dummy_samples: 50
 data_format: "sdf_caption"
 
 # === Accelerate（可多卡 + DeepSpeed 降显存）===
-use_deepspeed: false        # 变长序列显存大，建议开启 ZeRO-2 分片
+use_deepspeed: true        # 变长序列显存大，建议开启 ZeRO-2 分片
 accelerate:
   compute_environment: LOCAL_MACHINE
   debug: false
