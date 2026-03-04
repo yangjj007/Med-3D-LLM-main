@@ -206,17 +206,17 @@ def collate_sdf_caption_discrete(
     max_safe_3d_length: int = 15000,
     coord_max_3d: int = 64,
     max_length_variable: Optional[int] = None,
-) -> Optional[Dict[str, torch.Tensor]]:
+) -> Dict[str, torch.Tensor]:
     """
     Collate for discrete 3D tokens: run VAE Encode, then either
     - 8x8x8 spatial pool (fixed 512 tokens), or
-    - variable-length: Morton sort; samples with N > max_safe_3d_length are skipped (not used).
+    - variable-length: Morton sort + optional FPS soft cap, pad to batch max via tokenizer.
 
-    Returns input_ids, attention_mask, labels (no inputs_3d); or None if all samples skipped.
+    Returns input_ids, attention_mask, labels (no inputs_3d).
 
     Args:
-        use_variable_length_3d: if True, use all VAE points with Morton sort.
-        max_safe_3d_length: samples with 3D token count > this are skipped (not used for training).
+        use_variable_length_3d: if True, use all VAE points with Morton sort and FPS soft cap.
+        max_safe_3d_length: only FPS-downsample when N > this (e.g. 15000).
         coord_max_3d: max coord value for Morton (current VAE 64^3 -> 64; 512^3 output -> 512).
     """
     from .spatial_pool_3d import (
@@ -274,25 +274,6 @@ def collate_sdf_caption_discrete(
             max_safe_length=max_safe_3d_length,
             coord_max=coord_max_3d,
         )
-        # Filter out skipped samples (seq is None when N > max_safe_3d_length)
-        valid_indices = [i for i, s in enumerate(seq_list) if s is not None]
-        skipped_indices = [i for i, s in enumerate(seq_list) if s is None]
-        if skipped_indices:
-            print(
-                f"[SKIP] {len(skipped_indices)} sample(s) exceeded max_safe_3d_length={max_safe_3d_length}, "
-                f"skipped batch indices: {skipped_indices}. Using {len(valid_indices)} remaining sample(s).",
-                flush=True,
-            )
-        if not valid_indices:
-            print(
-                f"[SKIP] All {batch_size} samples exceeded max_safe_3d_length={max_safe_3d_length}, "
-                "returning None (training step will be skipped).",
-                flush=True,
-            )
-            return None
-        seq_list = [seq_list[i] for i in valid_indices]
-        batch = [batch[i] for i in valid_indices]
-        batch_size = len(batch)
         mesh_strings = [variable_length_sequence_to_mesh_token_string(s) for s in seq_list]
     else:
         pooled_list = batch_encoding_indices_to_pooled_sequences(
