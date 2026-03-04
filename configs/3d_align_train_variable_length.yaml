@@ -62,6 +62,10 @@ lora_dropout: 0.1
 
 prompt: "Describe this 3D shape in one sentence:"
 
+# === 调试（排查 "too many values to unpack" 等 VL forward 异常）===
+debug_vl_forward: true       # 打印 combined_embeds 等输入形状
+debug_qwen3vl_patch: true    # 打印 transformers 版本等补丁日志
+
 # === 数据 ===
 max_samples: 0
 dummy_data: false

@@ -247,6 +247,10 @@ def main():
     parser.add_argument("--sequence_parallel_size", type=int, default=1,
                         help="Sequence parallel degree (1=disabled). TP+SP hybrid: "
                              "e.g. 4 GPUs with tp=2, sp=2 -> DP=1, SP=2, TP=2.")
+    parser.add_argument("--debug_vl_forward", action="store_true",
+                        help="打印 VL forward 输入的详细 debug 信息（combined_embeds 形状等）")
+    parser.add_argument("--debug_qwen3vl_patch", action="store_true",
+                        help="开启 qwen3vl_debug_patch 的详细日志（如 transformers 版本）")
     args, remaining = parser.parse_known_args()
     known_keys = {a.dest for a in parser._actions if a.dest != "help"}
     if args.config and os.path.isfile(args.config):
@@ -363,6 +367,10 @@ def main():
         vl_kwargs = {}
         if getattr(args, "use_flash_attn_2", False):
             vl_kwargs["attn_implementation"] = "flash_attention_2"
+        if getattr(args, "debug_qwen3vl_patch", False):
+            from vae_qwen3vl.qwen3vl_debug_patch import enable_debug_logging, print_transformers_info
+            enable_debug_logging(True)
+            print_transformers_info()
         model = Qwen3VLWith3DBranch(
             model_name_or_path=args.vl_model,
             vae_model=vae_model,
@@ -375,6 +383,11 @@ def main():
             use_discrete_3d_tokens=use_discrete,
             **vl_kwargs,
         )
+        if getattr(args, "debug_vl_forward", False):
+            _model = getattr(model, "module", model)
+            _model._debug_vl_forward = True
+            if is_main_process:
+                print("[Debug] 已开启 VL forward 详细日志 (combined_embeds 形状等)", flush=True)
         model = model.to(device)
         use_gc = bool(getattr(args, "use_gradient_checkpointing", False))
         if not use_tp:

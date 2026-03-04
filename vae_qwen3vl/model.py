@@ -23,6 +23,13 @@ def _get_vl_model_and_config(model_name_or_path: str, **kwargs):
         model_cls = Qwen2VLForConditionalGeneration
         config_cls = Qwen2VLConfig
     model = model_cls.from_pretrained(model_name_or_path, **kwargs)
+    # 应用 self_attn 返回值兼容补丁，修复 "too many values to unpack (expected 2)"
+    try:
+        from .qwen3vl_debug_patch import apply_qwen3vl_self_attn_patch
+        apply_qwen3vl_self_attn_patch(verbose=True, debug=False)
+    except Exception as e:
+        import warnings
+        warnings.warn(f"[Qwen3VL] 应用 self_attn 补丁失败: {e}", stacklevel=2)
     return model, model.config
 
 
@@ -224,6 +231,16 @@ class Qwen3VLWith3DBranch(nn.Module):
             combined_labels = torch.cat([pad_labels, labels], dim=1)
         else:
             combined_labels = None
+        # Debug: 打印输入形状，便于排查 forward 异常
+        _debug = getattr(self, "_debug_vl_forward", False)
+        if _debug:
+            print(
+                f"[Qwen3VL-Debug] forward_with_3d -> vl_model: "
+                f"combined_embeds={combined_embeds.shape}, "
+                f"combined_attention_mask={combined_attention_mask.shape if combined_attention_mask is not None else None}, "
+                f"use_cache={use_cache}",
+                flush=True,
+            )
         outputs = self.vl_model(
             inputs_embeds=combined_embeds,
             attention_mask=combined_attention_mask,
