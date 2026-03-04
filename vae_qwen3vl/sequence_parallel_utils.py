@@ -154,20 +154,53 @@ def split_for_sp(
 
     out = {}
     seq_dim = 1
+    # Keep per-rank local sequence length strictly identical (chunk_size) so
+    # TP collectives on DTensor hooks (e.g., RowwiseParallel/o_proj) never see
+    # shape mismatches across ranks.
+    pad_values = {
+        "input_ids": 0,
+        "attention_mask": 0,
+        "labels": -100,
+        "position_ids": 0,
+    }
+
+    def _slice_and_pad(x: torch.Tensor, key: str, S: int) -> torch.Tensor:
+        chunk_size = (S + sp_size - 1) // sp_size
+        start = sp_rank * chunk_size
+        end = min(start + chunk_size, S)
+        if end > start:
+            y = x[:, start:end].contiguous()
+        else:
+            y = x[:, :0].clone()
+
+        local_len = y.size(seq_dim)
+        if local_len == chunk_size:
+            return y
+        pad_len = chunk_size - local_len
+        if pad_len <= 0:
+            return y
+        pad_shape = list(y.shape)
+        pad_shape[seq_dim] = pad_len
+        pad_val = pad_values.get(key, 0)
+        y_pad = torch.full(
+            pad_shape,
+            pad_val,
+            dtype=y.dtype,
+            device=y.device,
+        )
+        return torch.cat([y, y_pad], dim=seq_dim).contiguous()
+
     for key in ("input_ids", "attention_mask", "labels"):
         if key not in batch or batch[key] is None:
             out[key] = batch.get(key)
             continue
         x = batch[key]
         S = x.size(seq_dim)
-        chunk_size = (S + sp_size - 1) // sp_size
-        start = sp_rank * chunk_size
-        end = min(start + chunk_size, S)
-        if end <= start:
-            out[key] = x[:, :0].clone()
-        else:
-            out[key] = x[:, start:end].contiguous()
+        out[key] = _slice_and_pad(x, key, S)
         if _sp_dbg_verbose():
+            chunk_size = (S + sp_size - 1) // sp_size
+            start = sp_rank * chunk_size
+            end = min(start + chunk_size, S)
             _sp_dbg(
                 f"split key={key} sp_rank={sp_rank}/{sp_size} "
                 f"orig_S={S} chunk=[{start}:{end}) out_shape={tuple(out[key].shape)}"
@@ -175,13 +208,7 @@ def split_for_sp(
     if "position_ids" in batch and batch["position_ids"] is not None:
         pid = batch["position_ids"]
         S = pid.size(seq_dim)
-        chunk_size = (S + sp_size - 1) // sp_size
-        start = sp_rank * chunk_size
-        end = min(start + chunk_size, S)
-        if end > start:
-            out["position_ids"] = pid[:, start:end].contiguous()
-        else:
-            out["position_ids"] = pid[:, :0].clone()
+        out["position_ids"] = _slice_and_pad(pid, "position_ids", S)
     return out
 
 
@@ -280,7 +307,31 @@ def apply_sp_attention_patch(
                 )
                 attn_output = attn_output.reshape(bsz, q_len, -1)
                 # Qwen3-VL / Qwen2-VL decoder expects (attn_output, attn_weights) — 2 values
-                return _self.o_proj(attn_output), None
+                try:
+                    return _self.o_proj(attn_output), None
+                except RuntimeError as e:
+                    msg = str(e)
+                    if "Detected mismatch between collectives on ranks" in msg:
+                        local_info = (
+                            f"o_proj collective mismatch: hidden_states={tuple(hidden_states.shape)} "
+                            f"attn_output={tuple(attn_output.shape)} q_len={q_len} "
+                            f"attention_mask={tuple(attention_mask.shape) if attention_mask is not None else None} "
+                            f"position_ids={tuple(position_ids.shape) if position_ids is not None else None}"
+                        )
+                        _sp_dbg(local_info, force=True)
+                        try:
+                            sp_rank = dist.get_rank(group=_sp_grp)
+                            sp_size = dist.get_world_size(group=_sp_grp)
+                            _sp_dbg(
+                                f"sp_group rank/size={sp_rank}/{sp_size} "
+                                f"global_rank={dist.get_rank()} world={dist.get_world_size()} "
+                                f"num_heads(local_q/local_kv)=({local_num_heads}/{local_num_kv_heads}) "
+                                f"head_dim={head_dim}",
+                                force=True,
+                            )
+                        except Exception:
+                            pass
+                    raise
             return _patched
 
         attn.forward = make_patched(attn, sp_group)
