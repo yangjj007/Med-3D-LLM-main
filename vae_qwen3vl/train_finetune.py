@@ -368,6 +368,8 @@ def main():
                         help="并行调试详细模式：输出每层 TP/SP 打补丁与梯度同步细节（日志量大）")
     parser.add_argument("--debug_sync_points", action="store_true",
                         help="在关键阶段插入同步点日志（barrier 前后耗时），用于定位卡住位置")
+    parser.add_argument("--debug_loss", action="store_true",
+                        help="每步打印 valid_label_tokens 与 lr，用于排查 loss=NaN/Inf（默认仅前 5 步打印）")
     parser.add_argument("--dist_timeout_seconds", type=int, default=600,
                         help="torch.distributed init_process_group 超时时间（秒）")
     args, remaining = parser.parse_known_args()
@@ -894,6 +896,26 @@ def main():
                 batch = {k: _to_device(v, device) for k, v in batch.items()}
                 _t_data = time.time()
                 use_inputs_3d = "inputs_3d" in batch and batch["inputs_3d"] is not None
+                labels = batch.get("labels", None)
+                valid_label_tokens = -1
+                total_label_tokens = -1
+                if isinstance(labels, torch.Tensor):
+                    valid_label_tokens = int((labels != -100).sum().item())
+                    total_label_tokens = int(labels.numel())
+                    if step < 5 or valid_label_tokens == 0 or getattr(args, "debug_loss", False):
+                        lr_now = opt.param_groups[0]["lr"] if opt.param_groups else 0.0
+                        _print_mem(
+                            f"[LOSSCHK] {_rank_prefix()} step={step} valid_label_tokens="
+                            f"{valid_label_tokens}/{total_label_tokens} lr={lr_now:.3e}"
+                        )
+                    if valid_label_tokens == 0:
+                        # All labels masked out: CE denominator is zero and loss may become NaN.
+                        # Skip this batch to keep optimizer states healthy and print actionable hints.
+                        _print_mem(
+                            f"[LOSSCHK WARN] {_rank_prefix()} step={step} all labels are -100; skip batch. "
+                            "请检查 tokenizer 截断是否把 assistant 回复截没了（常见于变长 3D + max_length 不足）。"
+                        )
+                        continue
 
                 # [DEBUG_MEMORY] 步骤开始：batch 已加载到 GPU
                 if debug_memory and torch.cuda.is_available():
@@ -966,7 +988,19 @@ def main():
                     _nan = torch.isnan(loss)
                     _inf = torch.isinf(loss)
                     if _nan.any().item() or _inf.any().item():
-                        _print_mem(f"[MEM WARN] {_rank_prefix()} step={step} loss=NaN/Inf ({loss_val})！检查 lr/数据。")
+                        lr_now = opt.param_groups[0]["lr"] if opt.param_groups else 0.0
+                        seq_now = int(batch["input_ids"].shape[1]) if "input_ids" in batch else -1
+                        _print_mem(
+                            f"[MEM WARN] {_rank_prefix()} step={step} loss=NaN/Inf ({loss_val}) "
+                            f"| valid_label_tokens={valid_label_tokens}/{total_label_tokens} "
+                            f"| seq={seq_now} | lr={lr_now:.3e}"
+                        )
+                        _print_mem(
+                            "[MEM WARN] 建议优先检查：1) labels 是否全 -100；2) max_length_variable 是否导致 assistant 被截断；"
+                            "3) 学习率是否过高（可先降到 2e-5 验证）。"
+                        )
+                        opt.zero_grad()
+                        continue
                 # Scale loss for gradient accumulation
                 scaled_loss = loss / grad_accum_steps
 

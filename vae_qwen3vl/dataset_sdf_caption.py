@@ -418,6 +418,7 @@ def collate_sdf_caption_discrete(
         except Exception:
             pass
     _t_labels = time.time()
+    valid_per_sample = (labels != -100).sum(dim=1).tolist()
     valid_tokens = int((labels != -100).sum().item())
     total_tokens = int(labels.numel())
     print(f"[DEBUG collate] {_collate_rank_prefix()} Label masking took {_t_labels - _t_tokenize:.3f}s", flush=True)
@@ -426,6 +427,15 @@ def collate_sdf_caption_discrete(
         f"valid_label_tokens={valid_tokens}/{total_tokens}",
         flush=True,
     )
+    if any(int(v) == 0 for v in valid_per_sample):
+        seq_lens = attention_mask.sum(dim=1).tolist() if attention_mask is not None else []
+        print(
+            f"[LOSSCHK WARN] {_collate_rank_prefix()} Some samples have 0 valid labels. "
+            f"per_sample_valid={valid_per_sample} seq_lens={seq_lens} "
+            f"effective_max_length={effective_max_length}. "
+            "这通常表示 truncation 把 assistant 回复截没了，请增大 max_length_variable 或降低 max_safe_3d_length。",
+            flush=True,
+        )
 
     return {
         "input_ids": input_ids,

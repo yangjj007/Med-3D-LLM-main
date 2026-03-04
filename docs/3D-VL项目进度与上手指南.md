@@ -151,7 +151,22 @@ python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_le
 - 离散 run 的产出是 **tokenizer（含 mesh 词条）** + 可选 **LoRA**，**没有** `projector_final.pt`；评估脚本通过是否存在 `tokenizer_final` 判断离散 run。
 - 两阶段：先 **warmup**（只训 embed + lm_head），再 **sft**（LoRA + embed）；Stage2 可从 Stage1 的 tokenizer 继续，LoRA 按需加载。
 
-### 4.5 报错与日志
+### 4.5 loss=NaN/Inf 排查与解决
+
+- **现象**：日志出现 `[MEM WARN] step=N loss=NaN/Inf (nan)！检查 lr/数据。`
+- **常见原因**：
+  1. **labels 全为 -100**：变长 3D 下序列很长，若 `max_length_variable` 或 tokenizer 的 `max_length` 不足，会把 **assistant 回复整段截掉**，导致该 batch 没有监督 token，交叉熵分母为 0 → NaN。
+  2. **学习率过大**：BF16 + 大 lr 易导致数值不稳定，可先降到 `2e-5` 验证。
+- **已加调试与防护**：
+  - 训练前 5 步会打印 `[LOSSCHK] step=N valid_label_tokens=X/Y lr=...`；若某步 `valid_label_tokens=0` 会**跳过该 batch** 并打印提示。
+  - 出现 NaN/Inf 时会打印 `valid_label_tokens`、`seq`、`lr`，并**跳过该步**（zero_grad + continue），避免污染后续训练。
+  - collate 中若某样本 `valid_label_tokens=0` 会打印 `[LOSSCHK WARN] ... per_sample_valid=...`，便于定位是哪个样本被截断。
+- **建议操作**：
+  1. 在配置中增大 `max_length_variable`（如 32768 或更大），确保「user 3D + prompt + assistant 回复」不被截断。
+  2. 开启 `debug_loss: true`（或看前几步的 `[LOSSCHK]`）确认 `valid_label_tokens` 是否大于 0。
+  3. 若仍 NaN，可暂时将 `lr` 降到 `2e-5` 或 `1e-5` 验证是否稳定。
+
+### 4.6 报错与日志
 
 - 训练报错会写入 `configs/.train_error_rank*.txt`；完整日志在 `logs/` 下按时间戳的 `train_*_rank0.log` 等。
 - 若在 collate 的 FPS 或 Morton 处卡住，多为单样本点数极大或 `coord_max_3d` 与 VAE 输出不一致，可先单卡、小 `max_samples` 复现。
