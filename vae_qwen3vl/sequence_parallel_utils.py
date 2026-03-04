@@ -221,18 +221,23 @@ def apply_sp_attention_patch(
                 key_states = _self.k_proj(hidden_states)
                 value_states = _self.v_proj(hidden_states)
                 query_states = _self.q_proj(hidden_states)
-                num_heads = (
-                    getattr(_self, "num_heads", None)
-                    or getattr(_self, "num_attention_heads", None)
-                    or getattr(_self, "num_key_value_heads", None)
-                )
+                # NOTE: do not use getattr(..., fallback_attr) directly here:
+                # fallback expression is evaluated eagerly and may raise AttributeError.
+                num_heads = getattr(_self, "num_heads", None)
+                if num_heads is None:
+                    num_heads = getattr(_self, "num_attention_heads", None)
+                if num_heads is None and hasattr(_self, "config"):
+                    num_heads = getattr(_self.config, "num_attention_heads", None)
                 if num_heads is None:
                     raise AttributeError(
-                        f"{type(_self).__name__} has none of: num_heads, "
-                        "num_attention_heads, num_key_value_heads"
+                        f"{type(_self).__name__} has neither num_heads nor num_attention_heads"
                     )
                 head_dim = _self.head_dim
-                num_kv_heads = getattr(_self, "num_key_value_heads", None) or num_heads
+                num_kv_heads = getattr(_self, "num_key_value_heads", None)
+                if num_kv_heads is None and hasattr(_self, "config"):
+                    num_kv_heads = getattr(_self.config, "num_key_value_heads", None)
+                if num_kv_heads is None:
+                    num_kv_heads = num_heads
                 num_kv_groups = num_heads // num_kv_heads
                 query_states = query_states.view(bsz, q_len, num_heads, head_dim)
                 key_states = key_states.view(bsz, -1, num_kv_heads, head_dim)
