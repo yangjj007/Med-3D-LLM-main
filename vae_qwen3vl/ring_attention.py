@@ -8,6 +8,7 @@ merging results with online softmax. Compatible with GQA (no head splitting).
 
 from __future__ import annotations
 
+import os
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -45,6 +46,24 @@ def _ring_send_recv(
     req_send.wait()
 
 
+def _ring_attn_debug_enabled() -> bool:
+    """Enable debug logs with env var RING_ATTN_DEBUG=1."""
+    return os.getenv("RING_ATTN_DEBUG", "0") == "1"
+
+
+def _ring_attn_debug(msg: str, sp_group: Any = None) -> None:
+    if not _ring_attn_debug_enabled():
+        return
+    try:
+        if dist.is_available() and dist.is_initialized():
+            rank = dist.get_rank(group=sp_group) if sp_group is not None else dist.get_rank()
+            print(f"[RingAttn][rank={rank}] {msg}", flush=True)
+            return
+    except Exception:
+        pass
+    print(f"[RingAttn] {msg}", flush=True)
+
+
 def _flash_attn_single_chunk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -67,8 +86,13 @@ def _flash_attn_single_chunk(
         #   lse:  [B, H, S]   <-- note: different layout from our accumulator
         result = flash_attn_func(q, k, v, causal=causal, softmax_scale=scale, return_attn_probs=True)
         out, lse = result[0], result[1]
+        raw_lse_shape = tuple(lse.shape)
         # Reshape lse [B, H, S] -> [B, S, H, 1] to broadcast with [B, S, H, D]
         lse = lse.permute(0, 2, 1).unsqueeze(-1).contiguous()
+        _ring_attn_debug(
+            f"flash_attn chunk shapes q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)} "
+            f"out={tuple(out.shape)} lse_raw={raw_lse_shape} lse_norm={tuple(lse.shape)} causal={causal}"
+        )
         return out, lse
     except ImportError:
         # Fallback: transpose to [B, H, S, D] for standard matmul / SDPA, then transpose back.
@@ -107,9 +131,18 @@ def _online_softmax_merge(
     """Merge new attention output into accumulated using online softmax."""
     # out_accum, lse_accum: accumulated so far
     # out_new, lse_new: from new chunk
+    if _ring_attn_debug_enabled():
+        _ring_attn_debug(
+            f"merge shapes out_accum={tuple(out_accum.shape)} lse_accum={tuple(lse_accum.shape)} "
+            f"out_new={tuple(out_new.shape)} lse_new={tuple(lse_new.shape)}"
+        )
     lse_max = torch.maximum(lse_accum, lse_new)
     exp_old = torch.exp(lse_accum - lse_max)
     exp_new = torch.exp(lse_new - lse_max)
+    if _ring_attn_debug_enabled():
+        _ring_attn_debug(
+            f"merge exp shapes exp_old={tuple(exp_old.shape)} exp_new={tuple(exp_new.shape)}"
+        )
     out_accum = out_accum * exp_old + out_new * exp_new
     lse_accum = lse_max + torch.log(exp_old + exp_new)
     return out_accum, lse_accum
