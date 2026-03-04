@@ -39,6 +39,12 @@ def _ring_send_recv(
         world = sp_size
     next_rank = (my_group_rank + 1) % world
     prev_rank = (my_group_rank - 1 + world) % world
+    if _ring_attn_debug_enabled():
+        _ring_attn_debug(
+            f"ring send/recv send_shape={tuple(send_tensor.shape)} recv_shape={tuple(recv_tensor.shape)} "
+            f"prev={prev_rank} next={next_rank}",
+            sp_group=sp_group,
+        )
 
     req_recv = dist.irecv(recv_tensor, src=prev_rank, group=sp_group)
     req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
@@ -166,6 +172,12 @@ class RingFlashAttnFunc(torch.autograd.Function):
         softmax_scale: Optional[float] = None,
     ) -> torch.Tensor:
         sp_rank, sp_size = _get_sp_rank_size(sp_group)
+        if _ring_attn_debug_enabled():
+            _ring_attn_debug(
+                f"forward entry q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)} "
+                f"sp_rank={sp_rank} sp_size={sp_size}",
+                sp_group=sp_group,
+            )
         if sp_size <= 1:
             out, lse = _flash_attn_single_chunk(q, k, v, causal=causal, scale=softmax_scale)
             # saved layout: [q, lse_total, k0, v0]  -- same as multi-rank path
@@ -204,6 +216,12 @@ class RingFlashAttnFunc(torch.autograd.Function):
             src_rank = (sp_rank - step + sp_size) % sp_size
             use_chunk = src_rank <= sp_rank
             is_self = src_rank == sp_rank
+            if _ring_attn_debug_enabled():
+                _ring_attn_debug(
+                    f"step={step} src_rank={src_rank} use_chunk={use_chunk} is_self={is_self} "
+                    f"cur_k={tuple(cur_k.shape)} cur_v={tuple(cur_v.shape)}",
+                    sp_group=sp_group,
+                )
 
             if use_chunk:
                 attn_out, chunk_lse = _flash_attn_single_chunk(
