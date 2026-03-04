@@ -70,6 +70,41 @@ def _ring_attn_debug(msg: str, sp_group: Any = None) -> None:
     print(f"[RingAttn] {msg}", flush=True)
 
 
+def _normalize_lse_to_bsh1(
+    lse: torch.Tensor,
+    q: torch.Tensor,
+) -> torch.Tensor:
+    """Normalize LSE tensor to [B, S, H, 1] for safe broadcasting."""
+    b, s, h, _ = q.shape
+
+    if lse.dim() == 3:
+        # [B, H, S] -> [B, S, H, 1]
+        if lse.shape == (b, h, s):
+            return lse.permute(0, 2, 1).unsqueeze(-1).contiguous()
+        # [B, S, H] -> [B, S, H, 1]
+        if lse.shape == (b, s, h):
+            return lse.unsqueeze(-1).contiguous()
+    elif lse.dim() == 4:
+        # [B, S, H, 1] (expected)
+        if lse.shape[:3] == (b, s, h) and lse.shape[-1] == 1:
+            return lse.contiguous()
+        # [B, H, S, 1] -> [B, S, H, 1]
+        if lse.shape[:3] == (b, h, s) and lse.shape[-1] == 1:
+            return lse.permute(0, 2, 1, 3).contiguous()
+        # Some flash-attn variants may expose a per-key dimension: [B,S,H,S_k] / [B,H,S,S_k].
+        if lse.shape[:3] == (b, s, h):
+            reduced = torch.logsumexp(lse.float(), dim=-1, keepdim=True)
+            return reduced.to(q.dtype).contiguous()
+        if lse.shape[:3] == (b, h, s):
+            reduced = torch.logsumexp(lse.float(), dim=-1, keepdim=True).permute(0, 2, 1, 3)
+            return reduced.to(q.dtype).contiguous()
+
+    raise RuntimeError(
+        f"Unexpected LSE shape {tuple(lse.shape)} for q shape {tuple(q.shape)}; "
+        "cannot normalize to [B,S,H,1]."
+    )
+
+
 def _flash_attn_single_chunk(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -89,12 +124,12 @@ def _flash_attn_single_chunk(
         from flash_attn import flash_attn_func
         # flash_attn natively accepts [B, S, H, D] and returns:
         #   out:  [B, S, H, D]
-        #   lse:  [B, H, S]   <-- note: different layout from our accumulator
+        #   lse:  version-dependent layout (usually [B, H, S])
         result = flash_attn_func(q, k, v, causal=causal, softmax_scale=scale, return_attn_probs=True)
         out, lse = result[0], result[1]
         raw_lse_shape = tuple(lse.shape)
-        # Reshape lse [B, H, S] -> [B, S, H, 1] to broadcast with [B, S, H, D]
-        lse = lse.permute(0, 2, 1).unsqueeze(-1).contiguous()
+        # Normalize lse to [B, S, H, 1] to avoid shape instability across flash-attn versions.
+        lse = _normalize_lse_to_bsh1(lse, q)
         _ring_attn_debug(
             f"flash_attn chunk shapes q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)} "
             f"out={tuple(out.shape)} lse_raw={raw_lse_shape} lse_norm={tuple(lse.shape)} causal={causal}"
@@ -135,6 +170,12 @@ def _online_softmax_merge(
     lse_new: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Merge new attention output into accumulated using online softmax."""
+    # Defensive normalization for unexpected LSE layouts from different kernels.
+    if lse_accum.shape[-1] != 1:
+        lse_accum = torch.logsumexp(lse_accum.float(), dim=-1, keepdim=True).to(out_accum.dtype)
+    if lse_new.shape[-1] != 1:
+        lse_new = torch.logsumexp(lse_new.float(), dim=-1, keepdim=True).to(out_new.dtype)
+
     # out_accum, lse_accum: accumulated so far
     # out_new, lse_new: from new chunk
     if _ring_attn_debug_enabled():
