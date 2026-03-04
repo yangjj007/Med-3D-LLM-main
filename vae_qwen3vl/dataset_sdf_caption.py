@@ -12,7 +12,7 @@ Discrete-token path: use collate_sdf_caption_discrete with vae_model to produce
 
 import os
 import json
-import random
+import hashlib
 import time
 import numpy as np
 import pandas as pd
@@ -40,6 +40,15 @@ def _collate_log(msg: str, force: bool = False) -> None:
         return
     ts = time.strftime("%H:%M:%S")
     print(f"[COLLATE {ts}] {_collate_rank_prefix()} {msg}", flush=True)
+
+
+def _stable_int_from_str(text: str) -> int:
+    """
+    Return a deterministic integer from string content.
+    Used to keep per-sample randomness identical across TP ranks.
+    """
+    h = hashlib.sha1(text.encode("utf-8")).hexdigest()
+    return int(h[:16], 16)
 
 
 class SDF3DCaptionDataset(Dataset):
@@ -104,12 +113,16 @@ class SDF3DCaptionDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict:
         item = self.instances[idx]
+        sample_id = str(item["sha256"])
+        sample_seed = _stable_int_from_str(f"{sample_id}|{idx}")
         data = np.load(item["npz_path"])
         sparse_sdf = torch.from_numpy(data["sparse_sdf"]).float()  # [N, 1]
         sparse_index = torch.from_numpy(data["sparse_index"]).long()  # [N, 3]
 
         if self.max_points is not None and len(sparse_sdf) > self.max_points:
-            perm = torch.randperm(len(sparse_sdf))[: self.max_points]
+            gen = torch.Generator(device="cpu")
+            gen.manual_seed(sample_seed)
+            perm = torch.randperm(len(sparse_sdf), generator=gen)[: self.max_points]
             sparse_sdf = sparse_sdf[perm]
             sparse_index = sparse_index[perm]
 
@@ -122,7 +135,10 @@ class SDF3DCaptionDataset(Dataset):
                 captions = [str(captions_raw)]
         else:
             captions = [str(captions_raw)]
-        caption = np.random.choice(captions) if captions else "A 3D object."
+        if captions:
+            caption = captions[sample_seed % len(captions)]
+        else:
+            caption = "A 3D object."
 
         return {
             "inputs_3d": {
@@ -131,6 +147,7 @@ class SDF3DCaptionDataset(Dataset):
                 "batch_idx": torch.zeros(len(sparse_sdf), dtype=torch.long),
             },
             "caption": caption,
+            "sample_id": sample_id,
         }
 
 
@@ -321,8 +338,16 @@ def collate_sdf_caption_discrete(
 
     messages_list = []
     for i, b in enumerate(batch):
+        sample_id = str(b.get("sample_id", i))
         mesh_str = mesh_strings[i]
-        if reconstruction_ratio > 0 and random.random() < reconstruction_ratio:
+        if reconstruction_ratio > 0:
+            # Deterministic branch selection to keep TP peers shape-aligned.
+            threshold = int(reconstruction_ratio * 10000)
+            draw = _stable_int_from_str(f"{sample_id}|reconstruct") % 10000
+            use_reconstruct = draw < threshold
+        else:
+            use_reconstruct = False
+        if use_reconstruct:
             user_content = mesh_str + "\n" + reconstruct_prompt
             assistant_content = mesh_str
         else:
