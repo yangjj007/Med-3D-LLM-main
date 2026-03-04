@@ -29,6 +29,11 @@ def _sp_dbg_verbose() -> bool:
     return os.getenv("PARALLEL_DEBUG_VERBOSE", "0") == "1"
 
 
+def _sp_use_mesh_group_directly() -> bool:
+    # Default OFF: force deterministic global new_group creation order.
+    return os.getenv("SP_USE_MESH_GROUP", "0") == "1"
+
+
 def _sp_dbg(msg: str, *, force: bool = False) -> None:
     if not (force or _sp_dbg_enabled()):
         return
@@ -116,12 +121,14 @@ def get_sp_group_from_mesh(mesh_3d) -> Optional[Any]:
     if sp_size <= 1:
         _sp_dbg("sp_size<=1, skip sp_group creation")
         return None
-    try:
-        pg = sp_mesh.get_group()
-        if pg is not None:
-            return pg
-    except Exception:
-        pass
+    if _sp_use_mesh_group_directly():
+        try:
+            pg = sp_mesh.get_group()
+            if pg is not None:
+                _sp_dbg("using sp_mesh.get_group() directly (SP_USE_MESH_GROUP=1)", force=True)
+                return pg
+        except Exception:
+            pass
     my_rank = dist.get_rank()
     # rank = dp * (sp_size * tp_size) + sp * tp_size + tp  [tp innermost]
     my_tp = my_rank % tp_size
