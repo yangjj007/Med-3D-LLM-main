@@ -223,25 +223,15 @@ def apply_sp_attention_patch(
                 query_states = _self.q_proj(hidden_states)
                 # NOTE: do not use getattr(..., fallback_attr) directly here:
                 # fallback expression is evaluated eagerly and may raise AttributeError.
-                num_heads = getattr(_self, "num_heads", None)
-                if num_heads is None:
-                    num_heads = getattr(_self, "num_attention_heads", None)
-                if num_heads is None and hasattr(_self, "config"):
-                    num_heads = getattr(_self.config, "num_attention_heads", None)
-                if num_heads is None:
-                    raise AttributeError(
-                        f"{type(_self).__name__} has neither num_heads nor num_attention_heads"
-                    )
                 head_dim = _self.head_dim
-                num_kv_heads = getattr(_self, "num_key_value_heads", None)
-                if num_kv_heads is None and hasattr(_self, "config"):
-                    num_kv_heads = getattr(_self.config, "num_key_value_heads", None)
-                if num_kv_heads is None:
-                    num_kv_heads = num_heads
-                num_kv_groups = num_heads // num_kv_heads
-                query_states = query_states.view(bsz, q_len, num_heads, head_dim)
-                key_states = key_states.view(bsz, -1, num_kv_heads, head_dim)
-                value_states = value_states.view(bsz, -1, num_kv_heads, head_dim)
+                # 使用实际输出维度推断本地 head 数，兼容 TP 分片情况
+                # (TP 下 q_proj 输出已沿 head 维度分片，全局 num_heads 不可直接使用)
+                local_num_heads = query_states.shape[-1] // head_dim
+                local_num_kv_heads = key_states.shape[-1] // head_dim
+                num_kv_groups = local_num_heads // local_num_kv_heads
+                query_states = query_states.view(bsz, q_len, local_num_heads, head_dim)
+                key_states = key_states.view(bsz, -1, local_num_kv_heads, head_dim)
+                value_states = value_states.view(bsz, -1, local_num_kv_heads, head_dim)
                 if num_kv_groups > 1:
                     key_states = key_states.repeat_interleave(num_kv_groups, dim=2)
                     value_states = value_states.repeat_interleave(num_kv_groups, dim=2)
