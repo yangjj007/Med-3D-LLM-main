@@ -701,6 +701,7 @@ def main():
             except ImportError:
                 pass
 
+        debug_memory = getattr(args, "debug_memory", False)
         _debug_all_ranks = os.environ.get("DEBUG_MEMORY_ALL_RANKS", "0") == "1" or (use_tp and debug_memory)
         if _debug_all_ranks and "DEBUG_MEMORY_ALL_RANKS" not in os.environ:
             os.environ["DEBUG_MEMORY_ALL_RANKS"] = "1"  # 让 model 内 forward hooks 也打印所有 rank
@@ -723,7 +724,6 @@ def main():
                 accelerator.wait_for_everyone()
 
         grad_accum_steps = getattr(args, "gradient_accumulation_steps", 1)
-        debug_memory = getattr(args, "debug_memory", False)
         if debug_memory and is_main_process:
             _print("[DEBUG_MEMORY] 显存调试已开启。")
             _print("  - 每步: @batch_to_device | @before_forward | @after_forward | @before_backward | @after_backward | @after_opt_step")
