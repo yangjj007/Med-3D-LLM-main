@@ -90,6 +90,7 @@ def create_3d_mesh(
 
 
 _sp_group_cache: Dict[Tuple[int, ...], Any] = {}
+_sp_groups_built_for_mesh: Dict[Tuple[int, int, int], bool] = {}
 
 
 def get_sp_group_from_mesh(mesh_3d) -> Optional[Any]:
@@ -128,12 +129,41 @@ def get_sp_group_from_mesh(mesh_3d) -> Optional[Any]:
     my_sp = rest % sp_size
     my_dp = rest // sp_size
     cache_key = (dp_size, sp_size, tp_size, my_dp, my_tp)
-    if cache_key not in _sp_group_cache:
+    # IMPORTANT:
+    # ProcessGroup creation must follow identical global ordering on all ranks.
+    # Building only the "local" SP group per rank can lead to communicator init
+    # mismatch/hang when NCCL lazily initializes at first collective/P2P op.
+    mesh_key = (dp_size, sp_size, tp_size)
+    if mesh_key not in _sp_groups_built_for_mesh:
+        my_group = None
+        for dp_i in range(dp_size):
+            for tp_i in range(tp_size):
+                ranks = [
+                    dp_i * (sp_size * tp_size) + s * tp_size + tp_i
+                    for s in range(sp_size)
+                ]
+                pg = dist.new_group(ranks)
+                if my_rank in ranks:
+                    my_group = pg
+                    _sp_dbg(
+                        f"select sp_group ranks={ranks} for my_rank={my_rank}",
+                        force=True,
+                    )
+                elif _sp_dbg_verbose():
+                    _sp_dbg(f"create non-local sp_group ranks={ranks}")
+        if my_group is None:
+            raise RuntimeError(
+                f"Failed to build local SP group for rank={my_rank} under mesh={mesh_key}"
+            )
+        _sp_group_cache[cache_key] = my_group
+        _sp_groups_built_for_mesh[mesh_key] = True
+    elif cache_key not in _sp_group_cache:
+        # Mesh was built in this process before, but local cache got cleared.
         ranks = [
             my_dp * (sp_size * tp_size) + s * tp_size + my_tp
             for s in range(sp_size)
         ]
-        _sp_dbg(f"create sp_group ranks={ranks}", force=True)
+        _sp_dbg(f"recreate local sp_group ranks={ranks}", force=True)
         _sp_group_cache[cache_key] = dist.new_group(ranks)
     else:
         _sp_dbg(f"reuse cached sp_group key={cache_key}")
