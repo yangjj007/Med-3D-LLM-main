@@ -22,19 +22,25 @@ def _debug_mem_log(phase: str, extra: str = "") -> None:
     """细粒度显存调试：当模型 _debug_memory_fine=True 时由 forward 内调用。"""
     if not torch.cuda.is_available():
         return
+    rank_s = ""
+    try:
+        if dist.is_initialized():
+            rank_s = f"[rank{dist.get_rank()}] "
+    except Exception:
+        pass
     parts = []
     for i in range(torch.cuda.device_count()):
         try:
             a = torch.cuda.memory_allocated(i) / (1024**3)
             r = torch.cuda.memory_reserved(i) / (1024**3)
-            t = torch.cuda.get_device_properties(i).total_memory / (1024**3)
             p = torch.cuda.max_memory_allocated(i) / (1024**3)
-            parts.append(f"GPU{i}: alloc={a:.2f} res={r:.2f} total={t:.2f} peak={p:.2f} GiB")
+            parts.append(f"GPU{i}:{a:.1f}/{p:.1f}GiB")
         except Exception:
-            parts.append(f"GPU{i}: err")
-    msg = f"[DEBUG_MEMORY fwd] @{phase} | {' | '.join(parts)}"
+            parts.append(f"GPU{i}:err")
+    msg = f"[MEM] {rank_s}@{phase}"
     if extra:
         msg += f" | {extra}"
+    msg += f" | {' '.join(parts)}"
     print(msg, flush=True)
 
 
@@ -60,7 +66,8 @@ def _register_discrete_debug_hooks(vl_model: nn.Module, dbg_flag: bool) -> None:
     if layers is None or len(layers) == 0:
         return
     n = len(layers)
-    indices = [0, max(1, n // 4), n // 2, max(n // 2 + 1, 3 * n // 4), n - 1]
+    # 前 6 层每层打点（layer 0→1 间易出问题），之后每 4 层，再加最后一层
+    indices = list(range(min(6, n))) + list(range(6, n, 4)) + ([n - 1] if n > 6 else [])
     indices = sorted(set(indices))
     handles = []
 
@@ -68,10 +75,12 @@ def _register_discrete_debug_hooks(vl_model: nn.Module, dbg_flag: bool) -> None:
         layer = layers[idx]
         layer_idx = idx
 
+        all_ranks = __import__("os").environ.get("DEBUG_MEMORY_ALL_RANKS", "0") == "1"
+
         def make_hook(li):
             def _hook(module, inp, out):
-                if _is_main_for_debug():
-                    _debug_mem_log(f"vl_layer_{li}/{n}", f"layer {li}/{n} done")
+                if all_ranks or _is_main_for_debug():
+                    _debug_mem_log(f"vl_L{li}/{n}", f"layer {li}/{n} done")
             return _hook
 
         h = layer.register_forward_hook(make_hook(layer_idx))
@@ -369,9 +378,10 @@ class Qwen3VLWith3DBranch(nn.Module):
             labels = batch.get("labels")
         _dbg = getattr(self, "_debug_memory_fine", False)
         _register_discrete_debug_hooks(self.vl_model, _dbg)
-        if _dbg and _is_main_for_debug() and input_ids is not None:
+        _all_r = __import__("os").environ.get("DEBUG_MEMORY_ALL_RANKS", "0") == "1"
+        if _dbg and (_all_r or _is_main_for_debug()) and input_ids is not None:
             seq_len = input_ids.shape[1]
-            _debug_mem_log("before_vl_model(discrete)", f"input_ids_seq={seq_len} [此处易OOM]")
+            _debug_mem_log("before_vl(discrete)", f"seq={seq_len}")
         outputs = self.vl_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -379,8 +389,8 @@ class Qwen3VLWith3DBranch(nn.Module):
             labels=labels,
             **kwargs,
         )
-        if _dbg and _is_main_for_debug():
-            _debug_mem_log("after_vl_model(discrete)")
+        if _dbg and (_all_r or _is_main_for_debug()):
+            _debug_mem_log("after_vl(discrete)")
         if sp_group is not None and "loss" in outputs and outputs["loss"] is not None:
             dist.all_reduce(outputs["loss"], op=dist.ReduceOp.AVG, group=sp_group)
         return outputs
