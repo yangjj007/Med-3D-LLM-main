@@ -58,6 +58,7 @@ def _ring_send_recv(
     next_group_rank = (my_group_rank + 1) % sp_size
     prev_group_rank = (my_group_rank - 1 + sp_size) % sp_size
     use_world_p2p = os.getenv("RING_ATTN_P2P_USE_WORLD", "0") == "1"
+    p2p_enabled = os.getenv("RING_ATTN_ENABLE_P2P", "0") == "1"
     barrier_dbg = os.getenv("RING_ATTN_P2P_BARRIER_DEBUG", "0") == "1"
     if barrier_dbg:
         _ring_attn_debug("p2p pre-barrier begin", sp_group=sp_group)
@@ -67,33 +68,41 @@ def _ring_send_recv(
         _ring_attn_debug(
             f"ring send/recv send_shape={tuple(send_tensor.shape)} recv_shape={tuple(recv_tensor.shape)} "
             f"prev={prev_rank} next={next_rank} prev_local={prev_group_rank} next_local={next_group_rank} "
-            f"mode={'world' if use_world_p2p else 'sp_group'} "
+            f"mode={'world' if use_world_p2p else 'sp_group'} transport={'p2p' if p2p_enabled else 'all_gather'} "
             f"group_ranks={global_ranks}",
             sp_group=sp_group,
         )
 
     # IMPORTANT:
-    # Prefer SP-subgroup P2P by default. Using default-world communicator for
-    # multiple independent SP rings can deadlock when different rank subsets
-    # issue concurrent P2P in different peer patterns/order.
-    #
-    # Set RING_ATTN_P2P_USE_WORLD=1 to force legacy world-comm behavior.
+    # Default transport is all_gather for robustness. Some NCCL/PyTorch setups
+    # may hang on subgroup P2P (isend/irecv) even with matched call order.
+    # Set RING_ATTN_ENABLE_P2P=1 to use P2P transport.
     t0 = time.time() if _ring_attn_debug_enabled() else 0.0
-    if use_world_p2p:
-        req_recv = dist.irecv(recv_tensor, src=prev_rank)
-        req_send = dist.isend(send_tensor, dst=next_rank)
+    if p2p_enabled:
+        if use_world_p2p:
+            req_recv = dist.irecv(recv_tensor, src=prev_rank)
+            req_send = dist.isend(send_tensor, dst=next_rank)
+        else:
+            # PyTorch c10d expects global src/dst even when `group` is provided.
+            # It internally maps global rank -> group rank.
+            req_recv = dist.irecv(recv_tensor, src=prev_rank, group=sp_group)
+            req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
+        if _ring_attn_debug_enabled():
+            _ring_attn_debug(
+                "ring send/recv posted recv+send, waiting...",
+                sp_group=sp_group,
+            )
+        req_recv.wait()
+        req_send.wait()
     else:
-        # PyTorch c10d expects global src/dst even when `group` is provided.
-        # It internally maps global rank -> group rank.
-        req_recv = dist.irecv(recv_tensor, src=prev_rank, group=sp_group)
-        req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
-    if _ring_attn_debug_enabled():
-        _ring_attn_debug(
-            "ring send/recv posted recv+send, waiting...",
-            sp_group=sp_group,
-        )
-    req_recv.wait()
-    req_send.wait()
+        gathered = [torch.empty_like(send_tensor) for _ in range(sp_size)]
+        dist.all_gather(gathered, send_tensor, group=sp_group)
+        recv_tensor.copy_(gathered[prev_group_rank])
+        if _ring_attn_debug_enabled():
+            _ring_attn_debug(
+                f"ring all_gather done picked prev_local={prev_group_rank}",
+                sp_group=sp_group,
+            )
     if _ring_attn_debug_enabled():
         _ring_attn_debug(
             f"ring send/recv done elapsed={time.time() - t0:.4f}s "
