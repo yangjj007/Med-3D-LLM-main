@@ -510,21 +510,26 @@ def _flash_attn_bwd(
     k_t    = k.permute(0, 2, 1, 3)    # [B, H, S_k, D]
     v_t    = v.permute(0, 2, 1, 3)    # [B, H, S_k, D]
     dout_t = dout.permute(0, 2, 1, 3) # [B, H, S_q, D]
-    scores = torch.matmul(q_t, k_t.transpose(-2, -1)) * sc  # [B, H, S_q, S_k]
+    # Keep backward math in fp32 to avoid bf16/float dtype mismatch under AMP.
+    q_t_f = q_t.float()
+    k_t_f = k_t.float()
+    v_t_f = v_t.float()
+    dout_t_f = dout_t.float()
+    scores = torch.matmul(q_t_f, k_t_f.transpose(-2, -1)) * sc  # [B, H, S_q, S_k]
     if causal:
         S = scores.size(-1)
         mask = torch.triu(torch.ones(S, S, device=q.device, dtype=torch.bool), diagonal=1)
         scores = scores.masked_fill(mask, float("-inf"))
-    probs = F.softmax(scores.float(), dim=-1).to(scores.dtype)  # [B, H, S_q, S_k]
-    dv_t = torch.matmul(probs.transpose(-2, -1), dout_t)        # [B, H, S_k, D]
-    dP   = torch.matmul(dout_t, v_t.transpose(-2, -1))          # [B, H, S_q, S_k]
+    probs = F.softmax(scores, dim=-1)                           # [B, H, S_q, S_k]
+    dv_t = torch.matmul(probs.transpose(-2, -1), dout_t_f)      # [B, H, S_k, D]
+    dP   = torch.matmul(dout_t_f, v_t_f.transpose(-2, -1))      # [B, H, S_q, S_k]
     d_scores = probs * (dP - (probs * dP).sum(dim=-1, keepdim=True))
-    dq_t = torch.matmul(d_scores, k_t) * sc                     # [B, H, S_q, D]
-    dk_t = torch.matmul(d_scores.transpose(-2, -1), q_t) * sc   # [B, H, S_k, D]
+    dq_t = torch.matmul(d_scores, k_t_f) * sc                   # [B, H, S_q, D]
+    dk_t = torch.matmul(d_scores.transpose(-2, -1), q_t_f) * sc # [B, H, S_k, D]
     # Transpose back to [B, S, H, D]
-    dq = dq_t.permute(0, 2, 1, 3).contiguous()
-    dk = dk_t.permute(0, 2, 1, 3).contiguous()
-    dv = dv_t.permute(0, 2, 1, 3).contiguous()
+    dq = dq_t.permute(0, 2, 1, 3).to(q.dtype).contiguous()
+    dk = dk_t.permute(0, 2, 1, 3).to(k.dtype).contiguous()
+    dv = dv_t.permute(0, 2, 1, 3).to(v.dtype).contiguous()
     return dq, dk, dv
 
 
