@@ -27,9 +27,9 @@ output_dir: "outputs_3d_align"
 # === 离散 + 变长 3D ===
 use_discrete_3d_tokens: true
 use_variable_length_3d_tokens: true
-max_safe_3d_length: 15000
+max_safe_3d_length: 30000
 coord_max_3d: 64
-max_length_variable: 16384
+max_length_variable: 32768
 reconstruction_ratio: 0.0
 training_stage: "warmup"
 
@@ -65,15 +65,15 @@ lora_dropout: 0.1
 
 prompt: "Describe this 3D shape in one sentence:"
 
-# === 调试（排查 "too many values to unpack" 等 VL forward 异常）===
-debug_vl_forward: true       # 打印 combined_embeds 等输入形状
-debug_qwen3vl_patch: true    # 打印 transformers 版本等补丁日志
-debug_memory: true           # OOM 调试：每步打印显存统计，定位爆显存步骤（@before_backward 后 OOM 多为反向梯度）
-debug_parallel: true         # 并行调试：打印 TP/SP/DP mesh、group、step 同步与关键通信日志
-debug_parallel_verbose: false # 并行详细模式（日志量很大，卡住时建议临时改为 true）
-debug_sync_points: true      # barrier 前后耗时日志，快速定位 rank 不一致停住点
-dist_timeout_seconds: 900    # 分布式 collectives 超时（秒），排查时可适当放大
-echo_all: true               # 控制台回显全部输出（含 [DEBUG]），需配合 tee 使用：... 2>&1 | tee align_debug.log
+# # === 调试（排查 "too many values to unpack" 等 VL forward 异常）===
+# debug_vl_forward: true       # 打印 combined_embeds 等输入形状
+# debug_qwen3vl_patch: true    # 打印 transformers 版本等补丁日志
+# debug_memory: true           # OOM 调试：每步打印显存统计，定位爆显存步骤（@before_backward 后 OOM 多为反向梯度）
+# debug_parallel: true         # 并行调试：打印 TP/SP/DP mesh、group、step 同步与关键通信日志
+# debug_parallel_verbose: false # 并行详细模式（日志量很大，卡住时建议临时改为 true）
+# debug_sync_points: true      # barrier 前后耗时日志，快速定位 rank 不一致停住点
+# dist_timeout_seconds: 900    # 分布式 collectives 超时（秒），排查时可适当放大
+# echo_all: true               # 控制台回显全部输出（含 [DEBUG]），需配合 tee 使用：... 2>&1 | tee align_debug.log
 
 # === 数据 ===
 max_samples: 0
