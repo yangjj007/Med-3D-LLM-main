@@ -59,7 +59,9 @@ def _flash_attn_single_chunk(
         scale = 1.0 / (head_dim ** 0.5)
     try:
         from flash_attn import flash_attn_func
-        out, lse = flash_attn_func(q, k, v, causal=causal, softmax_scale=scale)
+        # return_attn_probs=True 使 flash_attn 返回 (out, softmax_lse, S_dmask)
+        result = flash_attn_func(q, k, v, causal=causal, softmax_scale=scale, return_attn_probs=True)
+        out, lse = result[0], result[1]
         return out, lse
     except ImportError:
         # Fallback to SDPA when flash_attn not installed
