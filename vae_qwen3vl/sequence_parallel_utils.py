@@ -318,17 +318,16 @@ def sp_cross_entropy_loss(
     local_valid = valid_mask.sum()
     local_valid_f = local_valid.to(dtype=shift_logits.dtype)
 
-    # If one SP shard has no valid labels (all -100), CE(mean) would be NaN.
-    # We compute local CE(sum) and normalize by global valid-token count.
+    # Keep loss connected to graph on every rank.
+    # Even if this shard has 0 valid labels, backward must still be callable.
+    local_loss_sum = shift_logits.sum() * 0.0
     if int(local_valid.item()) > 0:
-        local_loss_sum = torch.nn.functional.cross_entropy(
+        local_loss_sum = local_loss_sum + torch.nn.functional.cross_entropy(
             shift_logits,
             shift_labels,
             ignore_index=-100,
             reduction="sum",
         )
-    else:
-        local_loss_sum = shift_logits.new_zeros(())
 
     global_valid = local_valid_f.clone()
     if sp_group is not None and dist.get_world_size(group=sp_group) > 1:
