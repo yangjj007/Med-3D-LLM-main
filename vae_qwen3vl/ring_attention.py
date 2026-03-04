@@ -52,28 +52,39 @@ def _flash_attn_single_chunk(
     causal: bool,
     scale: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute attention for one Q,K,V chunk. Returns (out, lse)."""
-    # q, k, v: [B, S, H, D]
+    """Compute attention for one Q,K,V chunk. Returns (out, lse).
+
+    q, k, v are in [B, S, H, D] layout.
+    Returned lse is reshaped to [B, S, H, 1] so it broadcasts with out [B, S, H, D].
+    """
     head_dim = q.size(-1)
     if scale is None:
         scale = 1.0 / (head_dim ** 0.5)
     try:
         from flash_attn import flash_attn_func
-        # return_attn_probs=True 使 flash_attn 返回 (out, softmax_lse, S_dmask)
+        # flash_attn natively accepts [B, S, H, D] and returns:
+        #   out:  [B, S, H, D]
+        #   lse:  [B, H, S]   <-- note: different layout from our accumulator
         result = flash_attn_func(q, k, v, causal=causal, softmax_scale=scale, return_attn_probs=True)
         out, lse = result[0], result[1]
+        # Reshape lse [B, H, S] -> [B, S, H, 1] to broadcast with [B, S, H, D]
+        lse = lse.permute(0, 2, 1).unsqueeze(-1).contiguous()
         return out, lse
     except ImportError:
-        # Fallback to SDPA when flash_attn not installed
-        out = F.scaled_dot_product_attention(
-            q, k, v,
+        # Fallback: transpose to [B, H, S, D] for standard matmul / SDPA, then transpose back.
+        q_t = q.permute(0, 2, 1, 3)   # [B, H, S_q, D]
+        k_t = k.permute(0, 2, 1, 3)   # [B, H, S_k, D]
+        v_t = v.permute(0, 2, 1, 3)   # [B, H, S_k, D]
+        out_t = F.scaled_dot_product_attention(
+            q_t, k_t, v_t,
             attn_mask=None,
             dropout_p=0.0,
             is_causal=causal,
             scale=scale,
         )
-        # SDPA doesn't return LSE; for online softmax we need it. Approximate.
-        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+        out = out_t.permute(0, 2, 1, 3).contiguous()  # [B, S, H, D]
+        # Recompute scores to derive LSE (SDPA doesn't expose it).
+        scores = torch.matmul(q_t, k_t.transpose(-2, -1)) * scale  # [B, H, S_q, S_k]
         if causal:
             S = scores.size(-1)
             mask = torch.triu(
@@ -81,7 +92,9 @@ def _flash_attn_single_chunk(
                 diagonal=1,
             )
             scores = scores.masked_fill(mask, float("-inf"))
-        lse = torch.logsumexp(scores.float(), dim=-1, keepdim=True).to(scores.dtype)
+        # lse: [B, H, S_q, 1] -> permute -> [B, S_q, H, 1]
+        lse = torch.logsumexp(scores.float(), dim=-1, keepdim=True).to(q.dtype)
+        lse = lse.permute(0, 2, 1, 3).contiguous()  # [B, S, H, 1]
         return out, lse
 
 
@@ -122,7 +135,8 @@ class RingFlashAttnFunc(torch.autograd.Function):
         sp_rank, sp_size = _get_sp_rank_size(sp_group)
         if sp_size <= 1:
             out, lse = _flash_attn_single_chunk(q, k, v, causal=causal, scale=softmax_scale)
-            ctx.save_for_backward(q, k, v, lse)
+            # saved layout: [q, lse_total, k0, v0]  -- same as multi-rank path
+            ctx.save_for_backward(q, lse, k, v)
             ctx.chunk_outputs = [out]
             ctx.chunk_lses = [lse]
             ctx.sp_group = sp_group
@@ -174,7 +188,7 @@ class RingFlashAttnFunc(torch.autograd.Function):
                 cur_k, recv_k = recv_k, cur_k
                 cur_v, recv_v = recv_v, cur_v
 
-        ctx.save_for_backward(q, *chunk_ks, *chunk_vs)
+        ctx.save_for_backward(q, lse_acc, *chunk_ks, *chunk_vs)
         ctx.chunk_outputs = chunk_outputs
         ctx.chunk_lses = chunk_lses
         ctx.sp_group = sp_group
@@ -190,8 +204,10 @@ class RingFlashAttnFunc(torch.autograd.Function):
         saved = ctx.saved_tensors
         q = saved[0]
         n = len(ctx.chunk_outputs)
-        chunk_ks = list(saved[1 : 1 + n])
-        chunk_vs = list(saved[1 + n : 1 + 2 * n])
+        # saved: [q, lse_acc, k0, k1, ..., v0, v1, ...]
+        lse_total = saved[1]
+        chunk_ks = list(saved[2 : 2 + n])
+        chunk_vs = list(saved[2 + n : 2 + 2 * n])
         chunk_outputs = ctx.chunk_outputs
         chunk_lses = ctx.chunk_lses
         sp_group = ctx.sp_group
@@ -206,15 +222,12 @@ class RingFlashAttnFunc(torch.autograd.Function):
             )
             return grad_q, grad_k, grad_v, None, None, None
 
-        lse_final = chunk_lses[-1]
-        if isinstance(lse_final, torch.Tensor) and lse_final.dtype == torch.bfloat16:
-            lse_final = lse_final.float()
+        # Use the accumulated total LSE (not just the last chunk's LSE) for correct weighting
+        lse_final = lse_total.float() if lse_total.dtype == torch.bfloat16 else lse_total
         weights = [
-            torch.exp(ls.float() - lse_final) if hasattr(ls, "float") else torch.exp(ls - lse_final)
+            torch.exp(ls.float() - lse_final).to(grad_out.dtype)
             for ls in chunk_lses
         ]
-        if chunk_lses[0].dtype == torch.bfloat16:
-            weights = [w.to(grad_out.dtype) for w in weights]
 
         grad_q = torch.zeros_like(q)
         grad_k = torch.zeros_like(chunk_ks[0])
@@ -256,20 +269,32 @@ def _flash_attn_bwd(
     causal: bool,
     scale: float,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Backward of attention: dL/dQ, dL/dK, dL/dV. Recompute scores for SDPA-style backward."""
+    """Backward of attention: dL/dQ, dL/dK, dL/dV. Recompute scores for SDPA-style backward.
+
+    q, k, v, dout are in [B, S, H, D] layout; returned gradients use the same layout.
+    """
     head_dim = q.size(-1)
     sc = scale if scale else 1.0 / (head_dim ** 0.5)
-    scores = torch.matmul(q, k.transpose(-2, -1)) * sc
+    # Transpose to [B, H, S, D] for correct batched matmul
+    q_t    = q.permute(0, 2, 1, 3)    # [B, H, S_q, D]
+    k_t    = k.permute(0, 2, 1, 3)    # [B, H, S_k, D]
+    v_t    = v.permute(0, 2, 1, 3)    # [B, H, S_k, D]
+    dout_t = dout.permute(0, 2, 1, 3) # [B, H, S_q, D]
+    scores = torch.matmul(q_t, k_t.transpose(-2, -1)) * sc  # [B, H, S_q, S_k]
     if causal:
         S = scores.size(-1)
         mask = torch.triu(torch.ones(S, S, device=q.device, dtype=torch.bool), diagonal=1)
         scores = scores.masked_fill(mask, float("-inf"))
-    probs = F.softmax(scores.float(), dim=-1).to(scores.dtype)
-    dv = torch.matmul(probs.transpose(-2, -1), dout)
-    dP = torch.matmul(dout, v.transpose(-2, -1))
+    probs = F.softmax(scores.float(), dim=-1).to(scores.dtype)  # [B, H, S_q, S_k]
+    dv_t = torch.matmul(probs.transpose(-2, -1), dout_t)        # [B, H, S_k, D]
+    dP   = torch.matmul(dout_t, v_t.transpose(-2, -1))          # [B, H, S_q, S_k]
     d_scores = probs * (dP - (probs * dP).sum(dim=-1, keepdim=True))
-    dq = torch.matmul(d_scores, k) * sc
-    dk = torch.matmul(d_scores.transpose(-2, -1), q) * sc
+    dq_t = torch.matmul(d_scores, k_t) * sc                     # [B, H, S_q, D]
+    dk_t = torch.matmul(d_scores.transpose(-2, -1), q_t) * sc   # [B, H, S_k, D]
+    # Transpose back to [B, S, H, D]
+    dq = dq_t.permute(0, 2, 1, 3).contiguous()
+    dk = dk_t.permute(0, 2, 1, 3).contiguous()
+    dv = dv_t.permute(0, 2, 1, 3).contiguous()
     return dq, dk, dv
 
 
