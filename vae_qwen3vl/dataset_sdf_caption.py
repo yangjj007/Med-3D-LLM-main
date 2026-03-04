@@ -19,6 +19,27 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 from typing import Any, Dict, List, Optional, Union
+import torch.distributed as dist
+
+
+def _collate_dbg_enabled() -> bool:
+    return os.getenv("PARALLEL_DEBUG", "0") == "1" or os.getenv("DEBUG_COLLATE", "0") == "1"
+
+
+def _collate_rank_prefix() -> str:
+    try:
+        if dist.is_available() and dist.is_initialized():
+            return f"[rank{dist.get_rank()}]"
+    except Exception:
+        pass
+    return ""
+
+
+def _collate_log(msg: str, force: bool = False) -> None:
+    if not (force or _collate_dbg_enabled()):
+        return
+    ts = time.strftime("%H:%M:%S")
+    print(f"[COLLATE {ts}] {_collate_rank_prefix()} {msg}", flush=True)
 
 
 class SDF3DCaptionDataset(Dataset):
@@ -227,6 +248,12 @@ def collate_sdf_caption_discrete(
         batch_encoding_indices_to_variable_length_sequences,
         variable_length_sequence_to_mesh_token_string,
     )
+    _collate_log(
+        f"enter collate_sdf_caption_discrete bs={len(batch)} "
+        f"use_variable_length_3d={use_variable_length_3d} max_length={max_length} "
+        f"max_length_variable={max_length_variable}",
+        force=False,
+    )
 
     # Merge inputs_3d
     sparse_sdfs = []
@@ -264,7 +291,7 @@ def collate_sdf_caption_discrete(
                 inputs_3d_device[k] = v
         encoding_indices = vae_model.Encode(inputs_3d_device)
     _t_vae = time.time()
-    print(f"[DEBUG collate] VAE Encode took {_t_vae - _collate_t0:.3f}s", flush=True)
+    print(f"[DEBUG collate] {_collate_rank_prefix()} VAE Encode took {_t_vae - _collate_t0:.3f}s", flush=True)
 
     batch_size = len(batch)
     if use_variable_length_3d:
@@ -275,13 +302,22 @@ def collate_sdf_caption_discrete(
             coord_max=coord_max_3d,
         )
         mesh_strings = [variable_length_sequence_to_mesh_token_string(s) for s in seq_list]
+        _collate_log(
+            "variable length seq lens="
+            + str([int(s.numel()) if hasattr(s, "numel") else -1 for s in seq_list]),
+            force=False,
+        )
     else:
         pooled_list = batch_encoding_indices_to_pooled_sequences(
             encoding_indices, batch_size
         )
         mesh_strings = [pooled_sequence_to_mesh_token_string(p) for p in pooled_list]
     _t_seq = time.time()
-    print(f"[DEBUG collate] Sequence gen took {_t_seq - _t_vae:.3f}s  mesh_str_lens={[len(s) for s in mesh_strings]}", flush=True)
+    print(
+        f"[DEBUG collate] {_collate_rank_prefix()} Sequence gen took {_t_seq - _t_vae:.3f}s  "
+        f"mesh_str_lens={[len(s) for s in mesh_strings]}",
+        flush=True,
+    )
 
     messages_list = []
     for i, b in enumerate(batch):
@@ -311,7 +347,11 @@ def collate_sdf_caption_discrete(
     if isinstance(text, str):
         text = [text]
     _t_template = time.time()
-    print(f"[DEBUG collate] Chat template took {_t_template - _t_tok0:.3f}s  text_lens={[len(t) for t in text]}", flush=True)
+    print(
+        f"[DEBUG collate] {_collate_rank_prefix()} Chat template took {_t_template - _t_tok0:.3f}s  "
+        f"text_lens={[len(t) for t in text]}",
+        flush=True,
+    )
 
     enc = tokenizer(
         text,
@@ -324,7 +364,11 @@ def collate_sdf_caption_discrete(
     input_ids = enc["input_ids"]
     attention_mask = enc["attention_mask"]
     _t_tokenize = time.time()
-    print(f"[DEBUG collate] Tokenizer encode took {_t_tokenize - _t_template:.3f}s  input_ids.shape={input_ids.shape}", flush=True)
+    print(
+        f"[DEBUG collate] {_collate_rank_prefix()} Tokenizer encode took {_t_tokenize - _t_template:.3f}s  "
+        f"input_ids.shape={input_ids.shape}",
+        flush=True,
+    )
 
     labels = input_ids.clone()
     pad_id = (
@@ -349,8 +393,14 @@ def collate_sdf_caption_discrete(
         except Exception:
             pass
     _t_labels = time.time()
-    print(f"[DEBUG collate] Label masking took {_t_labels - _t_tokenize:.3f}s", flush=True)
-    print(f"[DEBUG collate] TOTAL collate took {_t_labels - _collate_t0:.3f}s", flush=True)
+    valid_tokens = int((labels != -100).sum().item())
+    total_tokens = int(labels.numel())
+    print(f"[DEBUG collate] {_collate_rank_prefix()} Label masking took {_t_labels - _t_tokenize:.3f}s", flush=True)
+    print(
+        f"[DEBUG collate] {_collate_rank_prefix()} TOTAL collate took {_t_labels - _collate_t0:.3f}s "
+        f"valid_label_tokens={valid_tokens}/{total_tokens}",
+        flush=True,
+    )
 
     return {
         "input_ids": input_ids,

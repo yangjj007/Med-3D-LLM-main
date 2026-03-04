@@ -17,6 +17,29 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from typing import Dict, Any, Optional, Tuple, List
+import os
+import time
+
+
+def _sp_dbg_enabled() -> bool:
+    return os.getenv("PARALLEL_DEBUG", "0") == "1"
+
+
+def _sp_dbg_verbose() -> bool:
+    return os.getenv("PARALLEL_DEBUG_VERBOSE", "0") == "1"
+
+
+def _sp_dbg(msg: str, *, force: bool = False) -> None:
+    if not (force or _sp_dbg_enabled()):
+        return
+    rank = "?"
+    try:
+        if dist.is_initialized():
+            rank = str(dist.get_rank())
+    except Exception:
+        pass
+    ts = time.strftime("%H:%M:%S")
+    print(f"[SP-DBG {ts}][rank{rank}] {msg}", flush=True)
 
 
 def create_3d_mesh(
@@ -80,6 +103,7 @@ def get_sp_group_from_mesh(mesh_3d) -> Optional[Any]:
     tp_size = tp_mesh.size()
     dp_size = dp_mesh.size()
     if sp_size <= 1:
+        _sp_dbg("sp_size<=1, skip sp_group creation")
         return None
     try:
         pg = sp_mesh.get_group()
@@ -99,7 +123,10 @@ def get_sp_group_from_mesh(mesh_3d) -> Optional[Any]:
             my_dp * (sp_size * tp_size) + s * tp_size + my_tp
             for s in range(sp_size)
         ]
+        _sp_dbg(f"create sp_group ranks={ranks}", force=True)
         _sp_group_cache[cache_key] = dist.new_group(ranks)
+    else:
+        _sp_dbg(f"reuse cached sp_group key={cache_key}")
     return _sp_group_cache[cache_key]
 
 
@@ -140,6 +167,11 @@ def split_for_sp(
             out[key] = x[:, :0].clone()
         else:
             out[key] = x[:, start:end].contiguous()
+        if _sp_dbg_verbose():
+            _sp_dbg(
+                f"split key={key} sp_rank={sp_rank}/{sp_size} "
+                f"orig_S={S} chunk=[{start}:{end}) out_shape={tuple(out[key].shape)}"
+            )
     if "position_ids" in batch and batch["position_ids"] is not None:
         pid = batch["position_ids"]
         S = pid.size(seq_dim)
@@ -208,7 +240,7 @@ def apply_sp_attention_patch(
     if layers is None:
         return
 
-    for layer in layers:
+    for idx, layer in enumerate(layers):
         attn = getattr(layer, "self_attn", None)
         if attn is None:
             continue
@@ -218,6 +250,8 @@ def apply_sp_attention_patch(
             def _patched(hidden_states, attention_mask=None, position_ids=None, past_key_value=None, output_attentions=False, use_cache=False, **kwargs):
                 bsz, q_len, _ = hidden_states.size()
                 _self = attn_module
+                if _sp_dbg_verbose():
+                    _sp_dbg(f"attn patched forward enter hidden_states={tuple(hidden_states.shape)}")
                 key_states = _self.k_proj(hidden_states)
                 value_states = _self.v_proj(hidden_states)
                 query_states = _self.q_proj(hidden_states)
@@ -235,6 +269,11 @@ def apply_sp_attention_patch(
                 if num_kv_groups > 1:
                     key_states = key_states.repeat_interleave(num_kv_groups, dim=2)
                     value_states = value_states.repeat_interleave(num_kv_groups, dim=2)
+                if _sp_dbg_verbose():
+                    _sp_dbg(
+                        f"attn qkv reshaped q={tuple(query_states.shape)} "
+                        f"k={tuple(key_states.shape)} v={tuple(value_states.shape)} kv_groups={num_kv_groups}"
+                    )
                 attn_output = ring_flash_attn(
                     query_states, key_states, value_states,
                     sp_group=_sp_grp, causal=True,
@@ -245,5 +284,7 @@ def apply_sp_attention_patch(
             return _patched
 
         attn.forward = make_patched(attn, sp_group)
+        if _sp_dbg_verbose() or idx < 2:
+            _sp_dbg(f"patched self_attn forward at layer={idx}")
 
     print(f"[SP] Patched {len(layers)} attention layers with Ring Flash Attention", flush=True)

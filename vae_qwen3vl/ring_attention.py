@@ -9,6 +9,7 @@ merging results with online softmax. Compatible with GQA (no head splitting).
 from __future__ import annotations
 
 import os
+import time
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -61,10 +62,17 @@ def _ring_send_recv(
             sp_group=sp_group,
         )
 
+    t0 = time.time() if _ring_attn_debug_enabled() else 0.0
     req_recv = dist.irecv(recv_tensor, src=prev_rank, group=sp_group)
     req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
     req_recv.wait()
     req_send.wait()
+    if _ring_attn_debug_enabled():
+        _ring_attn_debug(
+            f"ring send/recv done elapsed={time.time() - t0:.4f}s "
+            f"send_numel={send_tensor.numel()} recv_numel={recv_tensor.numel()}",
+            sp_group=sp_group,
+        )
 
 
 def _gather_sp_seq_lens(local_len: int, sp_group: Any) -> list[int]:
@@ -80,7 +88,7 @@ def _gather_sp_seq_lens(local_len: int, sp_group: Any) -> list[int]:
 
 def _ring_attn_debug_enabled() -> bool:
     """Enable debug logs with env var RING_ATTN_DEBUG=1."""
-    return os.getenv("RING_ATTN_DEBUG", "0") == "1"
+    return os.getenv("RING_ATTN_DEBUG", "0") == "1" or os.getenv("PARALLEL_DEBUG", "0") == "1"
 
 
 def _ring_attn_debug(msg: str, sp_group: Any = None) -> None:

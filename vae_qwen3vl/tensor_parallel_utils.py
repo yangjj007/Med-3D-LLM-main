@@ -24,6 +24,29 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from typing import Optional
+import os
+import time
+
+
+def _pdebug_enabled() -> bool:
+    return os.getenv("PARALLEL_DEBUG", "0") == "1"
+
+
+def _pdebug_verbose() -> bool:
+    return os.getenv("PARALLEL_DEBUG_VERBOSE", "0") == "1"
+
+
+def _pdbg(msg: str, *, force: bool = False) -> None:
+    if not (force or _pdebug_enabled()):
+        return
+    rank = "?"
+    try:
+        if dist.is_initialized():
+            rank = str(dist.get_rank())
+    except Exception:
+        pass
+    ts = time.strftime("%H:%M:%S")
+    print(f"[TP-DBG {ts}][rank{rank}] {msg}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -51,9 +74,11 @@ def get_tp_dp_mesh(tp_size: int, world_size: Optional[int] = None):
             f"For Qwen3-VL 2B (2 KV heads), the only valid TP sizes are 1 and 2."
         )
     dp_size = world_size // tp_size
+    _pdbg(f"create 2D mesh request world_size={world_size} tp_size={tp_size} dp_size={dp_size}")
     mesh_2d = init_device_mesh(
         "cuda", (dp_size, tp_size), mesh_dim_names=("dp", "tp")
     )
+    _pdbg("create 2D mesh done", force=True)
     return mesh_2d, mesh_2d["dp"], mesh_2d["tp"]
 
 
@@ -94,12 +119,17 @@ def get_3d_mesh(
             f"world_size={world_size} must be divisible by tp_size*sp_size ({tp_size * sp_size})"
         )
     dp_size = world_size // (tp_size * sp_size)
+    _pdbg(
+        f"create 3D mesh request world_size={world_size} tp_size={tp_size} "
+        f"sp_size={sp_size} dp_size={dp_size}"
+    )
     # tp innermost (last dim) — required by parallelize_module
     mesh_3d = init_device_mesh(
         "cuda",
         (dp_size, sp_size, tp_size),
         mesh_dim_names=("dp", "sp", "tp"),
     )
+    _pdbg("create 3D mesh done", force=True)
     return mesh_3d, mesh_3d["dp"], mesh_3d["sp"], mesh_3d["tp"]
 
 
@@ -207,7 +237,7 @@ def apply_tp_to_qwen3vl(
                     apply_to_attention = False
                     break
 
-    for layer in layers:
+    for idx, layer in enumerate(layers):
         if apply_to_attention:
             attn = getattr(layer, "self_attn", None)
             if attn is not None:
@@ -220,6 +250,8 @@ def apply_tp_to_qwen3vl(
                 if attn_plan:
                     parallelize_module(attn, tp_mesh, attn_plan)
                     n_parallelized += 1
+                    if _pdebug_verbose() or idx < 2:
+                        _pdbg(f"layer={idx} attn TP plan keys={list(attn_plan.keys())}")
 
         if apply_to_mlp:
             mlp = getattr(layer, "mlp", None)
@@ -233,6 +265,8 @@ def apply_tp_to_qwen3vl(
                 if mlp_plan:
                     parallelize_module(mlp, tp_mesh, mlp_plan)
                     n_parallelized += 1
+                    if _pdebug_verbose() or idx < 2:
+                        _pdbg(f"layer={idx} mlp TP plan keys={list(mlp_plan.keys())}")
 
     print(
         f"[TP] Tensor parallelism applied: {n_parallelized} sub-module(s) across "
@@ -280,11 +314,15 @@ def apply_fsdp2_dp(
             pass  # older PyTorch without MixedPrecisionPolicy
 
     layers = _get_llm_layers(model.vl_model)
-    for layer in layers:
+    t0 = time.time()
+    for idx, layer in enumerate(layers):
         fully_shard(layer, **kwargs)
+        if _pdebug_verbose() and idx < 4:
+            _pdbg(f"fully_shard layer={idx} done")
 
     # Wrap the outer model to cover embeddings, lm_head, projector, VAE (frozen)
     fully_shard(model, **kwargs)
+    _pdbg(f"fully_shard total elapsed={time.time() - t0:.3f}s", force=True)
 
     print(
         f"[FSDP2] Data-parallel sharding applied: "
@@ -330,18 +368,28 @@ def register_dp_grad_hooks(model: nn.Module, dp_mesh) -> None:
         _DTensor = None
 
     n_hooked = 0
+    verbose = _pdebug_verbose()
     for param in model.parameters():
         if not param.requires_grad:
             continue
 
         def _make_hook(grp, dtensor_cls):
+            _fired = {"n": 0}
             def _hook(grad):
                 if grad is None:
                     return grad
+                _fired["n"] += 1
+                t0 = time.time()
                 if dtensor_cls is not None and isinstance(grad, dtensor_cls):
                     dist.all_reduce(grad._local_tensor, op=dist.ReduceOp.AVG, group=grp)
                 else:
                     dist.all_reduce(grad, op=dist.ReduceOp.AVG, group=grp)
+                if verbose and _fired["n"] <= 2:
+                    shape = tuple(grad.shape) if hasattr(grad, "shape") else "dtensor"
+                    _pdbg(
+                        f"dp_grad_all_reduce fired={_fired['n']} shape={shape} "
+                        f"elapsed={time.time() - t0:.4f}s"
+                    )
                 return grad
             return _hook
 

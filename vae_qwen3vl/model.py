@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+import os
 
 
 def _is_main_for_debug() -> bool:
@@ -42,6 +43,10 @@ def _debug_mem_log(phase: str, extra: str = "") -> None:
         msg += f" | {extra}"
     msg += f" | {' '.join(parts)}"
     print(msg, flush=True)
+
+
+def _parallel_debug_enabled() -> bool:
+    return os.getenv("PARALLEL_DEBUG", "0") == "1"
 
 
 def _get_vl_layers_for_debug(vl_model: nn.Module):
@@ -371,11 +376,31 @@ class Qwen3VLWith3DBranch(nn.Module):
         sp_group = getattr(self, "sp_group", None)
         if sp_group is not None and input_ids is not None:
             from .sequence_parallel_utils import split_for_sp
+            if _parallel_debug_enabled():
+                try:
+                    sp_rank = dist.get_rank(group=sp_group)
+                    sp_size = dist.get_world_size(group=sp_group)
+                except Exception:
+                    sp_rank, sp_size = -1, -1
+                print(
+                    f"[SP-FWD] before split input_ids={tuple(input_ids.shape)} "
+                    f"attention_mask={tuple(attention_mask.shape) if attention_mask is not None else None} "
+                    f"labels={tuple(labels.shape) if labels is not None else None} "
+                    f"sp_rank={sp_rank}/{sp_size}",
+                    flush=True,
+                )
             batch = {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
             batch = split_for_sp(batch, sp_group)
             input_ids = batch["input_ids"]
             attention_mask = batch.get("attention_mask")
             labels = batch.get("labels")
+            if _parallel_debug_enabled():
+                print(
+                    f"[SP-FWD] after split input_ids={tuple(input_ids.shape)} "
+                    f"attention_mask={tuple(attention_mask.shape) if attention_mask is not None else None} "
+                    f"labels={tuple(labels.shape) if labels is not None else None}",
+                    flush=True,
+                )
         _dbg = getattr(self, "_debug_memory_fine", False)
         _register_discrete_debug_hooks(self.vl_model, _dbg)
         _all_r = __import__("os").environ.get("DEBUG_MEMORY_ALL_RANKS", "0") == "1"

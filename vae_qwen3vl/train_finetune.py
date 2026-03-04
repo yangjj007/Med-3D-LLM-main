@@ -7,6 +7,7 @@ Supports multi-GPU training via HuggingFace Accelerate.
 import argparse
 import os
 import time
+from datetime import timedelta
 
 # 确保 3D-VL 训练使用 torchsparse（新终端直接 python 运行时不会走 shell 脚本的 export）
 os.environ.setdefault("SPARSE_BACKEND", "torchsparse")
@@ -68,6 +69,41 @@ def _rank_prefix() -> str:
     except Exception:
         pass
     return ""
+
+
+def _dist_context_str() -> str:
+    """返回统一的分布式上下文字符串，便于跨文件检索日志。"""
+    rank = os.environ.get("RANK", "?")
+    local_rank = os.environ.get("LOCAL_RANK", "?")
+    world_size = os.environ.get("WORLD_SIZE", "?")
+    return f"rank={rank} local_rank={local_rank} world={world_size}"
+
+
+def _debug_parallel_enabled() -> bool:
+    return os.environ.get("PARALLEL_DEBUG", "0") == "1"
+
+
+def _debug_parallel_verbose_enabled() -> bool:
+    return os.environ.get("PARALLEL_DEBUG_VERBOSE", "0") == "1"
+
+
+def _dlog(msg: str, *, all_ranks: bool = True, force: bool = False) -> None:
+    """
+    并行训练统一 debug 日志：
+    - force=True: 总是打印
+    - 否则仅在 PARALLEL_DEBUG=1 时打印
+    - all_ranks=False: 仅 rank0 打印
+    """
+    if not (force or _debug_parallel_enabled()):
+        return
+    if not all_ranks:
+        try:
+            if dist.is_initialized() and dist.get_rank() != 0:
+                return
+        except Exception:
+            pass
+    ts = time.strftime("%H:%M:%S")
+    print(f"[DDBG {ts}] {_rank_prefix()}[{_dist_context_str()}] {msg}", flush=True)
 
 
 def _gpu_memory_stats_all(include_peak: bool = False, compact: bool = True) -> str:
@@ -326,6 +362,14 @@ def main():
                         help="在每个训练步骤的关键阶段打印 GPU 显存统计，用于定位 OOM 步骤")
     parser.add_argument("--echo_all", action="store_true",
                         help="控制台回显全部输出（含 [DEBUG] 等），便于实时查看；否则仅回显部分训练信息")
+    parser.add_argument("--debug_parallel", action="store_true",
+                        help="并行调试总开关：输出 TP/SP/DP 组、collective 与同步点详细日志")
+    parser.add_argument("--debug_parallel_verbose", action="store_true",
+                        help="并行调试详细模式：输出每层 TP/SP 打补丁与梯度同步细节（日志量大）")
+    parser.add_argument("--debug_sync_points", action="store_true",
+                        help="在关键阶段插入同步点日志（barrier 前后耗时），用于定位卡住位置")
+    parser.add_argument("--dist_timeout_seconds", type=int, default=600,
+                        help="torch.distributed init_process_group 超时时间（秒）")
     args, remaining = parser.parse_known_args()
     known_keys = {a.dest for a in parser._actions if a.dest != "help"}
     if args.config and os.path.isfile(args.config):
@@ -335,6 +379,15 @@ def main():
         args = parser.parse_args(remaining)
     else:
         args = parser.parse_args(remaining if remaining else [])
+
+    # 并行调试开关写入环境变量，供其它模块（TP/SP/ring attention）复用。
+    if getattr(args, "debug_parallel", False):
+        os.environ["PARALLEL_DEBUG"] = "1"
+    if getattr(args, "debug_parallel_verbose", False):
+        os.environ["PARALLEL_DEBUG_VERBOSE"] = "1"
+    if getattr(args, "debug_parallel", False) and "RING_ATTN_DEBUG" not in os.environ:
+        # 统一打开 ring attention 关键路径日志（send/recv 与 step）。
+        os.environ["RING_ATTN_DEBUG"] = "1"
 
     # -----------------------------------------------------------------------
     # Distributed setup: TP+FSDP2 path vs. legacy Accelerate path
@@ -352,13 +405,32 @@ def main():
     if use_tp:
         # Native torch.distributed init (torchrun sets LOCAL_RANK / RANK / WORLD_SIZE)
         if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
+            _dlog(
+                f"init_process_group start backend=nccl timeout={args.dist_timeout_seconds}s "
+                f"MASTER_ADDR={os.environ.get('MASTER_ADDR', '?')} "
+                f"MASTER_PORT={os.environ.get('MASTER_PORT', '?')}",
+                force=True,
+            )
+            _init_t0 = time.time()
+            dist.init_process_group(
+                backend="nccl",
+                timeout=timedelta(seconds=max(1, int(args.dist_timeout_seconds))),
+            )
+            _dlog(
+                f"init_process_group done in {time.time() - _init_t0:.3f}s",
+                force=True,
+            )
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
         world_size = dist.get_world_size()
         global_rank = dist.get_rank()
         is_main_process = (global_rank == 0)
+        _dlog(
+            f"dist ready backend=nccl rank={global_rank}/{world_size} local_rank={local_rank} "
+            f"cuda_device={torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'}",
+            force=True,
+        )
 
         if use_sp:
             from vae_qwen3vl.tensor_parallel_utils import get_3d_mesh
@@ -367,13 +439,13 @@ def main():
             sp_group = get_sp_group_from_mesh(mesh_3d)
             accelerator = None
             torch.manual_seed(42)
-            if is_main_process:
-                dp_sz = dp_mesh.size()
-                print(
-                    f"[TP+SP] world_size={world_size} tp={tp_size} sp={sp_size} dp={dp_sz} "
-                    f"global_rank={global_rank} local_rank={local_rank}",
-                    flush=True,
-                )
+            dp_sz = dp_mesh.size()
+            _dlog(
+                f"mesh_3d ready dims=(dp={dp_sz},sp={sp_size},tp={tp_size}) "
+                f"global_rank={global_rank} local_rank={local_rank}",
+                all_ranks=True,
+                force=True,
+            )
         else:
             from torch.distributed.device_mesh import init_device_mesh
             dp_size = world_size // tp_size
@@ -389,12 +461,12 @@ def main():
             tp_mesh = mesh_2d["tp"]
             accelerator = None
             torch.manual_seed(42)
-            if is_main_process:
-                print(
-                    f"[TP] world_size={world_size} tp_size={tp_size} dp_size={dp_size} "
-                    f"global_rank={global_rank} local_rank={local_rank}",
-                    flush=True,
-                )
+            _dlog(
+                f"mesh_2d ready dims=(dp={dp_size},tp={tp_size}) "
+                f"global_rank={global_rank} local_rank={local_rank}",
+                all_ranks=True,
+                force=True,
+            )
     else:
         accelerator = Accelerator(
             gradient_accumulation_steps=getattr(args, "gradient_accumulation_steps", 1),
@@ -407,6 +479,10 @@ def main():
         if accelerator is not None:
             set_seed(42)
             accelerator.print(f"Accelerate: {accelerator.num_processes} processes, device={device}")
+        _dlog(
+            f"legacy accelerate path enabled distributed={accelerator is not None}",
+            force=getattr(args, "debug_parallel", False),
+        )
 
     output_base = args.output_dir or os.path.join(PROJECT_ROOT, "outputs_3d_align")
     args.output_dir = os.path.join(output_base, _make_output_subdir(args))
@@ -428,6 +504,17 @@ def main():
     sys.stdout = _log_tee
     if is_main_process:
         print(f"[Train] Full log -> {log_path}", flush=True)
+        _dlog(
+            "train args snapshot: "
+            f"use_tp={use_tp} tp={tp_size} sp={sp_size} "
+            f"stage={training_stage if 'training_stage' in locals() else getattr(args, 'training_stage', 'sft')} "
+            f"batch_size={args.batch_size} grad_accum={getattr(args, 'gradient_accumulation_steps', 1)} "
+            f"debug_memory={getattr(args, 'debug_memory', False)} "
+            f"debug_parallel={getattr(args, 'debug_parallel', False)} "
+            f"debug_parallel_verbose={getattr(args, 'debug_parallel_verbose', False)}",
+            all_ranks=False,
+            force=True,
+        )
 
     metrics_file = None
     use_discrete = getattr(args, "use_discrete_3d_tokens", False)
@@ -557,18 +644,38 @@ def main():
                 apply_to_attention=apply_attn_tp,
                 apply_to_mlp=True,
             )
+            _dlog(
+                f"apply_tp_to_qwen3vl finished attn={apply_attn_tp} mlp=True",
+                all_ranks=True,
+                force=getattr(args, "debug_parallel", False),
+            )
             if use_sp and sp_group is not None:
                 from vae_qwen3vl.sequence_parallel_utils import apply_sp_attention_patch
                 apply_sp_attention_patch(model, sp_group)
                 model.sp_group = sp_group
+                _dlog(
+                    "apply_sp_attention_patch finished; model.sp_group attached",
+                    all_ranks=True,
+                    force=getattr(args, "debug_parallel", False),
+                )
             if use_sp:
                 # 3D mesh (dp, sp, tp): PyTorch 要求 tp 为最内层维度，导致 ("dp","tp")
                 # 不相邻 → FSDP2+TP 组合失败。改用梯度钩子做 DP 梯度同步。
                 # TP 已通过 DTensor 自动处理 TP 内部梯度规约；钩子负责跨 dp ranks 平均。
                 register_dp_grad_hooks(model, dp_mesh)
+                _dlog(
+                    "register_dp_grad_hooks finished (SP path, no FSDP2)",
+                    all_ranks=True,
+                    force=getattr(args, "debug_parallel", False),
+                )
             else:
                 # 2D mesh (dp, tp): tp 在最内层且 ("dp","tp") 相邻 → FSDP2+TP 正常工作
                 apply_fsdp2_dp(model, dp_mesh)
+                _dlog(
+                    "apply_fsdp2_dp finished (TP+DP path)",
+                    all_ranks=True,
+                    force=getattr(args, "debug_parallel", False),
+                )
 
         # DTensor + AdamW foreach kernels are not fully supported yet
         # (e.g., aten._foreach_mul_.Scalar cross-mesh), so disable foreach
@@ -681,6 +788,13 @@ def main():
                 raise ValueError("Discrete 3D token mode requires --data_dir (no dummy_data path).")
             raise ValueError("Provide --dummy_data or --data_dir. Use --dummy_data for a quick test.")
 
+        _dlog(
+            f"dataloader ready len={len(dataloader)} batch_size={args.batch_size} "
+            f"dataset_len={len(dataset)} sampler={type(getattr(dataloader, 'sampler', None)).__name__}",
+            all_ranks=True,
+            force=getattr(args, "debug_parallel", False),
+        )
+
         if not use_tp and accelerator is not None:
             model, opt, dataloader = accelerator.prepare(model, opt, dataloader)
 
@@ -718,10 +832,15 @@ def main():
                 print(*a, **kw)
 
         def _barrier():
+            t0 = time.time()
+            if getattr(args, "debug_sync_points", False):
+                _dlog("barrier enter", all_ranks=True, force=True)
             if use_tp:
                 dist.barrier()
             elif accelerator is not None:
                 accelerator.wait_for_everyone()
+            if getattr(args, "debug_sync_points", False):
+                _dlog(f"barrier leave waited={time.time() - t0:.3f}s", all_ranks=True, force=True)
 
         grad_accum_steps = getattr(args, "gradient_accumulation_steps", 1)
         if debug_memory and is_main_process:
@@ -766,6 +885,8 @@ def main():
 
             for step, batch in enumerate(dataloader):
                 _step_t0 = time.time()
+                if getattr(args, "debug_parallel", False) and (step < 3 or _debug_parallel_verbose_enabled()):
+                    _dlog(f"step_begin epoch={epoch} step={step}", all_ranks=True)
                 # 每步开始重置 peak，便于定位本步内显存峰值
                 if debug_memory and torch.cuda.is_available():
                     for i in range(torch.cuda.device_count()):
@@ -858,6 +979,12 @@ def main():
                     accelerator.backward(scaled_loss)
                 else:
                     scaled_loss.backward()
+                if getattr(args, "debug_parallel", False) and (step < 3 or _debug_parallel_verbose_enabled()):
+                    _dlog(
+                        f"backward_done epoch={epoch} step={step} "
+                        f"scaled_loss={scaled_loss.detach().float().item():.6f}",
+                        all_ranks=True,
+                    )
 
                 _t_bwd = time.time()
                 # [DEBUG_MEMORY] Backward 完成
@@ -876,6 +1003,11 @@ def main():
                         else:
                             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                     opt.step()
+                    if getattr(args, "debug_parallel", False) and (step < 3 or _debug_parallel_verbose_enabled()):
+                        _dlog(
+                            f"optimizer_step_done epoch={epoch} step={step} global_step(next)={global_step + 1}",
+                            all_ranks=True,
+                        )
                     if scheduler is not None:
                         scheduler.step()
                     opt.zero_grad()
@@ -909,6 +1041,7 @@ def main():
                         )
 
             # --- End-of-epoch checkpoint ---
+            _dlog(f"epoch_end enter epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
             _barrier()
             ckpt_path = os.path.join(args.output_dir, f"projector_epoch{epoch}.pt")
             if use_tp:
@@ -938,8 +1071,10 @@ def main():
                         raw_model.vl_model.save_pretrained(lora_dir)
                         _print(f"Saved LoRA to {lora_dir}")
             _barrier()
+            _dlog(f"epoch_end leave epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
 
         # --- Final checkpoint ---
+        _dlog("final_checkpoint enter", all_ranks=True, force=getattr(args, "debug_sync_points", False))
         _barrier()
         final_proj_path = os.path.join(args.output_dir, "projector_final.pt")
         if use_tp:
@@ -962,6 +1097,7 @@ def main():
                     lora_final_dir = os.path.join(args.output_dir, "lora_final")
                     raw_model.vl_model.save_pretrained(lora_final_dir)
                     _print(f"Saved LoRA final to {lora_final_dir}")
+        _dlog("final_checkpoint leave", all_ranks=True, force=getattr(args, "debug_sync_points", False))
         if is_main_process:
             with open(os.path.join(args.output_dir, "train_args.json"), "w") as f:
                 json.dump(vars(args), f, indent=2)

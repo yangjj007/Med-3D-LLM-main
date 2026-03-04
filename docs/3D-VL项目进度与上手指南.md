@@ -96,13 +96,24 @@ export SPARSE_BACKEND=torchsparse
 python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug.log
 ```
 
-**3）多卡 + 降显存（DeepSpeed ZeRO-2）**
+**3）多卡并行定位（TP/SP/通信详细日志）**
 
-在对应 YAML 中设 `use_deepspeed: true`、`num_processes: <GPU数>`，然后同样：
+推荐在排查 NCCL 超时、序列并行或张量并行问题时使用：
 
 ```bash
 export SPARSE_BACKEND=torchsparse
-python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug.log 
+export PARALLEL_DEBUG=1
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
+export NCCL_DEBUG=INFO
+export NCCL_ASYNC_ERROR_HANDLING=1
+python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug.log
+```
+
+若需要进一步看每层 patch 与梯度同步细节（日志非常大）：
+
+```bash
+export PARALLEL_DEBUG_VERBOSE=1
+python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug_verbose.log
 ```
 
 ### 3.3 配置要点速查
