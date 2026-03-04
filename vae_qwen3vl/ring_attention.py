@@ -55,20 +55,38 @@ def _ring_send_recv(
     my_group_rank = sp_rank
     next_rank = global_ranks[(my_group_rank + 1) % sp_size]
     prev_rank = global_ranks[(my_group_rank - 1 + sp_size) % sp_size]
+    use_world_p2p = os.getenv("RING_ATTN_P2P_USE_WORLD", "0") == "1"
+    barrier_dbg = os.getenv("RING_ATTN_P2P_BARRIER_DEBUG", "0") == "1"
+    if barrier_dbg:
+        _ring_attn_debug("p2p pre-barrier begin", sp_group=sp_group)
+        dist.barrier(group=sp_group)
+        _ring_attn_debug("p2p pre-barrier done", sp_group=sp_group)
     if _ring_attn_debug_enabled():
         _ring_attn_debug(
             f"ring send/recv send_shape={tuple(send_tensor.shape)} recv_shape={tuple(recv_tensor.shape)} "
-            f"prev={prev_rank} next={next_rank}",
+            f"prev={prev_rank} next={next_rank} mode={'world' if use_world_p2p else 'sp_group'} "
+            f"group_ranks={global_ranks}",
             sp_group=sp_group,
         )
 
-    # NOTE:
-    # Subgroup P2P on NCCL can hang during lazy communicator initialization on
-    # some environments. Use default-world P2P with global ranks for robustness.
-    # Ring topology is unchanged (peer ranks are still derived from sp_group).
+    # IMPORTANT:
+    # Prefer SP-subgroup P2P by default. Using default-world communicator for
+    # multiple independent SP rings can deadlock when different rank subsets
+    # issue concurrent P2P in different peer patterns/order.
+    #
+    # Set RING_ATTN_P2P_USE_WORLD=1 to force legacy world-comm behavior.
     t0 = time.time() if _ring_attn_debug_enabled() else 0.0
-    req_recv = dist.irecv(recv_tensor, src=prev_rank)
-    req_send = dist.isend(send_tensor, dst=next_rank)
+    if use_world_p2p:
+        req_recv = dist.irecv(recv_tensor, src=prev_rank)
+        req_send = dist.isend(send_tensor, dst=next_rank)
+    else:
+        req_recv = dist.irecv(recv_tensor, src=prev_rank, group=sp_group)
+        req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
+    if _ring_attn_debug_enabled():
+        _ring_attn_debug(
+            "ring send/recv posted recv+send, waiting...",
+            sp_group=sp_group,
+        )
     req_recv.wait()
     req_send.wait()
     if _ring_attn_debug_enabled():
@@ -77,6 +95,10 @@ def _ring_send_recv(
             f"send_numel={send_tensor.numel()} recv_numel={recv_tensor.numel()}",
             sp_group=sp_group,
         )
+    if barrier_dbg:
+        _ring_attn_debug("p2p post-barrier begin", sp_group=sp_group)
+        dist.barrier(group=sp_group)
+        _ring_attn_debug("p2p post-barrier done", sp_group=sp_group)
 
 
 def _gather_sp_seq_lens(local_len: int, sp_group: Any) -> list[int]:
