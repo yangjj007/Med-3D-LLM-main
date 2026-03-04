@@ -86,14 +86,14 @@
 
 ```bash
 export SPARSE_BACKEND=torchsparse
-python scripts/run_3d_align_train.py --config configs/3d_align_train_discrete_warmup.yaml > align_debug.log 2>&1
+python scripts/run_3d_align_train.py --config configs/3d_align_train_discrete_warmup.yaml 2>&1 | tee align_debug.log
 ```
 
 **2）变长 3D（VAE 出多少点就多少点，不池化）**
 
 ```bash
 export SPARSE_BACKEND=torchsparse
-python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml > align_debug.log 2>&1
+python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug.log
 ```
 
 **3）多卡 + 降显存（DeepSpeed ZeRO-2）**
@@ -102,7 +102,7 @@ python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_le
 
 ```bash
 export SPARSE_BACKEND=torchsparse
-python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml > align_debug.log 2>&1
+python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug.log 
 ```
 
 ### 3.3 配置要点速查

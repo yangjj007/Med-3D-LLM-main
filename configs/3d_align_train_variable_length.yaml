@@ -8,9 +8,12 @@
 #
 # 启动方式（4 卡）：
 #   export SPARSE_BACKEND=torchsparse
+#   # 需控制台实时输出时用 tee（同时保存到文件）：
 #   torchrun --nproc_per_node=4 vae_qwen3vl/train_finetune.py \
 #       --config configs/3d_align_train_variable_length.yaml \
-#       > align_debug.log 2>&1
+#       --echo_all 2>&1 | tee align_debug.log
+#   # 仅保存到文件（控制台无输出）：
+#   torchrun ... > align_debug.log 2>&1
 #
 # 或：python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml
 
@@ -66,6 +69,7 @@ prompt: "Describe this 3D shape in one sentence:"
 debug_vl_forward: true       # 打印 combined_embeds 等输入形状
 debug_qwen3vl_patch: true    # 打印 transformers 版本等补丁日志
 debug_memory: true           # OOM 调试：每步打印显存统计，定位爆显存步骤（@before_backward 后 OOM 多为反向梯度）
+echo_all: true               # 控制台回显全部输出（含 [DEBUG]），需配合 tee 使用：... 2>&1 | tee align_debug.log
 
 # === 数据 ===
 max_samples: 0

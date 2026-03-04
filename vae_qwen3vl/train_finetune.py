@@ -140,28 +140,38 @@ class Dummy3DTextDataset(Dataset):
         }
 
 
-def _training_log_stream(log_path: str, orig_stdout, echo_to_console: bool = True, echo_debug_memory: bool = False):
+def _training_log_stream(
+    log_path: str,
+    orig_stdout,
+    echo_to_console: bool = True,
+    echo_debug_memory: bool = False,
+    echo_all: bool = False,
+):
     """
     Returns a file-like object that:
     - Writes all output to log_path
-    - If echo_to_console: echoes to orig_stdout only training-related lines (filters out [DEBUG])
-    - 若 echo_debug_memory=True，则 [DEBUG_MEMORY] 行也会回显到控制台，便于实时查看 OOM 定位
-    - 多卡时仅 rank0 echo_to_console=True，避免多进程输出交错导致控制台格式混乱
+    - If echo_to_console: echoes to orig_stdout
+    - echo_all=True: 回显全部输出（含 [DEBUG]），便于控制台实时查看
+    - echo_all=False: 仅回显训练相关；echo_debug_memory=True 时额外回显 [DEBUG_MEMORY]
+    - 多卡时仅 rank0 echo_to_console=True，避免多进程输出交错
     """
 
     class TrainingLogTee:
-        def __init__(self, path, original, echo, echo_mem):
+        def __init__(self, path, original, echo, echo_mem, echo_all_flag):
             self._log = open(path, "w", encoding="utf-8")
             self._orig = original
             self._echo = echo
             self._echo_mem = echo_mem
+            self._echo_all = echo_all_flag
 
         def write(self, data):
             self._log.write(data)
             self._log.flush()
             if self._echo and data.strip():
-                # [DEBUG_MEMORY] 在 OOM 调试时可回显
-                if self._echo_mem and "[DEBUG_MEMORY]" in data:
+                if self._echo_all:
+                    self._orig.write(data)
+                    self._orig.flush()
+                elif self._echo_mem and "[DEBUG_MEMORY]" in data:
                     self._orig.write(data)
                     self._orig.flush()
                 elif "[DEBUG" not in data:
@@ -176,7 +186,7 @@ def _training_log_stream(log_path: str, orig_stdout, echo_to_console: bool = Tru
         def close(self):
             self._log.close()
 
-    return TrainingLogTee(log_path, orig_stdout, echo_to_console, echo_debug_memory)
+    return TrainingLogTee(log_path, orig_stdout, echo_to_console, echo_debug_memory, echo_all)
 
 
 def _to_device(x, device):
@@ -303,6 +313,8 @@ def main():
                         help="开启 qwen3vl_debug_patch 的详细日志（如 transformers 版本）")
     parser.add_argument("--debug_memory", action="store_true",
                         help="在每个训练步骤的关键阶段打印 GPU 显存统计，用于定位 OOM 步骤")
+    parser.add_argument("--echo_all", action="store_true",
+                        help="控制台回显全部输出（含 [DEBUG] 等），便于实时查看；否则仅回显部分训练信息")
     args, remaining = parser.parse_known_args()
     known_keys = {a.dest for a in parser._actions if a.dest != "help"}
     if args.config and os.path.isfile(args.config):
@@ -400,6 +412,7 @@ def main():
         log_path, _orig_stdout,
         echo_to_console=(rank == 0),
         echo_debug_memory=getattr(args, "debug_memory", False),
+        echo_all=getattr(args, "echo_all", False),
     )
     sys.stdout = _log_tee
     if is_main_process:
