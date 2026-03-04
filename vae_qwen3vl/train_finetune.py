@@ -36,6 +36,49 @@ except ImportError:
     ACCELERATE_AVAILABLE = False
 
 
+def _gpu_memory_stats(device=None) -> str:
+    """返回当前 GPU 显存统计字符串，用于 OOM 调试。"""
+    if not torch.cuda.is_available():
+        return "CUDA not available"
+    try:
+        if device is None:
+            device = torch.device("cuda")
+        if isinstance(device, str):
+            device = torch.device(device)
+        idx = device.index if device.index is not None else 0
+        allocated = torch.cuda.memory_allocated(idx) / (1024**3)
+        reserved = torch.cuda.memory_reserved(idx) / (1024**3)
+        total = torch.cuda.get_device_properties(idx).total_memory / (1024**3)
+        free = total - reserved
+        peak = torch.cuda.max_memory_allocated(idx) / (1024**3)
+        return (
+            f"GPU{idx}: alloc={allocated:.2f}GiB reserved={reserved:.2f}GiB "
+            f"free≈{free:.2f}GiB total={total:.2f}GiB peak={peak:.2f}GiB"
+        )
+    except Exception as e:
+        return f"mem_stats_err: {e}"
+
+
+def _gpu_memory_stats_all(include_peak: bool = False) -> str:
+    """返回所有可见 GPU 的显存统计。include_peak=True 时附加本步内峰值（需在步初调用 reset_peak）。"""
+    if not torch.cuda.is_available():
+        return "CUDA not available"
+    parts = []
+    for i in range(torch.cuda.device_count()):
+        try:
+            allocated = torch.cuda.memory_allocated(i) / (1024**3)
+            reserved = torch.cuda.memory_reserved(i) / (1024**3)
+            total = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            s = f"GPU{i}: alloc={allocated:.2f} reserved={reserved:.2f} total={total:.2f} GiB"
+            if include_peak:
+                peak = torch.cuda.max_memory_allocated(i) / (1024**3)
+                s += f" peak={peak:.2f}"
+            parts.append(s)
+        except Exception:
+            parts.append(f"GPU{i}: error")
+    return " | ".join(parts)
+
+
 def load_vae_from_config(vae_config_path: str, vae_ckpt_path: str, device: str = "cuda"):
     """Load SparseSDFVQVAE from project config and checkpoint."""
     from trellis.models import SparseSDFVQVAE
@@ -97,26 +140,33 @@ class Dummy3DTextDataset(Dataset):
         }
 
 
-def _training_log_stream(log_path: str, orig_stdout, echo_to_console: bool = True):
+def _training_log_stream(log_path: str, orig_stdout, echo_to_console: bool = True, echo_debug_memory: bool = False):
     """
     Returns a file-like object that:
     - Writes all output to log_path
     - If echo_to_console: echoes to orig_stdout only training-related lines (filters out [DEBUG])
+    - 若 echo_debug_memory=True，则 [DEBUG_MEMORY] 行也会回显到控制台，便于实时查看 OOM 定位
     - 多卡时仅 rank0 echo_to_console=True，避免多进程输出交错导致控制台格式混乱
     """
 
     class TrainingLogTee:
-        def __init__(self, path, original, echo):
+        def __init__(self, path, original, echo, echo_mem):
             self._log = open(path, "w", encoding="utf-8")
             self._orig = original
             self._echo = echo
+            self._echo_mem = echo_mem
 
         def write(self, data):
             self._log.write(data)
             self._log.flush()
-            if self._echo and "[DEBUG" not in data and data.strip():
-                self._orig.write(data)
-                self._orig.flush()
+            if self._echo and data.strip():
+                # [DEBUG_MEMORY] 在 OOM 调试时可回显
+                if self._echo_mem and "[DEBUG_MEMORY]" in data:
+                    self._orig.write(data)
+                    self._orig.flush()
+                elif "[DEBUG" not in data:
+                    self._orig.write(data)
+                    self._orig.flush()
 
         def flush(self):
             self._log.flush()
@@ -126,7 +176,7 @@ def _training_log_stream(log_path: str, orig_stdout, echo_to_console: bool = Tru
         def close(self):
             self._log.close()
 
-    return TrainingLogTee(log_path, orig_stdout, echo_to_console)
+    return TrainingLogTee(log_path, orig_stdout, echo_to_console, echo_debug_memory)
 
 
 def _to_device(x, device):
@@ -251,6 +301,8 @@ def main():
                         help="打印 VL forward 输入的详细 debug 信息（combined_embeds 形状等）")
     parser.add_argument("--debug_qwen3vl_patch", action="store_true",
                         help="开启 qwen3vl_debug_patch 的详细日志（如 transformers 版本）")
+    parser.add_argument("--debug_memory", action="store_true",
+                        help="在每个训练步骤的关键阶段打印 GPU 显存统计，用于定位 OOM 步骤")
     args, remaining = parser.parse_known_args()
     known_keys = {a.dest for a in parser._actions if a.dest != "help"}
     if args.config and os.path.isfile(args.config):
@@ -344,7 +396,11 @@ def main():
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}_rank{rank}.log")
     _orig_stdout = sys.stdout
-    _log_tee = _training_log_stream(log_path, _orig_stdout, echo_to_console=(rank == 0))
+    _log_tee = _training_log_stream(
+        log_path, _orig_stdout,
+        echo_to_console=(rank == 0),
+        echo_debug_memory=getattr(args, "debug_memory", False),
+    )
     sys.stdout = _log_tee
     if is_main_process:
         print(f"[Train] Full log -> {log_path}", flush=True)
@@ -632,6 +688,16 @@ def main():
                 accelerator.wait_for_everyone()
 
         grad_accum_steps = getattr(args, "gradient_accumulation_steps", 1)
+        debug_memory = getattr(args, "debug_memory", False)
+        if debug_memory and is_main_process:
+            _print(
+                "[DEBUG_MEMORY] 显存调试已开启。每步将打印: @batch_to_device | @after_forward | "
+                "@before_backward | @after_backward | @after_opt_step。OOM 时查看最后一条打印可定位步骤。"
+            )
+            _print(
+                "[DEBUG_MEMORY] OOM 缓解: 1) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 减少碎片 "
+                "2) 降低 max_safe_3d_length/max_length_variable 3) 增大 gradient_accumulation_steps 4) 确保 use_gradient_checkpointing"
+            )
         model.train()
         # FSDP2 does not add a .module wrapper; DDP (Accelerate) does.
         # Use getattr fallback so both paths work.
@@ -663,9 +729,28 @@ def main():
 
             for step, batch in enumerate(dataloader):
                 _step_t0 = time.time()
+                # 每步开始重置 peak，便于定位本步内显存峰值
+                if debug_memory and torch.cuda.is_available():
+                    for i in range(torch.cuda.device_count()):
+                        torch.cuda.reset_peak_memory_stats(i)
                 batch = {k: _to_device(v, device) for k, v in batch.items()}
                 _t_data = time.time()
                 use_inputs_3d = "inputs_3d" in batch and batch["inputs_3d"] is not None
+
+                # [DEBUG_MEMORY] 步骤开始：batch 已加载到 GPU
+                if debug_memory and torch.cuda.is_available():
+                    seq_len = batch["input_ids"].shape[1] if "input_ids" in batch else 0
+                    batch_info = (
+                        f"batch: bs={batch['input_ids'].shape[0]} seq_len={seq_len} "
+                        f"3d_tokens={'inputs_3d' if use_inputs_3d else 'discrete/feats'}"
+                    )
+                    if use_inputs_3d and "inputs_3d" in batch and batch["inputs_3d"] is not None:
+                        inp = batch["inputs_3d"]
+                        if isinstance(inp, dict) and "sparse_sdf" in inp:
+                            batch_info += f" sparse_pts={inp['sparse_sdf'].shape[0]}"
+                    _print(
+                        f"[DEBUG_MEMORY step={step} @batch_to_device] {_gpu_memory_stats_all(include_peak=True)} | {batch_info}"
+                    )
 
                 # BF16 autocast:
                 #   TP path: explicit torch.autocast required (no Accelerate wrapper)
@@ -703,10 +788,19 @@ def main():
                         )
 
                 _t_fwd = time.time()
+                # [DEBUG_MEMORY] Forward 完成
+                if debug_memory and torch.cuda.is_available():
+                    _print(
+                        f"[DEBUG_MEMORY step={step} @after_forward] {_gpu_memory_stats_all(include_peak=True)} | "
+                        f"loss={getattr(outputs, 'loss', outputs.get('loss', 0)):.4f}"
+                    )
                 loss = getattr(outputs, "loss", None) or outputs.get("loss")
                 # Scale loss for gradient accumulation
                 scaled_loss = loss / grad_accum_steps
 
+                # [DEBUG_MEMORY] 即将 backward（此处最易 OOM：需分配梯度与激活重计算）
+                if debug_memory and torch.cuda.is_available():
+                    _print(f"[DEBUG_MEMORY step={step} @before_backward] {_gpu_memory_stats_all(include_peak=True)}")
                 if use_tp:
                     scaled_loss.backward()
                 elif accelerator is not None:
@@ -715,6 +809,9 @@ def main():
                     scaled_loss.backward()
 
                 _t_bwd = time.time()
+                # [DEBUG_MEMORY] Backward 完成
+                if debug_memory and torch.cuda.is_available():
+                    _print(f"[DEBUG_MEMORY step={step} @after_backward] {_gpu_memory_stats_all(include_peak=True)}")
                 _accum_loss += loss.detach().float().item()
                 _accum_count += 1
 
@@ -733,6 +830,12 @@ def main():
                     opt.zero_grad()
                     global_step += 1
                     _t_opt = time.time()
+                    # [DEBUG_MEMORY] Optimizer step + zero_grad 完成（梯度已释放）
+                    if debug_memory and torch.cuda.is_available():
+                        _print(
+                            f"[DEBUG_MEMORY step={step} @after_opt_step gs={global_step}] "
+                            f"{_gpu_memory_stats_all(include_peak=True)}"
+                        )
 
                     avg_loss = _accum_loss / _accum_count
                     _accum_loss = 0.0
