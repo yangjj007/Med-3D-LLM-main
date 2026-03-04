@@ -62,9 +62,13 @@ def _ring_send_recv(
             sp_group=sp_group,
         )
 
+    # NOTE:
+    # Subgroup P2P on NCCL can hang during lazy communicator initialization on
+    # some environments. Use default-world P2P with global ranks for robustness.
+    # Ring topology is unchanged (peer ranks are still derived from sp_group).
     t0 = time.time() if _ring_attn_debug_enabled() else 0.0
-    req_recv = dist.irecv(recv_tensor, src=prev_rank, group=sp_group)
-    req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
+    req_recv = dist.irecv(recv_tensor, src=prev_rank)
+    req_send = dist.isend(send_tensor, dst=next_rank)
     req_recv.wait()
     req_send.wait()
     if _ring_attn_debug_enabled():
