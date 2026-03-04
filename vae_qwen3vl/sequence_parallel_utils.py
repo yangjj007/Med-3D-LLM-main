@@ -240,7 +240,8 @@ def apply_sp_attention_patch(
                     sp_group=_sp_grp, causal=True,
                 )
                 attn_output = attn_output.reshape(bsz, q_len, -1)
-                return _self.o_proj(attn_output), None, None
+                # Qwen3-VL / Qwen2-VL decoder expects (attn_output, attn_weights) — 2 values
+                return _self.o_proj(attn_output), None
             return _patched
 
         attn.forward = make_patched(attn, sp_group)
