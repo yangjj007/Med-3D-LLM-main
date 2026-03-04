@@ -42,6 +42,16 @@ def _sp_dbg(msg: str, *, force: bool = False) -> None:
     print(f"[SP-DBG {ts}][rank{rank}] {msg}", flush=True)
 
 
+def _gather_world_int(value: int, device: torch.device) -> List[int]:
+    """Gather one int from every global rank."""
+    if not dist.is_initialized():
+        return [int(value)]
+    send = torch.tensor([int(value)], device=device, dtype=torch.int64)
+    recvs = [torch.zeros_like(send) for _ in range(dist.get_world_size())]
+    dist.all_gather(recvs, send)
+    return [int(x.item()) for x in recvs]
+
+
 def create_3d_mesh(
     dp_size: int,
     sp_size: int,
@@ -314,12 +324,39 @@ def apply_sp_attention_patch(
             continue
         _orig_forward = attn.forward
 
-        def make_patched(attn_module, _sp_grp):
+        def make_patched(attn_module, _sp_grp, _layer_idx):
             def _patched(hidden_states, attention_mask=None, position_ids=None, past_key_value=None, output_attentions=False, use_cache=False, **kwargs):
                 bsz, q_len, _ = hidden_states.size()
                 _self = attn_module
-                if _sp_dbg_verbose():
-                    _sp_dbg(f"attn patched forward enter hidden_states={tuple(hidden_states.shape)}")
+                if _sp_dbg_enabled():
+                    _sp_dbg(
+                        f"layer={_layer_idx} attn enter hidden_states={tuple(hidden_states.shape)}",
+                        force=(_sp_dbg_verbose() or _layer_idx < 2),
+                    )
+                    try:
+                        world_q_lens = _gather_world_int(q_len, hidden_states.device)
+                        q_min = min(world_q_lens)
+                        q_max = max(world_q_lens)
+                        if q_min != q_max:
+                            _sp_dbg(
+                                f"layer={_layer_idx} q_len mismatch across world: "
+                                f"q_lens={world_q_lens} (min={q_min}, max={q_max})",
+                                force=True,
+                            )
+                            raise RuntimeError(
+                                f"[SP] layer={_layer_idx} q_len mismatch across ranks: {world_q_lens}"
+                            )
+                        elif _sp_dbg_verbose() or _layer_idx < 2:
+                            _sp_dbg(
+                                f"layer={_layer_idx} q_len global check ok: {world_q_lens}",
+                                force=True,
+                            )
+                    except Exception as e:
+                        _sp_dbg(
+                            f"layer={_layer_idx} global q_len check failed: {repr(e)}",
+                            force=True,
+                        )
+                        raise
                 key_states = _self.k_proj(hidden_states)
                 value_states = _self.v_proj(hidden_states)
                 query_states = _self.q_proj(hidden_states)
@@ -375,7 +412,7 @@ def apply_sp_attention_patch(
                     raise
             return _patched
 
-        attn.forward = make_patched(attn, sp_group)
+        attn.forward = make_patched(attn, sp_group, idx)
         if _sp_dbg_verbose() or idx < 2:
             _sp_dbg(f"patched self_attn forward at layer={idx}")
 
