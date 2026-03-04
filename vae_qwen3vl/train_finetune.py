@@ -446,6 +446,7 @@ def main():
             from vae_qwen3vl.tensor_parallel_utils import (
                 apply_tp_to_qwen3vl,
                 apply_fsdp2_dp,
+                register_dp_grad_hooks,
             )
             # FSDP2 要求所有参数具有统一的 dtype，否则会触发:
             # AssertionError: FSDP expects uniform original parameter dtype but got {torch.bfloat16, torch.float32}
@@ -463,7 +464,14 @@ def main():
                 from vae_qwen3vl.sequence_parallel_utils import apply_sp_attention_patch
                 apply_sp_attention_patch(model, sp_group)
                 model.sp_group = sp_group
-            apply_fsdp2_dp(model, dp_mesh)
+            if use_sp:
+                # 3D mesh (dp, sp, tp): PyTorch 要求 tp 为最内层维度，导致 ("dp","tp")
+                # 不相邻 → FSDP2+TP 组合失败。改用梯度钩子做 DP 梯度同步。
+                # TP 已通过 DTensor 自动处理 TP 内部梯度规约；钩子负责跨 dp ranks 平均。
+                register_dp_grad_hooks(model, dp_mesh)
+            else:
+                # 2D mesh (dp, tp): tp 在最内层且 ("dp","tp") 相邻 → FSDP2+TP 正常工作
+                apply_fsdp2_dp(model, dp_mesh)
 
         # DTensor + AdamW foreach kernels are not fully supported yet
         # (e.g., aten._foreach_mul_.Scalar cross-mesh), so disable foreach
