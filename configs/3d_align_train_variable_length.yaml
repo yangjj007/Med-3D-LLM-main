@@ -42,7 +42,7 @@ sequence_parallel_size: 2
 # TP=2 + FSDP2 约降低每卡峰值激活内存 2 倍，加上 GC 后可承受更长序列。
 # gradient_accumulation_steps 等效 global batch = DP=2 × bs=1 × accum=8 = 16
 batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 16
 use_flash_attn_2: true
 use_gradient_checkpointing: true   # TP 模式下 GC 无条件生效（无 DeepSpeed 兼容性 bug）
 

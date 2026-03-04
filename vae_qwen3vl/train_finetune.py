@@ -742,6 +742,11 @@ def main():
 
             for step, batch in enumerate(dataloader):
                 _step_t0 = time.time()
+                # collate 可能返回 None（变长 3D 时，若整批样本均超过 max_safe_3d_length 则跳过）
+                if batch is None:
+                    if is_main_process:
+                        print(f"[SKIP] Step {step}: all samples exceeded max_safe_3d_length, skipping batch.", flush=True)
+                    continue
                 # 每步开始重置 peak，便于定位本步内显存峰值
                 if debug_memory and torch.cuda.is_available():
                     for i in range(torch.cuda.device_count()):

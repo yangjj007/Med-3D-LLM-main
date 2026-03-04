@@ -1,17 +1,17 @@
 """
 Variable-length 3D tokenization: use all VAE output points (no grid pooling).
 - Morton code (Z-order) sorting so adjacent tokens are spatially adjacent.
-- Optional FPS downsample only when exceeding max_safe_length (soft cap).
+- When N > max_safe_length: skip sample (return None), do NOT use for training.
 - No fixed 512; sequence length = N (typically 8k~12k) with dynamic padding in batch.
 """
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 import time
 import numpy as np
 import torch
 
 
-# Default soft cap: only trigger FPS when point count exceeds this (e.g. noisy outliers)
+# Hard cap: samples with N > this are skipped (not used for training)
 DEFAULT_MAX_SAFE_LENGTH = 15000
 
 
@@ -36,57 +36,28 @@ def morton_sort_indices(coords_xyz: np.ndarray, coord_max: int = 512) -> np.ndar
     return np.argsort(codes)
 
 
-def fps_downsample_indices(
-    coords_xyz: torch.Tensor,
-    num_sample: int,
-    start_idx: Optional[int] = None,
-) -> torch.Tensor:
-    """
-    Farthest Point Sampling with incremental min-distance tracking.
-    O(N * num_sample) instead of O(N * num_sample^2).
-    coords_xyz: [N, 3]. Returns long tensor of shape [num_sample].
-    """
-    N = coords_xyz.shape[0]
-    if N <= num_sample:
-        return torch.arange(N, device=coords_xyz.device, dtype=torch.long)
-    if start_idx is None:
-        start_idx = 0
-    pts = coords_xyz.float()
-    selected = torch.zeros(num_sample, dtype=torch.long, device=pts.device)
-    selected[0] = start_idx
-    min_dists = torch.full((N,), float("inf"), device=pts.device)
-
-    for i in range(1, num_sample):
-        last_pt = pts[selected[i - 1]].unsqueeze(0)          # [1, 3]
-        dists_to_last = ((pts - last_pt) ** 2).sum(dim=1)     # [N]
-        min_dists = torch.minimum(min_dists, dists_to_last)
-        selected[i] = min_dists.argmax()
-
-    return selected
-
-
 def encoding_indices_to_variable_length_sequence(
     encoding_indices: "SparseTensor",
     batch_idx: int,
     max_safe_length: int = DEFAULT_MAX_SAFE_LENGTH,
     coord_max: int = 64,
-) -> np.ndarray:
+) -> Optional[np.ndarray]:
     """
     From encoding_indices for one sample, produce variable-length token index sequence:
     1. Extract (indices, coords) for this batch_idx.
-    2. If N > max_safe_length, FPS downsample to max_safe_length (soft cap).
+    2. If N > max_safe_length: return None (sample skipped, not used for training).
     3. Morton sort by (x,y,z) so adjacent tokens are spatially adjacent.
     4. Return 1D int64 array of codebook indices, length L (variable).
 
     Args:
         encoding_indices: SparseTensor .feats [N], .coords [N, 4] (batch_idx, x, y, z).
         batch_idx: which sample.
-        max_safe_length: only FPS-downsample when N > this (e.g. 15000).
+        max_safe_length: samples with N > this are skipped (return None).
         coord_max: max coordinate value for Morton (current trellis VAE: 64^3 latent -> 64;
                   if you use a VAE that outputs 512^3 coords, set 512).
 
     Returns:
-        indices: [L] int64, L = min(N, max_safe_length), values 0..8191.
+        indices: [L] int64, values 0..8191; or None if N > max_safe_length (skip).
     """
     indices = encoding_indices.feats.squeeze(-1).long()
     coords = encoding_indices.coords
@@ -103,13 +74,12 @@ def encoding_indices_to_variable_length_sequence(
     N = idx_b.shape[0]
     print(f"[DEBUG varlen] batch_idx={batch_idx} N={N} (max_safe={max_safe_length})", flush=True)
     if N > max_safe_length:
-        t0 = time.time()
-        xyz_cpu = xyz_b.cpu().float()
-        fps_idx = fps_downsample_indices(xyz_cpu, max_safe_length)
-        idx_b = idx_b[fps_idx]
-        xyz_b = xyz_b[fps_idx]
-        N = idx_b.shape[0]
-        print(f"[DEBUG varlen]   FPS {N} -> {max_safe_length} took {time.time()-t0:.2f}s", flush=True)
+        print(
+            f"[SKIP] batch_idx={batch_idx} 3D token count N={N} exceeds max_safe_3d_length={max_safe_length}, "
+            "skipping this sample (not used for training).",
+            flush=True,
+        )
+        return None
 
     t0 = time.time()
     xyz_np = xyz_b.cpu().numpy().astype(np.int64)
@@ -133,8 +103,8 @@ def batch_encoding_indices_to_variable_length_sequences(
     batch_size: int,
     max_safe_length: int = DEFAULT_MAX_SAFE_LENGTH,
     coord_max: int = 64,
-) -> List[np.ndarray]:
-    """For batched encoding_indices, return list of variable-length index arrays."""
+) -> List[Optional[np.ndarray]]:
+    """For batched encoding_indices, return list of variable-length index arrays (None = skip)."""
     return [
         encoding_indices_to_variable_length_sequence(
             encoding_indices, b, max_safe_length=max_safe_length, coord_max=coord_max
