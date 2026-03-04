@@ -209,6 +209,47 @@ def split_for_sp(
         pid = batch["position_ids"]
         S = pid.size(seq_dim)
         out["position_ids"] = _slice_and_pad(pid, "position_ids", S)
+
+    # Extra safety for TP+SP: force all ranks to have identical local sequence
+    # length before entering attention/o_proj DTensor hooks.
+    # This avoids collective-shape mismatch even if upstream dataloader/mesh
+    # setup accidentally gives different sample lengths across TP peers.
+    try:
+        if dist.is_initialized() and out.get("input_ids") is not None:
+            local_len = int(out["input_ids"].size(seq_dim))
+            send = torch.tensor([local_len], device=out["input_ids"].device, dtype=torch.int64)
+            recvs = [torch.zeros_like(send) for _ in range(dist.get_world_size())]
+            dist.all_gather(recvs, send)
+            world_lens = [int(x.item()) for x in recvs]
+            max_world_len = max(world_lens) if world_lens else local_len
+            if _sp_dbg_enabled():
+                _sp_dbg(
+                    f"split global lens check local={local_len} world_lens={world_lens} "
+                    f"max_world_len={max_world_len}",
+                    force=True,
+                )
+            if max_world_len > local_len:
+                pad_len = max_world_len - local_len
+                for key in ("input_ids", "attention_mask", "labels", "position_ids"):
+                    if key not in out or out[key] is None:
+                        continue
+                    t = out[key]
+                    pad_shape = list(t.shape)
+                    pad_shape[seq_dim] = pad_len
+                    pad_val = pad_values.get(key, 0)
+                    t_pad = torch.full(
+                        pad_shape,
+                        pad_val,
+                        dtype=t.dtype,
+                        device=t.device,
+                    )
+                    out[key] = torch.cat([t, t_pad], dim=seq_dim).contiguous()
+                _sp_dbg(
+                    f"applied global pad local_len={local_len} -> {max_world_len}",
+                    force=True,
+                )
+    except Exception as e:
+        _sp_dbg(f"global split alignment skipped due to: {repr(e)}", force=True)
     return out
 
 
