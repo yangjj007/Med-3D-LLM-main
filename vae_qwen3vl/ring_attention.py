@@ -104,6 +104,25 @@ def _ring_attn_debug(msg: str, sp_group: Any = None) -> None:
     print(f"[RingAttn] {msg}", flush=True)
 
 
+def _ring_attn_sync_enabled() -> bool:
+    """Force cuda synchronize after key steps for precise fault localization."""
+    return os.getenv("RING_ATTN_SYNC_DEBUG", "0") == "1"
+
+
+def _ring_attn_sync(tag: str, sp_group: Any = None) -> None:
+    """Optional sync point to turn async CUDA/NCCL failures into sync errors."""
+    if not _ring_attn_sync_enabled():
+        return
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.synchronize()
+        _ring_attn_debug(f"sync ok @ {tag}", sp_group=sp_group)
+    except Exception as e:
+        _ring_attn_debug(f"sync failed @ {tag}: {repr(e)}", sp_group=sp_group)
+        raise
+
+
 def _normalize_lse_to_bsh1(
     lse: torch.Tensor,
     q: torch.Tensor,
@@ -253,8 +272,10 @@ class RingFlashAttnFunc(torch.autograd.Function):
                 f"sp_rank={sp_rank} sp_size={sp_size}",
                 sp_group=sp_group,
             )
+        _ring_attn_sync("forward_entry", sp_group=sp_group)
         if sp_size <= 1:
             out, lse = _flash_attn_single_chunk(q, k, v, causal=causal, scale=softmax_scale)
+            _ring_attn_sync("single_chunk_done", sp_group=sp_group)
             # saved layout: [q, lse_total, k0, v0]  -- same as multi-rank path
             ctx.save_for_backward(q, lse, k, v)
             ctx.chunk_outputs = [out]
@@ -277,6 +298,7 @@ class RingFlashAttnFunc(torch.autograd.Function):
                 f"seq_lens={seq_lens} local_k_len={local_k_len} max_k_len={max_k_len}",
                 sp_group=sp_group,
             )
+        _ring_attn_sync("seq_lens_gather_done", sp_group=sp_group)
 
         out_acc = torch.zeros_like(q)
         lse_acc = torch.full(
@@ -326,32 +348,42 @@ class RingFlashAttnFunc(torch.autograd.Function):
                     f"cur_k={tuple(cur_k.shape)} cur_v={tuple(cur_v.shape)} src_len={seq_lens[src_rank]}",
                     sp_group=sp_group,
                 )
+            _ring_attn_sync(f"step{step}_pre_chunk", sp_group=sp_group)
 
             if use_chunk:
                 src_len = seq_lens[src_rank]
                 k_eff = cur_k[:, :src_len].contiguous()
                 v_eff = cur_v[:, :src_len].contiguous()
+                _ring_attn_sync(f"step{step}_pre_flash", sp_group=sp_group)
                 attn_out, chunk_lse = _flash_attn_single_chunk(
                     q, k_eff, v_eff, causal=is_self, scale=scale
                 )
+                _ring_attn_sync(f"step{step}_post_flash", sp_group=sp_group)
                 out_acc, lse_acc = _online_softmax_merge(out_acc, lse_acc, attn_out, chunk_lse)
+                _ring_attn_sync(f"step{step}_post_merge", sp_group=sp_group)
                 chunk_outputs.append(attn_out)
                 chunk_lses.append(chunk_lse)
                 chunk_ks.append(k_eff.clone())
                 chunk_vs.append(v_eff.clone())
 
             if step < sp_size - 1:
+                _ring_attn_sync(f"step{step}_pre_ring_k", sp_group=sp_group)
                 _ring_send_recv(cur_k, recv_k, sp_group)
+                _ring_attn_sync(f"step{step}_post_ring_k", sp_group=sp_group)
+                _ring_attn_sync(f"step{step}_pre_ring_v", sp_group=sp_group)
                 _ring_send_recv(cur_v, recv_v, sp_group)
+                _ring_attn_sync(f"step{step}_post_ring_v", sp_group=sp_group)
                 cur_k, recv_k = recv_k, cur_k
                 cur_v, recv_v = recv_v, cur_v
 
+        _ring_attn_sync("forward_before_save_ctx", sp_group=sp_group)
         ctx.save_for_backward(q, lse_acc, *chunk_ks, *chunk_vs)
         ctx.chunk_outputs = chunk_outputs
         ctx.chunk_lses = chunk_lses
         ctx.sp_group = sp_group
         ctx.causal = causal
         ctx.softmax_scale = scale
+        _ring_attn_sync("forward_before_return", sp_group=sp_group)
         return out_acc
 
     @staticmethod
