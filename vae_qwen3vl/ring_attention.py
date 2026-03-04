@@ -22,6 +22,25 @@ def _get_sp_rank_size(sp_group: Any) -> Tuple[int, int]:
     return dist.get_rank(group=sp_group), dist.get_world_size(group=sp_group)
 
 
+def _get_group_global_ranks(sp_group: Any) -> list[int]:
+    """Return global rank list for the provided process group in group-rank order."""
+    if sp_group is None:
+        return [dist.get_rank()]
+    if hasattr(dist, "get_process_group_ranks"):
+        try:
+            ranks = dist.get_process_group_ranks(sp_group)
+            if ranks:
+                return list(ranks)
+        except Exception:
+            pass
+    # Fallback for older torch versions.
+    sp_size = dist.get_world_size(group=sp_group)
+    cur = torch.tensor([dist.get_rank()], device="cuda", dtype=torch.int64)
+    gathered = [torch.zeros_like(cur) for _ in range(sp_size)]
+    dist.all_gather(gathered, cur, group=sp_group)
+    return [int(x.item()) for x in gathered]
+
+
 def _ring_send_recv(
     send_tensor: torch.Tensor,
     recv_tensor: torch.Tensor,
@@ -31,14 +50,10 @@ def _ring_send_recv(
     sp_rank, sp_size = _get_sp_rank_size(sp_group)
     if sp_size <= 1:
         return
-    try:
-        my_group_rank = dist.get_rank(group=sp_group)
-        world = dist.get_world_size(group=sp_group)
-    except Exception:
-        my_group_rank = sp_rank
-        world = sp_size
-    next_rank = (my_group_rank + 1) % world
-    prev_rank = (my_group_rank - 1 + world) % world
+    global_ranks = _get_group_global_ranks(sp_group)
+    my_group_rank = sp_rank
+    next_rank = global_ranks[(my_group_rank + 1) % sp_size]
+    prev_rank = global_ranks[(my_group_rank - 1 + sp_size) % sp_size]
     if _ring_attn_debug_enabled():
         _ring_attn_debug(
             f"ring send/recv send_shape={tuple(send_tensor.shape)} recv_shape={tuple(recv_tensor.shape)} "
@@ -50,6 +65,17 @@ def _ring_send_recv(
     req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
     req_recv.wait()
     req_send.wait()
+
+
+def _gather_sp_seq_lens(local_len: int, sp_group: Any) -> list[int]:
+    """Gather per-rank local sequence lengths within SP group."""
+    sp_rank, sp_size = _get_sp_rank_size(sp_group)
+    if sp_size <= 1:
+        return [local_len]
+    send = torch.tensor([local_len], device="cuda", dtype=torch.int64)
+    recvs = [torch.zeros_like(send) for _ in range(sp_size)]
+    dist.all_gather(recvs, send, group=sp_group)
+    return [int(x.item()) for x in recvs]
 
 
 def _ring_attn_debug_enabled() -> bool:
@@ -233,6 +259,17 @@ class RingFlashAttnFunc(torch.autograd.Function):
         head_dim = q.size(-1)
         scale = softmax_scale if softmax_scale is not None else 1.0 / (head_dim ** 0.5)
 
+        # Variable-length SP chunks are common with ceil-based split; ring P2P needs
+        # uniform tensor shapes, so we communicate padded K/V and slice by real length.
+        local_k_len = int(k.size(1))
+        seq_lens = _gather_sp_seq_lens(local_k_len, sp_group)
+        max_k_len = max(seq_lens)
+        if _ring_attn_debug_enabled():
+            _ring_attn_debug(
+                f"seq_lens={seq_lens} local_k_len={local_k_len} max_k_len={max_k_len}",
+                sp_group=sp_group,
+            )
+
         out_acc = torch.zeros_like(q)
         lse_acc = torch.full(
             (q.size(0), q.size(1), q.size(2), 1),
@@ -243,10 +280,28 @@ class RingFlashAttnFunc(torch.autograd.Function):
         if q.dtype == torch.bfloat16:
             lse_acc = lse_acc.float()
 
-        cur_k = k.clone()
-        cur_v = v.clone()
-        recv_k = torch.empty_like(k)
-        recv_v = torch.empty_like(v)
+        if local_k_len < max_k_len:
+            pad_len = max_k_len - local_k_len
+            k_pad = torch.zeros(
+                (k.size(0), pad_len, k.size(2), k.size(3)),
+                device=k.device,
+                dtype=k.dtype,
+            )
+            v_pad = torch.zeros(
+                (v.size(0), pad_len, v.size(2), v.size(3)),
+                device=v.device,
+                dtype=v.dtype,
+            )
+            k_comm = torch.cat([k, k_pad], dim=1).contiguous()
+            v_comm = torch.cat([v, v_pad], dim=1).contiguous()
+        else:
+            k_comm = k
+            v_comm = v
+
+        cur_k = k_comm.clone()
+        cur_v = v_comm.clone()
+        recv_k = torch.empty_like(k_comm)
+        recv_v = torch.empty_like(v_comm)
 
         chunk_outputs = []
         chunk_lses = []
@@ -260,19 +315,22 @@ class RingFlashAttnFunc(torch.autograd.Function):
             if _ring_attn_debug_enabled():
                 _ring_attn_debug(
                     f"step={step} src_rank={src_rank} use_chunk={use_chunk} is_self={is_self} "
-                    f"cur_k={tuple(cur_k.shape)} cur_v={tuple(cur_v.shape)}",
+                    f"cur_k={tuple(cur_k.shape)} cur_v={tuple(cur_v.shape)} src_len={seq_lens[src_rank]}",
                     sp_group=sp_group,
                 )
 
             if use_chunk:
+                src_len = seq_lens[src_rank]
+                k_eff = cur_k[:, :src_len].contiguous()
+                v_eff = cur_v[:, :src_len].contiguous()
                 attn_out, chunk_lse = _flash_attn_single_chunk(
-                    q, cur_k, cur_v, causal=is_self, scale=scale
+                    q, k_eff, v_eff, causal=is_self, scale=scale
                 )
                 out_acc, lse_acc = _online_softmax_merge(out_acc, lse_acc, attn_out, chunk_lse)
                 chunk_outputs.append(attn_out)
                 chunk_lses.append(chunk_lse)
-                chunk_ks.append(cur_k.clone())
-                chunk_vs.append(cur_v.clone())
+                chunk_ks.append(k_eff.clone())
+                chunk_vs.append(v_eff.clone())
 
             if step < sp_size - 1:
                 _ring_send_recv(cur_k, recv_k, sp_group)
