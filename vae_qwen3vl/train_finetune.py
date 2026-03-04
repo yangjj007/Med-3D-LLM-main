@@ -692,6 +692,7 @@ def main():
 
         def _print(*a, **kw):
             if is_main_process:
+                kw.setdefault("flush", True)
                 print(*a, **kw)
 
         def _barrier():
@@ -704,8 +705,12 @@ def main():
         debug_memory = getattr(args, "debug_memory", False)
         if debug_memory and is_main_process:
             _print(
-                "[DEBUG_MEMORY] 显存调试已开启。每步将打印: @batch_to_device | @after_forward | "
-                "@before_backward | @after_backward | @after_opt_step。OOM 时查看最后一条打印可定位步骤。"
+                "[DEBUG_MEMORY] 显存调试已开启。每步将打印: @batch_to_device | @before_forward | "
+                "@after_forward | @before_backward | @after_backward | @after_opt_step。"
+            )
+            _print(
+                "[DEBUG_MEMORY] 细粒度: forward 内会打印 @after_extract_3d | @after_prepare_3d_seq | "
+                "@after_projector | @after_text_embed | @before_vl_model | @after_vl_model。OOM 时查看最后一条可定位阶段。"
             )
             _print(
                 "[DEBUG_MEMORY] OOM 缓解: 1) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 减少碎片 "
@@ -715,6 +720,8 @@ def main():
         # FSDP2 does not add a .module wrapper; DDP (Accelerate) does.
         # Use getattr fallback so both paths work.
         _model = getattr(model, "module", model)
+        if debug_memory:
+            setattr(_model, "_debug_memory_fine", True)
         global_step = 0
         # 训练指标记录（仅 main process），用于可视化
         metrics_path = os.path.join(args.output_dir, "training_metrics.jsonl")
@@ -765,6 +772,13 @@ def main():
                         f"[DEBUG_MEMORY step={step} @batch_to_device] {_gpu_memory_stats_all(include_peak=True)} | {batch_info}"
                     )
 
+                # [DEBUG_MEMORY] 即将进入 forward
+                if debug_memory and torch.cuda.is_available():
+                    _print(
+                        f"[DEBUG_MEMORY step={step} @before_forward] {_gpu_memory_stats_all(include_peak=True)} | "
+                        f"mode={'discrete' if use_discrete else '3d'}"
+                    )
+
                 # BF16 autocast:
                 #   TP path: explicit torch.autocast required (no Accelerate wrapper)
                 #   Accelerate path: Accelerate applies mixed_precision="bf16" internally,
@@ -774,31 +788,41 @@ def main():
                     _ctx = torch.autocast("cuda", dtype=torch.bfloat16)
                 else:
                     _ctx = contextlib.nullcontext()
-                with _ctx:
-                    if use_discrete or not use_inputs_3d:
-                        outputs = _model(
-                            input_ids=batch["input_ids"],
-                            attention_mask=batch.get("attention_mask"),
-                            labels=batch["labels"],
-                            use_cache=False,
+                try:
+                    with _ctx:
+                        if use_discrete or not use_inputs_3d:
+                            outputs = _model(
+                                input_ids=batch["input_ids"],
+                                attention_mask=batch.get("attention_mask"),
+                                labels=batch["labels"],
+                                use_cache=False,
+                            )
+                        elif use_inputs_3d:
+                            outputs = _model.forward_with_3d(
+                                input_ids=batch["input_ids"],
+                                attention_mask=batch["attention_mask"],
+                                labels=batch["labels"],
+                                inputs_3d=batch["inputs_3d"],
+                                use_cache=False,
+                            )
+                        else:
+                            outputs = _model.forward_with_3d(
+                                input_ids=batch["input_ids"],
+                                attention_mask=batch["attention_mask"],
+                                labels=batch["labels"],
+                                feats_3d=batch["feats_3d"],
+                                coords_3d=batch["coords_3d"],
+                                use_cache=False,
+                            )
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                    if "out of memory" in str(e).lower() or "OutOfMemoryError" in str(type(e).__name__):
+                        _print(
+                            f"[DEBUG_MEMORY OOM] step={step} 捕获到 OOM 异常！最后一次成功 checkpoint 即为 OOM 发生位置。"
                         )
-                    elif use_inputs_3d:
-                        outputs = _model.forward_with_3d(
-                            input_ids=batch["input_ids"],
-                            attention_mask=batch["attention_mask"],
-                            labels=batch["labels"],
-                            inputs_3d=batch["inputs_3d"],
-                            use_cache=False,
-                        )
-                    else:
-                        outputs = _model.forward_with_3d(
-                            input_ids=batch["input_ids"],
-                            attention_mask=batch["attention_mask"],
-                            labels=batch["labels"],
-                            feats_3d=batch["feats_3d"],
-                            coords_3d=batch["coords_3d"],
-                            use_cache=False,
-                        )
+                        _print(f"[DEBUG_MEMORY OOM] 异常信息: {e}")
+                        if torch.cuda.is_available():
+                            _print(f"[DEBUG_MEMORY OOM] 当前显存: {_gpu_memory_stats_all(include_peak=True)}")
+                    raise
 
                 _t_fwd = time.time()
                 # [DEBUG_MEMORY] Forward 完成

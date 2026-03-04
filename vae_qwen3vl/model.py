@@ -5,6 +5,35 @@ produce 3D token embeddings that are prepended to text and fed to the LLM.
 
 from typing import Optional, Dict, Any, Tuple, Union
 import torch
+
+
+def _is_main_for_debug() -> bool:
+    """仅主进程打印显存调试，避免重复输出。"""
+    try:
+        import torch.distributed as dist
+        return not dist.is_initialized() or dist.get_rank() == 0
+    except Exception:
+        return True
+
+
+def _debug_mem_log(phase: str, extra: str = "") -> None:
+    """细粒度显存调试：当模型 _debug_memory_fine=True 时由 forward 内调用。"""
+    if not torch.cuda.is_available():
+        return
+    parts = []
+    for i in range(torch.cuda.device_count()):
+        try:
+            a = torch.cuda.memory_allocated(i) / (1024**3)
+            r = torch.cuda.memory_reserved(i) / (1024**3)
+            t = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            p = torch.cuda.max_memory_allocated(i) / (1024**3)
+            parts.append(f"GPU{i}: alloc={a:.2f} res={r:.2f} total={t:.2f} peak={p:.2f} GiB")
+        except Exception:
+            parts.append(f"GPU{i}: err")
+    msg = f"[DEBUG_MEMORY fwd] @{phase} | {' | '.join(parts)}"
+    if extra:
+        msg += f" | {extra}"
+    print(msg, flush=True)
 import torch.nn as nn
 import torch.distributed as dist
 
@@ -174,11 +203,14 @@ class Qwen3VLWith3DBranch(nn.Module):
         """
         if self.use_discrete_3d_tokens or self.projector is None:
             raise RuntimeError("forward_with_3d is for projector path only; use forward(input_ids=..., labels=...) for discrete mode.")
+        _dbg = getattr(self, "_debug_memory_fine", False)
         encoding_indices = None
         if inputs_3d is not None and self.vae_model is not None:
             feats_3d, coords_3d, encoding_indices = extract_3d_latent_and_indices(
                 inputs_3d, self.vae_model, device=input_ids.device
             )
+            if _dbg and _is_main_for_debug():
+                _debug_mem_log("after_extract_3d", f"feats={feats_3d.shape if feats_3d is not None else None} coords={coords_3d.shape if coords_3d is not None else None}")
         elif inputs_3d is None and (feats_3d is None or coords_3d is None):
             raise ValueError("Provide either inputs_3d (with vae_model) or feats_3d and coords_3d.")
         if feats_3d is None or coords_3d is None:
@@ -205,12 +237,18 @@ class Qwen3VLWith3DBranch(nn.Module):
             feats_seq = feats_seq.to(input_ids.device)
             mask_3d = mask_3d.to(input_ids.device)
             coords_seq = coords_seq.to(input_ids.device)
+        if _dbg and _is_main_for_debug():
+            _debug_mem_log("after_prepare_3d_seq", f"feats_seq={feats_seq.shape} mask_3d={mask_3d.shape}")
         embeds_3d = self.projector(feats_seq, coords_seq)
+        if _dbg and _is_main_for_debug():
+            _debug_mem_log("after_projector", f"embeds_3d={embeds_3d.shape}")
 
         embed_tokens = self.vl_model.get_input_embeddings()
         text_embeds = embed_tokens(input_ids)
         embeds_3d = embeds_3d.to(text_embeds.dtype)
         seq_3d = embeds_3d.shape[1]
+        if _dbg and _is_main_for_debug():
+            _debug_mem_log("after_text_embed", f"text_embeds={text_embeds.shape} seq_3d={seq_3d}")
         combined_embeds = torch.cat([embeds_3d, text_embeds], dim=1)
         if attention_mask is not None:
             combined_attention_mask = torch.cat(
@@ -241,12 +279,17 @@ class Qwen3VLWith3DBranch(nn.Module):
                 f"use_cache={use_cache}",
                 flush=True,
             )
+        if _dbg and _is_main_for_debug():
+            total_seq = combined_embeds.shape[1]
+            _debug_mem_log("before_vl_model", f"combined_seq={total_seq} (3d={seq_3d}+text={total_seq-seq_3d}) [此处易OOM]")
         outputs = self.vl_model(
             inputs_embeds=combined_embeds,
             attention_mask=combined_attention_mask,
             labels=combined_labels,
             use_cache=use_cache,
         )
+        if _dbg and _is_main_for_debug():
+            _debug_mem_log("after_vl_model")
         if encoding_indices is not None:
             outputs["encoding_indices_3d"] = encoding_indices
         return outputs
