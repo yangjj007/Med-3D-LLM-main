@@ -312,17 +312,32 @@ def sp_cross_entropy_loss(
     Returns mean loss (averaged over SP ranks).
     """
     shift_logits = logits[..., :-1, :].contiguous().view(-1, logits.size(-1))
-    shift_labels = labels[..., 1:].contiguous().view(-1)
-    shift_labels = shift_labels.to(shift_logits.device)
-    loss = torch.nn.functional.cross_entropy(
-        shift_logits,
-        shift_labels,
-        ignore_index=-100,
-        reduction="mean",
-    )
+    shift_labels = labels[..., 1:].contiguous().view(-1).to(shift_logits.device)
+
+    valid_mask = shift_labels.ne(-100)
+    local_valid = valid_mask.sum()
+    local_valid_f = local_valid.to(dtype=shift_logits.dtype)
+
+    # If one SP shard has no valid labels (all -100), CE(mean) would be NaN.
+    # We compute local CE(sum) and normalize by global valid-token count.
+    if int(local_valid.item()) > 0:
+        local_loss_sum = torch.nn.functional.cross_entropy(
+            shift_logits,
+            shift_labels,
+            ignore_index=-100,
+            reduction="sum",
+        )
+    else:
+        local_loss_sum = shift_logits.new_zeros(())
+
+    global_valid = local_valid_f.clone()
     if sp_group is not None and dist.get_world_size(group=sp_group) > 1:
-        dist.all_reduce(loss, op=dist.ReduceOp.AVG, group=sp_group)
-    return loss
+        dist.all_reduce(global_valid, op=dist.ReduceOp.SUM, group=sp_group)
+
+    # Keep graph on local_loss_sum; global_valid is a scalar normalizer.
+    if float(global_valid.item()) <= 0.0:
+        return local_loss_sum
+    return local_loss_sum / global_valid
 
 
 def _get_llm_layers(vl_model: nn.Module) -> nn.ModuleList:

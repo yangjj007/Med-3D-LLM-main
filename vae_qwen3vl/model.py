@@ -407,16 +407,20 @@ class Qwen3VLWith3DBranch(nn.Module):
         if _dbg and (_all_r or _is_main_for_debug()) and input_ids is not None:
             seq_len = input_ids.shape[1]
             _debug_mem_log("before_vl(discrete)", f"seq={seq_len}")
+        use_sp_loss = sp_group is not None and labels is not None
         outputs = self.vl_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             pixel_values=pixel_values,
-            labels=labels,
+            labels=None if use_sp_loss else labels,
             **kwargs,
         )
         if _dbg and (_all_r or _is_main_for_debug()):
             _debug_mem_log("after_vl(discrete)")
-        if sp_group is not None and "loss" in outputs and outputs["loss"] is not None:
+        if use_sp_loss:
+            from .sequence_parallel_utils import sp_cross_entropy_loss
+            outputs["loss"] = sp_cross_entropy_loss(outputs["logits"], labels, sp_group)
+        elif sp_group is not None and "loss" in outputs and outputs["loss"] is not None:
             dist.all_reduce(outputs["loss"], op=dist.ReduceOp.AVG, group=sp_group)
         return outputs
 
