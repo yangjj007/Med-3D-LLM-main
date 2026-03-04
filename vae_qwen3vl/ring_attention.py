@@ -83,9 +83,10 @@ def _ring_send_recv(
         req_recv = dist.irecv(recv_tensor, src=prev_rank)
         req_send = dist.isend(send_tensor, dst=next_rank)
     else:
-        # For subgroup P2P, src/dst are group-relative ranks.
-        req_recv = dist.irecv(recv_tensor, src=prev_group_rank, group=sp_group)
-        req_send = dist.isend(send_tensor, dst=next_group_rank, group=sp_group)
+        # PyTorch c10d expects global src/dst even when `group` is provided.
+        # It internally maps global rank -> group rank.
+        req_recv = dist.irecv(recv_tensor, src=prev_rank, group=sp_group)
+        req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
     if _ring_attn_debug_enabled():
         _ring_attn_debug(
             "ring send/recv posted recv+send, waiting...",
