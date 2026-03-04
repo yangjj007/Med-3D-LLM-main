@@ -55,6 +55,8 @@ def _ring_send_recv(
     my_group_rank = sp_rank
     next_rank = global_ranks[(my_group_rank + 1) % sp_size]
     prev_rank = global_ranks[(my_group_rank - 1 + sp_size) % sp_size]
+    next_group_rank = (my_group_rank + 1) % sp_size
+    prev_group_rank = (my_group_rank - 1 + sp_size) % sp_size
     use_world_p2p = os.getenv("RING_ATTN_P2P_USE_WORLD", "0") == "1"
     barrier_dbg = os.getenv("RING_ATTN_P2P_BARRIER_DEBUG", "0") == "1"
     if barrier_dbg:
@@ -64,7 +66,8 @@ def _ring_send_recv(
     if _ring_attn_debug_enabled():
         _ring_attn_debug(
             f"ring send/recv send_shape={tuple(send_tensor.shape)} recv_shape={tuple(recv_tensor.shape)} "
-            f"prev={prev_rank} next={next_rank} mode={'world' if use_world_p2p else 'sp_group'} "
+            f"prev={prev_rank} next={next_rank} prev_local={prev_group_rank} next_local={next_group_rank} "
+            f"mode={'world' if use_world_p2p else 'sp_group'} "
             f"group_ranks={global_ranks}",
             sp_group=sp_group,
         )
@@ -80,8 +83,9 @@ def _ring_send_recv(
         req_recv = dist.irecv(recv_tensor, src=prev_rank)
         req_send = dist.isend(send_tensor, dst=next_rank)
     else:
-        req_recv = dist.irecv(recv_tensor, src=prev_rank, group=sp_group)
-        req_send = dist.isend(send_tensor, dst=next_rank, group=sp_group)
+        # For subgroup P2P, src/dst are group-relative ranks.
+        req_recv = dist.irecv(recv_tensor, src=prev_group_rank, group=sp_group)
+        req_send = dist.isend(send_tensor, dst=next_group_rank, group=sp_group)
     if _ring_attn_debug_enabled():
         _ring_attn_debug(
             "ring send/recv posted recv+send, waiting...",
