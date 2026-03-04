@@ -59,6 +59,17 @@ def _gpu_memory_stats(device=None) -> str:
         return f"mem_stats_err: {e}"
 
 
+def _rank_prefix() -> str:
+    """分布式下返回 rank 前缀，便于定位哪个进程到达哪个 checkpoint。"""
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            return f"[rank{dist.get_rank()}]"
+    except Exception:
+        pass
+    return ""
+
+
 def _gpu_memory_stats_all(include_peak: bool = False) -> str:
     """返回所有可见 GPU 的显存统计。include_peak=True 时附加本步内峰值（需在步初调用 reset_peak）。"""
     if not torch.cuda.is_available():
@@ -690,9 +701,17 @@ def main():
             except ImportError:
                 pass
 
+        _debug_all_ranks = os.environ.get("DEBUG_MEMORY_ALL_RANKS", "0") == "1"
+
         def _print(*a, **kw):
             if is_main_process:
                 kw.setdefault("flush", True)
+                print(*a, **kw)
+
+        def _print_mem(*a, **kw):
+            """DEBUG_MEMORY 专用：默认仅 main；DEBUG_MEMORY_ALL_RANKS=1 时所有 rank 打印（用于死锁排查）。"""
+            kw.setdefault("flush", True)
+            if _debug_all_ranks or is_main_process:
                 print(*a, **kw)
 
         def _barrier():
@@ -709,12 +728,15 @@ def main():
                 "@after_forward | @before_backward | @after_backward | @after_opt_step。"
             )
             _print(
-                "[DEBUG_MEMORY] 细粒度: forward 内会打印 @after_extract_3d | @after_prepare_3d_seq | "
-                "@after_projector | @after_text_embed | @before_vl_model | @after_vl_model。OOM 时查看最后一条可定位阶段。"
+                "[DEBUG_MEMORY] 细粒度: discrete 模式 → @before_vl_model(discrete) | @after_vl_model(discrete)；"
+                "3d 模式 → @after_extract_3d | @after_projector | @before_vl_model | @after_vl_model。OOM 时最后一条可定位阶段。"
             )
             _print(
                 "[DEBUG_MEMORY] OOM 缓解: 1) PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 减少碎片 "
                 "2) 降低 max_safe_3d_length/max_length_variable 3) 增大 gradient_accumulation_steps 4) 确保 use_gradient_checkpointing"
+            )
+            _print(
+                "[DEBUG_MEMORY] 死锁排查: 设置 DEBUG_MEMORY_ALL_RANKS=1 让所有 rank 打印，可对比各 rank 最后到达的 checkpoint"
             )
         model.train()
         # FSDP2 does not add a .module wrapper; DDP (Accelerate) does.
@@ -768,14 +790,14 @@ def main():
                         inp = batch["inputs_3d"]
                         if isinstance(inp, dict) and "sparse_sdf" in inp:
                             batch_info += f" sparse_pts={inp['sparse_sdf'].shape[0]}"
-                    _print(
-                        f"[DEBUG_MEMORY step={step} @batch_to_device] {_gpu_memory_stats_all(include_peak=True)} | {batch_info}"
+                    _print_mem(
+                        f"[DEBUG_MEMORY] {_rank_prefix()} step={step} @batch_to_device] {_gpu_memory_stats_all(include_peak=True)} | {batch_info}"
                     )
 
                 # [DEBUG_MEMORY] 即将进入 forward
                 if debug_memory and torch.cuda.is_available():
-                    _print(
-                        f"[DEBUG_MEMORY step={step} @before_forward] {_gpu_memory_stats_all(include_peak=True)} | "
+                    _print_mem(
+                        f"[DEBUG_MEMORY] {_rank_prefix()} step={step} @before_forward] {_gpu_memory_stats_all(include_peak=True)} | "
                         f"mode={'discrete' if use_discrete else '3d'}"
                     )
 
@@ -814,30 +836,37 @@ def main():
                                 coords_3d=batch["coords_3d"],
                                 use_cache=False,
                             )
-                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-                    if "out of memory" in str(e).lower() or "OutOfMemoryError" in str(type(e).__name__):
-                        _print(
-                            f"[DEBUG_MEMORY OOM] step={step} 捕获到 OOM 异常！最后一次成功 checkpoint 即为 OOM 发生位置。"
-                        )
-                        _print(f"[DEBUG_MEMORY OOM] 异常信息: {e}")
-                        if torch.cuda.is_available():
-                            _print(f"[DEBUG_MEMORY OOM] 当前显存: {_gpu_memory_stats_all(include_peak=True)}")
+                except Exception as e:
+                    import traceback
+                    _print_mem(f"[DEBUG_MEMORY] {_rank_prefix()} step={step} forward 发生异常: {type(e).__name__}: {e}")
+                    _print_mem(f"[DEBUG_MEMORY] 最后成功 checkpoint 即为异常发生位置。完整 traceback:")
+                    traceback.print_exc()
+                    if "out of memory" in str(e).lower():
+                        _print_mem(f"[DEBUG_MEMORY OOM] 当前显存: {_gpu_memory_stats_all(include_peak=True)}")
                     raise
 
                 _t_fwd = time.time()
                 # [DEBUG_MEMORY] Forward 完成
-                if debug_memory and torch.cuda.is_available():
-                    _print(
-                        f"[DEBUG_MEMORY step={step} @after_forward] {_gpu_memory_stats_all(include_peak=True)} | "
-                        f"loss={getattr(outputs, 'loss', outputs.get('loss', 0)):.4f}"
-                    )
                 loss = getattr(outputs, "loss", None) or outputs.get("loss")
+                loss_val = loss.detach().float().item() if loss is not None else float("nan")
+                if debug_memory and torch.cuda.is_available():
+                    _print_mem(
+                        f"[DEBUG_MEMORY] {_rank_prefix()} step={step} @after_forward] {_gpu_memory_stats_all(include_peak=True)} | loss={loss_val:.4f}"
+                    )
+                if loss is not None:
+                    _nan = torch.isnan(loss)
+                    _inf = torch.isinf(loss)
+                    if _nan.any().item() or _inf.any().item():
+                        _print_mem(
+                            f"[DEBUG_MEMORY] {_rank_prefix()} step={step} loss 含 NaN/Inf！loss={loss_val}。"
+                            "可能原因: 学习率过大、数值不稳定、bad sample。"
+                        )
                 # Scale loss for gradient accumulation
                 scaled_loss = loss / grad_accum_steps
 
                 # [DEBUG_MEMORY] 即将 backward（此处最易 OOM：需分配梯度与激活重计算）
                 if debug_memory and torch.cuda.is_available():
-                    _print(f"[DEBUG_MEMORY step={step} @before_backward] {_gpu_memory_stats_all(include_peak=True)}")
+                    _print_mem(f"[DEBUG_MEMORY] {_rank_prefix()} step={step} @before_backward] {_gpu_memory_stats_all(include_peak=True)}")
                 if use_tp:
                     scaled_loss.backward()
                 elif accelerator is not None:
@@ -848,7 +877,7 @@ def main():
                 _t_bwd = time.time()
                 # [DEBUG_MEMORY] Backward 完成
                 if debug_memory and torch.cuda.is_available():
-                    _print(f"[DEBUG_MEMORY step={step} @after_backward] {_gpu_memory_stats_all(include_peak=True)}")
+                    _print_mem(f"[DEBUG_MEMORY] {_rank_prefix()} step={step} @after_backward] {_gpu_memory_stats_all(include_peak=True)}")
                 _accum_loss += loss.detach().float().item()
                 _accum_count += 1
 
@@ -869,8 +898,8 @@ def main():
                     _t_opt = time.time()
                     # [DEBUG_MEMORY] Optimizer step + zero_grad 完成（梯度已释放）
                     if debug_memory and torch.cuda.is_available():
-                        _print(
-                            f"[DEBUG_MEMORY step={step} @after_opt_step gs={global_step}] "
+                        _print_mem(
+                            f"[DEBUG_MEMORY] {_rank_prefix()} step={step} @after_opt_step gs={global_step}] "
                             f"{_gpu_memory_stats_all(include_peak=True)}"
                         )
 

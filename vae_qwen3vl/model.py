@@ -5,6 +5,8 @@ produce 3D token embeddings that are prepended to text and fed to the LLM.
 
 from typing import Optional, Dict, Any, Tuple, Union
 import torch
+import torch.nn as nn
+import torch.distributed as dist
 
 
 def _is_main_for_debug() -> bool:
@@ -34,8 +36,49 @@ def _debug_mem_log(phase: str, extra: str = "") -> None:
     if extra:
         msg += f" | {extra}"
     print(msg, flush=True)
-import torch.nn as nn
-import torch.distributed as dist
+
+
+def _get_vl_layers_for_debug(vl_model: nn.Module):
+    """获取 vl_model 的 decoder layers，用于注册 debug hooks。失败返回 None。"""
+    try:
+        m = vl_model
+        if hasattr(m, "base_model") and hasattr(m.base_model, "model"):
+            m = m.base_model.model
+        else:
+            m = getattr(m, "model", m)
+        layers = getattr(getattr(m, "language_model", m), "layers", None)
+        return layers
+    except Exception:
+        return None
+
+
+def _register_discrete_debug_hooks(vl_model: nn.Module, dbg_flag: bool) -> None:
+    """为 discrete 模式在 vl_model 的 Transformer 层上注册 debug hooks。"""
+    if not dbg_flag or getattr(vl_model, "_discrete_debug_hooks_registered", False):
+        return
+    layers = _get_vl_layers_for_debug(vl_model)
+    if layers is None or len(layers) == 0:
+        return
+    n = len(layers)
+    indices = [0, max(1, n // 4), n // 2, max(n // 2 + 1, 3 * n // 4), n - 1]
+    indices = sorted(set(indices))
+    handles = []
+
+    for idx in indices:
+        layer = layers[idx]
+        layer_idx = idx
+
+        def make_hook(li):
+            def _hook(module, inp, out):
+                if _is_main_for_debug():
+                    _debug_mem_log(f"vl_layer_{li}/{n}", f"layer {li}/{n} done")
+            return _hook
+
+        h = layer.register_forward_hook(make_hook(layer_idx))
+        handles.append(h)
+    setattr(vl_model, "_discrete_debug_hooks_registered", True)
+    setattr(vl_model, "_discrete_debug_handles", handles)
+
 
 from .projector import Projector3D
 from .sequence_3d import prepare_3d_sequence, prepare_3d_sequence_batched
@@ -324,6 +367,11 @@ class Qwen3VLWith3DBranch(nn.Module):
             input_ids = batch["input_ids"]
             attention_mask = batch.get("attention_mask")
             labels = batch.get("labels")
+        _dbg = getattr(self, "_debug_memory_fine", False)
+        _register_discrete_debug_hooks(self.vl_model, _dbg)
+        if _dbg and _is_main_for_debug() and input_ids is not None:
+            seq_len = input_ids.shape[1]
+            _debug_mem_log("before_vl_model(discrete)", f"input_ids_seq={seq_len} [此处易OOM]")
         outputs = self.vl_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -331,6 +379,8 @@ class Qwen3VLWith3DBranch(nn.Module):
             labels=labels,
             **kwargs,
         )
+        if _dbg and _is_main_for_debug():
+            _debug_mem_log("after_vl_model(discrete)")
         if sp_group is not None and "loss" in outputs and outputs["loss"] is not None:
             dist.all_reduce(outputs["loss"], op=dist.ReduceOp.AVG, group=sp_group)
         return outputs
