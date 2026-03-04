@@ -156,6 +156,7 @@ class Qwen3VLWith3DBranch(nn.Module):
         inputs_3d: Optional[Dict[str, torch.Tensor]] = None,
         feats_3d: Optional[torch.Tensor] = None,
         coords_3d: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """
         Forward when input includes 3D. Either pass inputs_3d (batch dict for VAE)
@@ -227,6 +228,7 @@ class Qwen3VLWith3DBranch(nn.Module):
             inputs_embeds=combined_embeds,
             attention_mask=combined_attention_mask,
             labels=combined_labels,
+            use_cache=use_cache,
         )
         if encoding_indices is not None:
             outputs["encoding_indices_3d"] = encoding_indices
@@ -243,6 +245,7 @@ class Qwen3VLWith3DBranch(nn.Module):
         coords_3d: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[Dict[str, torch.Tensor], Any]:
+        kwargs.setdefault("use_cache", False)
         if inputs_3d is not None or feats_3d is not None:
             return self.forward_with_3d(
                 input_ids=input_ids,
@@ -251,6 +254,7 @@ class Qwen3VLWith3DBranch(nn.Module):
                 inputs_3d=inputs_3d,
                 feats_3d=feats_3d,
                 coords_3d=coords_3d,
+                use_cache=kwargs["use_cache"],
             )
         sp_group = getattr(self, "sp_group", None)
         if sp_group is not None and input_ids is not None:

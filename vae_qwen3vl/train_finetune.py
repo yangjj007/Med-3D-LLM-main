@@ -397,6 +397,10 @@ def main():
             # Required for HF models under GC so trainable params backprop correctly.
             if hasattr(model.vl_model, "enable_input_require_grads"):
                 model.vl_model.enable_input_require_grads()
+        # Training path should always disable KV cache; this avoids incompatible
+        # attention return signatures under GC/SP patching.
+        if hasattr(model.vl_model, "config"):
+            model.vl_model.config.use_cache = False
         if use_discrete:
             resize_token_embeddings_and_init_mesh(model, tokenizer)
 
@@ -665,6 +669,7 @@ def main():
                             input_ids=batch["input_ids"],
                             attention_mask=batch.get("attention_mask"),
                             labels=batch["labels"],
+                            use_cache=False,
                         )
                     elif use_inputs_3d:
                         outputs = _model.forward_with_3d(
@@ -672,6 +677,7 @@ def main():
                             attention_mask=batch["attention_mask"],
                             labels=batch["labels"],
                             inputs_3d=batch["inputs_3d"],
+                            use_cache=False,
                         )
                     else:
                         outputs = _model.forward_with_3d(
@@ -680,6 +686,7 @@ def main():
                             labels=batch["labels"],
                             feats_3d=batch["feats_3d"],
                             coords_3d=batch["coords_3d"],
+                            use_cache=False,
                         )
 
                 _t_fwd = time.time()
