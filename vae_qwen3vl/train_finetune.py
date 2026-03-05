@@ -916,12 +916,29 @@ def main():
                 )
 
                 if logits_now.ndim != 3 or labels_now.ndim != 2 or logits_now.shape[:2] != labels_now.shape:
-                    # SP 下 outputs.logits 可能是本 rank 分片后的局部长度；尝试先做同样的 split 再重算 CE。
+                    # SP 下 outputs.logits 可能是本 rank 分片后的局部长度；
+                    # 这里仅做“纯本地”标签切片，避免在 debug 代码里引入额外 collective。
                     if use_tp and sp_group is not None and dist.is_initialized():
                         try:
-                            from vae_qwen3vl.sequence_parallel_utils import split_for_sp
-                            _local = split_for_sp({"labels": labels_now}, sp_group)
-                            labels_local = _local.get("labels")
+                            sp_rank = dist.get_rank(group=sp_group)
+                            sp_size = dist.get_world_size(group=sp_group)
+                            total_s = int(labels_now.shape[1])
+                            chunk = (total_s + sp_size - 1) // sp_size
+                            start = sp_rank * chunk
+                            end = min(start + chunk, total_s)
+                            if end > start:
+                                labels_local = labels_now[:, start:end].contiguous()
+                            else:
+                                labels_local = labels_now[:, :0].clone()
+                            local_len = int(labels_local.shape[1])
+                            if local_len < chunk:
+                                pad = torch.full(
+                                    (labels_local.shape[0], chunk - local_len),
+                                    -100,
+                                    dtype=labels_local.dtype,
+                                    device=labels_local.device,
+                                )
+                                labels_local = torch.cat([labels_local, pad], dim=1).contiguous()
                             if isinstance(labels_local, torch.Tensor) and logits_now.shape[:2] == labels_local.shape:
                                 labels_now = labels_local
                                 _print_mem(
