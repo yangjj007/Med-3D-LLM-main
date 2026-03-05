@@ -26,31 +26,49 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 
-def _ensure_conda_env(env_name: str = "trellis") -> None:
-    """若当前 Python 不在指定 conda 环境，自动用该环境的 Python 原地重启脚本。
+def _find_env_python(env_name: str) -> str | None:
+    """不依赖 conda activate/run，直接定位指定 conda 环境的 Python 路径。
 
-    原理：os.execv 直接替换当前进程（不产生子进程），argv 完整保留，
-    重启后 CONDA_DEFAULT_ENV == env_name，下次调用时直接返回。
+    优先用 `conda info --base` 获取 conda 根目录；失败时遍历常见安装路径。
     """
+    # 方法1：conda info --base（轻量，不激活环境，通常 <1s）
+    try:
+        r = subprocess.run(
+            ["conda", "info", "--base"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            candidate = os.path.join(r.stdout.strip(), "envs", env_name, "bin", "python")
+            if os.path.isfile(candidate):
+                return candidate
+    except Exception:
+        pass
+
+    # 方法2：遍历常见 conda 安装根目录
+    home = os.path.expanduser("~")
+    for base in [
+        f"{home}/anaconda3", f"{home}/miniconda3", f"{home}/miniforge3",
+        "/opt/conda", "/usr/local/anaconda3", "/usr/local/miniconda3",
+    ]:
+        candidate = os.path.join(base, "envs", env_name, "bin", "python")
+        if os.path.isfile(candidate):
+            return candidate
+
+    return None
+
+
+def _ensure_conda_env(env_name: str = "trellis") -> None:
+    """若当前 Python 不在指定 conda 环境，用 os.execv 原地切换后重启。"""
     if os.environ.get("CONDA_DEFAULT_ENV") == env_name:
         return
 
-    try:
-        result = subprocess.run(
-            ["conda", "run", "-n", env_name, "python", "-c",
-             "import sys; print(sys.executable)"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip())
-        trellis_python = result.stdout.strip()
-        if not os.path.isfile(trellis_python):
-            raise FileNotFoundError(f"找不到可执行文件: {trellis_python}")
-        print(f"[Launcher] 当前环境={os.environ.get('CONDA_DEFAULT_ENV', '未知')}, "
-              f"切换至 {env_name}: {trellis_python}")
-        os.execv(trellis_python, [trellis_python] + sys.argv)
-    except Exception as exc:
-        print(f"[Launcher] 警告: 无法自动切换至 {env_name} 环境 ({exc})，继续使用当前 Python")
+    python_path = _find_env_python(env_name)
+    if python_path is None:
+        print(f"[Launcher] 警告: 找不到 {env_name} 环境的 Python，继续使用当前 Python")
+        return
+
+    print(f"[Launcher] 切换至 {env_name} 环境: {python_path}")
+    os.execv(python_path, [python_path] + sys.argv)
 
 
 _ensure_conda_env("trellis")
