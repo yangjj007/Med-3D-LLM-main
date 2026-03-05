@@ -189,6 +189,3 @@ python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_le
 - **从 Stage1 继续 Stage2**：当前 Stage2 可从基座重新加载再挂 LoRA；若需从 Stage1 ckpt 连续训，需在脚本中加「加载上一阶段 ckpt」逻辑。
 - **VAE 输出 512³**：若更换为「无下采样、输出 512³ 坐标」的 VAE，只需将 `coord_max_3d` 改为 512，并确认数据与 FPS/Morton 的数值范围一致。
 
----
-
-*文档基于当前代码与对话整理，若配置或脚本有变更，以仓库内实际代码与最新文档为准。*
