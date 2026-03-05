@@ -25,6 +25,8 @@ import argparse
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
+os.environ["SPARSE_BACKEND"] = "torchsparse"
+
 
 def main():
     parser = argparse.ArgumentParser(description="Launch 3D-VL alignment training")
