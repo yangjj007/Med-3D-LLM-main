@@ -122,6 +122,24 @@ export PARALLEL_DEBUG_VERBOSE=1
 python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug_verbose.log
 ```
 
+**4）多机分布式（2 机 × 4 卡）**
+
+每台机器仅看到本机 GPU 0–3，必须用 `LOCAL_RANK` 选设备。若出现 `invalid device ordinal`，说明 launcher 可能把 `RANK` 当成本地设备 ID。代码已内置修正：当 `local_rank >= 本机 GPU 数` 时自动用 `global_rank % device_count` 选 GPU。
+
+Master 节点：
+```bash
+torchrun --nnodes=2 --nproc_per_node=4 --node_rank=0 --master_addr=<MASTER_IP> --master_port=29500 \
+  vae_qwen3vl/train_finetune.py --config configs/3d_align_train_variable_length.yaml
+```
+
+Worker 节点：
+```bash
+torchrun --nnodes=2 --nproc_per_node=4 --node_rank=1 --master_addr=<MASTER_IP> --master_port=29500 \
+  vae_qwen3vl/train_finetune.py --config configs/3d_align_train_variable_length.yaml
+```
+
+诊断输出：启动时各 rank 会将 `RANK/LOCAL_RANK/device_count` 等写入 `configs/.train_debug_rank{N}.txt`，报错时写入 `configs/.train_error_rank{N}.txt`，便于排查多机 GPU ID 问题。
+
 ### 3.3 配置要点速查
 
 | 目的 | 配置 |
