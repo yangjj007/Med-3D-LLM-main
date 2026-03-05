@@ -80,23 +80,6 @@ def _dist_context_str() -> str:
     return f"rank={rank} local_rank={local_rank} world={world_size}"
 
 
-def _write_rank_debug(rank: int, msg: str) -> None:
-    """
-    将诊断信息写入 configs/.train_debug_rank{N}.txt，便于多机分布式时排查各 rank 的
-    RANK/LOCAL_RANK/device_count 等，定位 invalid device ordinal 问题。
-    """
-    try:
-        log_dir = os.path.join(PROJECT_ROOT, "configs")
-        os.makedirs(log_dir, exist_ok=True)
-        debug_path = os.path.join(log_dir, f".train_debug_rank{rank}.txt")
-        with open(debug_path, "a", encoding="utf-8") as f:
-            ts = time.strftime("%Y-%m-%d %H:%M:%S")
-            f.write(f"[{ts}] {msg}\n")
-            f.flush()
-    except Exception:
-        pass
-
-
 def _debug_parallel_enabled() -> bool:
     return os.environ.get("PARALLEL_DEBUG", "0") == "1"
 
@@ -463,38 +446,64 @@ def main():
                 f"init_process_group done in {time.time() - _init_t0:.3f}s",
                 force=True,
             )
+        # ---- 多机分布式诊断 ----
+        _diag_rank = os.environ.get("RANK", "?")
+        _diag_local_rank = os.environ.get("LOCAL_RANK", "?")
+        _diag_world = os.environ.get("WORLD_SIZE", "?")
+        _diag_local_world = os.environ.get("LOCAL_WORLD_SIZE", "?")
+        _diag_group_rank = os.environ.get("GROUP_RANK", "?")
+        _diag_role = os.environ.get("ROLE", "?")
+        _diag_master_addr = os.environ.get("MASTER_ADDR", "?")
+        _diag_master_port = os.environ.get("MASTER_PORT", "?")
+        _diag_cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "(not set)")
+        _diag_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        _diag_gpu_names = []
+        for _gi in range(_diag_gpu_count):
+            try:
+                _diag_gpu_names.append(f"  GPU{_gi}: {torch.cuda.get_device_name(_gi)}")
+            except Exception as _ge:
+                _diag_gpu_names.append(f"  GPU{_gi}: error={_ge}")
+        import socket as _socket
+        _diag_hostname = _socket.gethostname()
+        _diag_lines = [
+            "=" * 60,
+            f"[Multi-Node Diagnostic] hostname={_diag_hostname}",
+            f"  RANK={_diag_rank}  LOCAL_RANK={_diag_local_rank}  WORLD_SIZE={_diag_world}",
+            f"  LOCAL_WORLD_SIZE={_diag_local_world}  GROUP_RANK={_diag_group_rank}  ROLE={_diag_role}",
+            f"  MASTER_ADDR={_diag_master_addr}  MASTER_PORT={_diag_master_port}",
+            f"  CUDA_VISIBLE_DEVICES={_diag_cuda_visible}",
+            f"  torch.cuda.device_count()={_diag_gpu_count}",
+        ] + _diag_gpu_names + ["=" * 60]
+        _diag_msg = "\n".join(_diag_lines)
+        print(_diag_msg, flush=True)
+        _diag_log_path = os.path.join(
+            PROJECT_ROOT, "configs", f".train_diag_rank{_diag_rank}.txt"
+        )
+        os.makedirs(os.path.dirname(_diag_log_path), exist_ok=True)
+        with open(_diag_log_path, "w", encoding="utf-8") as _df:
+            _df.write(_diag_msg + "\n")
+        # ---- 诊断结束 ----
+
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        if local_rank >= _diag_gpu_count:
+            _fix_msg = (
+                f"[WARN] LOCAL_RANK={local_rank} >= device_count={_diag_gpu_count} on {_diag_hostname}! "
+                f"This typically means the cluster framework is passing the GLOBAL rank as LOCAL_RANK. "
+                f"Attempting fix: local_rank = RANK % device_count = {int(_diag_rank) % _diag_gpu_count if _diag_rank != '?' and _diag_gpu_count > 0 else '??'}"
+            )
+            print(_fix_msg, flush=True)
+            with open(_diag_log_path, "a", encoding="utf-8") as _df:
+                _df.write(_fix_msg + "\n")
+            if _diag_gpu_count > 0 and _diag_rank != "?":
+                local_rank = int(_diag_rank) % _diag_gpu_count
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
         world_size = dist.get_world_size()
         global_rank = dist.get_rank()
-        # 多机训练：每台机器仅看到本地 GPU(0..n-1)，必须用 local_rank 而非 global rank
-        # 若 launcher 未正确设置 LOCAL_RANK 或误将 RANK 当作 LOCAL_RANK，会导致 invalid device ordinal
-        local_rank_env = os.environ.get("LOCAL_RANK", "")
-        local_rank_arg = getattr(args, "local_rank", -1)
-        local_rank = int(local_rank_env) if local_rank_env != "" else (local_rank_arg if local_rank_arg >= 0 else 0)
-        device_count = torch.cuda.device_count()
-        # 当 local_rank >= 本机 GPU 数时，说明多机环境下 LOCAL_RANK 可能被错误设置，用 rank % device_count 修正
-        cuda_device_id = local_rank
-        if device_count > 0 and local_rank >= device_count:
-            cuda_device_id = global_rank % device_count
-            _write_rank_debug(
-                global_rank,
-                f"[MULTI_NODE_FIX] local_rank={local_rank} >= device_count={device_count} (本机 GPU 数)，"
-                f"修正为 cuda_device_id={cuda_device_id} (global_rank % device_count)。"
-                f"多机请确保使用 torchrun --nnodes=N --nproc_per_node=4 并正确设置 LOCAL_RANK。",
-            )
-        # 启动诊断：写入各 rank 的 debug 文件，便于排查多机 GPU ID 问题
-        _write_rank_debug(
-            global_rank,
-            f"RANK={global_rank} WORLD_SIZE={world_size} LOCAL_RANK(env)={local_rank_env!r} "
-            f"local_rank(arg)={local_rank_arg} -> local_rank={local_rank} device_count={device_count} "
-            f"cuda_device_id={cuda_device_id} CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '未设置')} "
-            f"MASTER_ADDR={os.environ.get('MASTER_ADDR', '?')} nnodes/节点数需与 WORLD_SIZE/nproc_per_node 一致",
-        )
-        torch.cuda.set_device(cuda_device_id)
-        device = torch.device(f"cuda:{cuda_device_id}")
         is_main_process = (global_rank == 0)
         _dlog(
             f"dist ready backend=nccl rank={global_rank}/{world_size} local_rank={local_rank} "
-            f"cuda_device_id={cuda_device_id} cuda_current={torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'}",
+            f"cuda_device={torch.cuda.current_device() if torch.cuda.is_available() else 'cpu'}",
             force=True,
         )
 
@@ -1360,39 +1369,41 @@ def main():
 if __name__ == "__main__":
     import traceback
     import sys
-    def _rank_for_error_file() -> int:
-        """多机时用 global rank 区分不同节点上的进程，避免 LOCAL_RANK 同名覆盖。"""
-        try:
-            if dist.is_initialized():
-                return dist.get_rank()
-        except Exception:
-            pass
-        return int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", 0)))
+    import socket as _err_socket
+
+    def _error_rank_label():
+        """用 RANK（全局）命名文件，避免多机 LOCAL_RANK 冲突。"""
+        global_rank = os.environ.get("RANK", None)
+        local_rank = os.environ.get("LOCAL_RANK", "0")
+        if global_rank is not None:
+            return f"grank{global_rank}"
+        return f"rank{local_rank}"
 
     def _save_error(exc_type, exc_val, exc_tb):
         if exc_type is not None:
             tb = "".join(traceback.format_exception(exc_type, exc_val, exc_tb))
-            rank = _rank_for_error_file()
-            err_path = os.path.join(PROJECT_ROOT, "configs", f".train_error_rank{rank}.txt")
-            os.makedirs(os.path.dirname(err_path), exist_ok=True)
-            env_ctx = (
-                f"RANK={os.environ.get('RANK', '?')} LOCAL_RANK={os.environ.get('LOCAL_RANK', '?')} "
-                f"WORLD_SIZE={os.environ.get('WORLD_SIZE', '?')} "
-                f"cuda_device_count={torch.cuda.device_count() if torch.cuda.is_available() else 0}\n"
+            label = _error_rank_label()
+            hostname = _err_socket.gethostname()
+            header = (
+                f"hostname={hostname}  RANK={os.environ.get('RANK', '?')}  "
+                f"LOCAL_RANK={os.environ.get('LOCAL_RANK', '?')}  "
+                f"WORLD_SIZE={os.environ.get('WORLD_SIZE', '?')}  "
+                f"LOCAL_WORLD_SIZE={os.environ.get('LOCAL_WORLD_SIZE', '?')}  "
+                f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '(not set)')}\n\n"
             )
+            err_path = os.path.join(PROJECT_ROOT, "configs", f".train_error_{label}.txt")
+            os.makedirs(os.path.dirname(err_path), exist_ok=True)
             with open(err_path, "w", encoding="utf-8") as f:
-                f.write(env_ctx)
-                f.write("---\n")
-                f.write(tb)
+                f.write(header + tb)
     sys.excepthook = _save_error
     try:
         main()
     except BaseException as e:
         _save_error(type(e), e, e.__traceback__)
-        rank = _rank_for_error_file()
-        err_path = os.path.join(PROJECT_ROOT, "configs", f".train_error_rank{rank}.txt")
+        label = _error_rank_label()
+        err_path = os.path.join(PROJECT_ROOT, "configs", f".train_error_{label}.txt")
         try:
-            print(f"[rank{rank}] Error saved to {err_path}", file=sys.stderr)
+            print(f"[{label}] Error saved to {err_path}", file=sys.stderr)
         except Exception:
             pass
         raise
