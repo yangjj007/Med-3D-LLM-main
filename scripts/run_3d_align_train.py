@@ -46,9 +46,19 @@ def _find_env_python(env_name: str) -> str | None:
 
     # 方法2：遍历常见 conda 安装根目录
     home = os.path.expanduser("~")
+    cwd = os.getcwd()
+    # 动态搜索当前目录及其祖先目录下的 anaconda3/miniconda3
+    extra_bases = []
+    for d in [cwd, os.path.dirname(cwd)]:
+        for name in ("anaconda3", "miniconda3", "miniforge3"):
+            p = os.path.join(d, name)
+            if os.path.isdir(p):
+                extra_bases.append(p)
     for base in [
         f"{home}/anaconda3", f"{home}/miniconda3", f"{home}/miniforge3",
         "/opt/conda", "/usr/local/anaconda3", "/usr/local/miniconda3",
+        "/yangjunjie/anaconda3",
+        *extra_bases,
     ]:
         candidate = os.path.join(base, "envs", env_name, "bin", "python")
         if os.path.isfile(candidate):
@@ -139,6 +149,13 @@ def main():
         print("Set vae_ckpt in config or export VAE_CKPT")
         sys.exit(1)
 
+    vl_model = cfg.get("vl_model") or os.environ.get("VL_MODEL")
+    if vl_model and not os.path.isabs(vl_model):
+        vl_model = abspath(vl_model)
+    if not vl_model:
+        print("vl_model not set in config and VL_MODEL env. Set vl_model in config.")
+        sys.exit(1)
+
     train_script = os.path.join(PROJECT_ROOT, "vae_qwen3vl", "train_finetune.py")
     env = os.environ.copy()
     error_file = os.path.join(PROJECT_ROOT, "configs", ".elastic_error.txt")
@@ -166,6 +183,7 @@ def main():
             "--master_port=29500",
             train_script,
             "--config", config_path,
+            "--vl_model", vl_model,
         ]
         if os.environ.get("VAE_CKPT"):
             cmd.extend(["--vae_ckpt", vae_ckpt])
@@ -208,6 +226,7 @@ def main():
             "--config_file", acc_path,
             train_script,
             "--config", config_path,
+            "--vl_model", vl_model,
         ]
         if os.environ.get("VAE_CKPT"):
             cmd.extend(["--vae_ckpt", vae_ckpt])

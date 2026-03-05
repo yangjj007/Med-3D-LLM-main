@@ -96,6 +96,12 @@ export SPARSE_BACKEND=torchsparse
 python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug.log
 ```
 
+需要指定conda环境解释器时：
+```bash
+export SPARSE_BACKEND=torchsparse
+/yangjunjie/anaconda3/envs/trellis/bin/python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug.log
+```
+
 **3）多卡并行定位（TP/SP/通信详细日志）**
 
 推荐在排查 NCCL 超时、序列并行或张量并行问题时使用：
