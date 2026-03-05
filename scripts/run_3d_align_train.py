@@ -57,6 +57,18 @@ def _find_env_python(env_name: str) -> str | None:
     return None
 
 
+def _setup_conda_env_vars(env_name: str, python_path: str) -> None:
+    """设置 conda 环境变量（CONDA_DEFAULT_ENV / CONDA_PREFIX / PATH），
+    使后续 subprocess 能找到该环境下的 torchrun、accelerate 等命令。"""
+    env_prefix = os.path.dirname(os.path.dirname(python_path))  # .../envs/trellis
+    os.environ["CONDA_DEFAULT_ENV"] = env_name
+    os.environ["CONDA_PREFIX"] = env_prefix
+    env_bin = os.path.join(env_prefix, "bin")
+    path = os.environ.get("PATH", "")
+    if env_bin not in path.split(os.pathsep):
+        os.environ["PATH"] = env_bin + os.pathsep + path
+
+
 def _ensure_conda_env(env_name: str = "trellis") -> None:
     """若当前 Python 不在指定 conda 环境，用 os.execv 原地切换后重启。"""
     if os.environ.get("CONDA_DEFAULT_ENV") == env_name:
@@ -67,7 +79,13 @@ def _ensure_conda_env(env_name: str = "trellis") -> None:
         print(f"[Launcher] 警告: 找不到 {env_name} 环境的 Python，继续使用当前 Python")
         return
 
-    print(f"[Launcher] 切换至 {env_name} 环境: {python_path}")
+    if os.path.realpath(sys.executable) == os.path.realpath(python_path):
+        print(f"[Launcher] 已在 {env_name} 环境中 ({python_path})，设置环境变量")
+        _setup_conda_env_vars(env_name, python_path)
+        return
+
+    print(f"[Launcher] 切换至 {env_name} 环境: {python_path}", flush=True)
+    _setup_conda_env_vars(env_name, python_path)
     os.execv(python_path, [python_path] + sys.argv)
 
 
