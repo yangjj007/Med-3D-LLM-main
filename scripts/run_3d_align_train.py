@@ -41,6 +41,12 @@ def main():
         action="store_true",
         help="单卡调试模式（nproc=1），便于查看完整报错",
     )
+    parser.add_argument(
+        "--conda-env",
+        type=str,
+        default="trellis",
+        help="在指定 conda 环境中运行训练（默认: trellis）；传空字符串表示不通过 conda run",
+    )
     args = parser.parse_args()
     config_path = os.path.normpath(
         os.path.join(PROJECT_ROOT, args.config) if not os.path.isabs(args.config) else args.config
@@ -78,6 +84,16 @@ def main():
     error_file = os.path.join(PROJECT_ROOT, "configs", ".elastic_error.txt")
     env.setdefault("TORCHELASTIC_ERROR_FILE", error_file)
 
+    def make_cmd(base_cmd):
+        """若指定了 conda-env，则通过 conda run -n <env> 在对应环境中执行训练命令。"""
+        if not (getattr(args, "conda_env", None) or "").strip():
+            return base_cmd
+        return [
+            "conda", "run", "-n", (args.conda_env or "trellis").strip(),
+            "--no-capture-output",
+            *base_cmd,
+        ]
+
     # Decide launch mode based on tensor_parallel_size
     tp_size = int(cfg.get("tensor_parallel_size", 1))
     acc_cfg = dict(cfg.get("accelerate", {}))
@@ -89,7 +105,7 @@ def main():
             f"[Launcher] TP mode: tensor_parallel_size={tp_size}, "
             f"nproc_per_node={num_gpus}, dp_size={num_gpus // tp_size}"
         )
-        cmd = [
+        base_cmd = [
             "torchrun",
             f"--nproc_per_node={num_gpus}",
             "--master_port=29500",
@@ -97,7 +113,8 @@ def main():
             "--config", config_path,
         ]
         if os.environ.get("VAE_CKPT"):
-            cmd.extend(["--vae_ckpt", vae_ckpt])
+            base_cmd.extend(["--vae_ckpt", vae_ckpt])
+        cmd = make_cmd(base_cmd)
         print("Running:", " ".join(cmd))
         print("(若失败，报错会写入 configs/.train_error_rank*.txt)")
         subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
@@ -131,14 +148,15 @@ def main():
         with open(acc_path, "w", encoding="utf-8") as f:
             yaml.dump(acc_cfg, f, default_flow_style=False, allow_unicode=True)
 
-        cmd = [
+        base_cmd = [
             "accelerate", "launch",
             "--config_file", acc_path,
             train_script,
             "--config", config_path,
         ]
         if os.environ.get("VAE_CKPT"):
-            cmd.extend(["--vae_ckpt", vae_ckpt])
+            base_cmd.extend(["--vae_ckpt", vae_ckpt])
+        cmd = make_cmd(base_cmd)
         print("Running:", " ".join(cmd))
         print("(若失败，报错会写入 configs/.train_error_rank*.txt)")
         subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
