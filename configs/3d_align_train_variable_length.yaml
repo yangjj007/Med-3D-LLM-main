@@ -35,8 +35,8 @@ training_stage: "warmup"
 
 # === 张量并行 + 序列并行 ===
 # TP=2 + SP=2: 4 GPU 上 DP=1, 序列切分到 2 卡，模型切分到 2 卡，显著降低 30k token 反向显存
-tensor_parallel_size: 2
-sequence_parallel_size: 2
+tensor_parallel_size: 8
+sequence_parallel_size: 1
 
 # === 显存与 batch ===
 # TP=2 + FSDP2 约降低每卡峰值激活内存 2 倍，加上 GC 后可承受更长序列。
@@ -48,7 +48,7 @@ use_gradient_checkpointing: true   # TP 模式下 GC 无条件生效（无 DeepS
 
 # === 训练参数 ===
 lr: 1.0e-4
-epochs: 2
+epochs: 1
 max_3d_tokens: 512
 truncate_mode: "head"
 use_3d_pos: false
@@ -96,7 +96,7 @@ accelerate:
   main_training_function: main
   mixed_precision: bf16
   num_machines: 1
-  num_processes: 4   # 4 GPU: TP=2 + SP=2
+  num_processes: 8   # 4 GPU: TP=2 + SP=2
   rdzv_backend: static
   same_network: true
   tpu_env: []
