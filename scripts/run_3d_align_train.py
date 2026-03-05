@@ -31,7 +31,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        default=os.path.join(PROJECT_ROOT, "configs", "3d_align_train.yaml"),
+        default=os.path.join(PROJECT_ROOT, "configs", "3d_align_train_variable_length.yaml"),
         help="Path to unified YAML config",
     )
     parser.add_argument(
