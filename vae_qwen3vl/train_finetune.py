@@ -916,54 +916,21 @@ def main():
                 )
 
                 if logits_now.ndim != 3 or labels_now.ndim != 2 or logits_now.shape[:2] != labels_now.shape:
-                    # SP 下 outputs.logits 可能是本 rank 分片后的局部长度；
-                    # 这里仅做“纯本地”标签切片，避免在 debug 代码里引入额外 collective。
-                    if use_tp and sp_group is not None and dist.is_initialized():
-                        try:
-                            sp_rank = dist.get_rank(group=sp_group)
-                            sp_size = dist.get_world_size(group=sp_group)
-                            total_s = int(labels_now.shape[1])
-                            chunk = (total_s + sp_size - 1) // sp_size
-                            start = sp_rank * chunk
-                            end = min(start + chunk, total_s)
-                            if end > start:
-                                labels_local = labels_now[:, start:end].contiguous()
-                            else:
-                                labels_local = labels_now[:, :0].clone()
-                            local_len = int(labels_local.shape[1])
-                            if local_len < chunk:
-                                pad = torch.full(
-                                    (labels_local.shape[0], chunk - local_len),
-                                    -100,
-                                    dtype=labels_local.dtype,
-                                    device=labels_local.device,
-                                )
-                                labels_local = torch.cat([labels_local, pad], dim=1).contiguous()
-                            if isinstance(labels_local, torch.Tensor) and logits_now.shape[:2] == labels_local.shape:
-                                labels_now = labels_local
-                                _print_mem(
-                                    f"[LOSSDBG] {_rank_prefix()} align labels by SP split: "
-                                    f"local_labels={tuple(labels_now.shape)}"
-                                )
-                            else:
-                                _print_mem(
-                                    f"[LOSSDBG WARN] {_rank_prefix()} logits/labels shape mismatch for CE recompute: "
-                                    f"logits={tuple(logits_now.shape)} labels={tuple(labels_now.shape)} "
-                                    f"labels_local={tuple(labels_local.shape) if isinstance(labels_local, torch.Tensor) else None}"
-                                )
-                                return
-                        except Exception as e:
-                            _print_mem(
-                                f"[LOSSDBG WARN] {_rank_prefix()} SP label align failed: {e}; "
-                                f"logits={tuple(logits_now.shape)} labels={tuple(labels_now.shape)}"
-                            )
-                            return
-                    else:
-                        _print_mem(
-                            f"[LOSSDBG WARN] {_rank_prefix()} logits/labels shape mismatch for CE recompute: "
-                            f"logits={tuple(logits_now.shape)} labels={tuple(labels_now.shape)}"
-                        )
-                        return
+                    # SP 模式下 logits 已在 model.forward 内部被 split_for_sp 切成本 rank 的片段
+                    # (形状 [B, S/sp_size, V])，而 batch["labels"] 仍是送入模型前的完整序列
+                    # (形状 [B, S])，长度不等属于正常现象，CE 重算交由 SP-LOSSDBG 展示。
+                    _sp_ratio = (
+                        f"≈1/{round(labels_now.shape[1] / logits_now.shape[1])}"
+                        if logits_now.ndim == 3 and labels_now.ndim == 2 and logits_now.shape[1] > 0
+                        else "?"
+                    )
+                    _print_mem(
+                        f"[LOSSDBG] {_rank_prefix()} SP 模式：logits 是本 rank 的序列切片 "
+                        f"logits_seq={logits_now.shape[1] if logits_now.ndim==3 else '?'} "
+                        f"labels_seq={labels_now.shape[1] if labels_now.ndim==2 else '?'} "
+                        f"(ratio {_sp_ratio})，CE 重算结果见上方 SP-LOSSDBG 日志"
+                    )
+                    return
 
                 shift_logits = logits_det[..., :-1, :].contiguous().view(-1, logits_det.size(-1))
                 shift_labels = labels_now[..., 1:].contiguous().view(-1).to(shift_logits.device)

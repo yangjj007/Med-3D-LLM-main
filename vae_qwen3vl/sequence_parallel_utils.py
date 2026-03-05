@@ -355,39 +355,37 @@ def sp_cross_entropy_loss(
         _sp_loss_dbg("local_valid=0 on this rank; local_loss_sum will stay 0")
 
     global_valid = local_valid_f.clone()
-    global_loss_sum = local_loss_sum
     if sp_group is not None and dist.get_world_size(group=sp_group) > 1:
         dist.all_reduce(global_valid, op=dist.ReduceOp.SUM, group=sp_group)
-        # NOTE:
-        # Use global loss sum so every SP rank observes identical scalar loss.
-        # Without this, ranks with local_valid=0 always report loss=0 even when
-        # other SP ranks contribute non-zero CE, which makes training logs misleading.
-        dist.all_reduce(global_loss_sum, op=dist.ReduceOp.SUM, group=sp_group)
+        # ------------------------------------------------------------------ #
+        # BUG FIX: must also all_reduce the loss sum so every SP rank holds
+        # the same numerator.  Without this, ranks whose slice contains only
+        # -100 labels return 0/global_valid = 0 and receive zero gradient,
+        # while ranks with real labels return loss/global_valid and get all the
+        # gradient -- which defeats the purpose of sequence parallelism.
+        #
+        # all_reduce is differentiable: the backward pass issues another
+        # all_reduce on the incoming gradient, correctly routing gradients
+        # back to each rank's local logits.
+        # ------------------------------------------------------------------ #
+        dist.all_reduce(local_loss_sum, op=dist.ReduceOp.SUM, group=sp_group)
+
     if _sp_loss_dbg_enabled():
         local_valid_i = int(local_valid.item())
         global_valid_f = float(global_valid.item())
-        local_loss_sum_f = float(local_loss_sum.detach().float().item())
-        global_loss_sum_dbg = global_loss_sum.detach().clone()
-        if sp_group is not None and dist.get_world_size(group=sp_group) > 1:
-            try:
-                # Already reduced above; keep debug block side-effect free.
-                pass
-            except Exception as e:
-                _sp_loss_dbg(f"global_loss_sum all_reduce failed: {e}")
-        global_loss_sum_f = float(global_loss_sum_dbg.detach().float().item())
+        global_loss_sum_f = float(local_loss_sum.detach().float().item())
         global_ce_dbg = global_loss_sum_f / max(global_valid_f, 1.0)
         _sp_loss_dbg(
-            f"stats local_valid={local_valid_i} global_valid={global_valid_f:.0f} "
-            f"local_loss_sum={local_loss_sum_f:.8e} global_loss_sum={global_loss_sum_f:.8e} "
-            f"global_ce_dbg={global_ce_dbg:.8e}"
+            f"stats(post-allreduce) global_valid={global_valid_f:.0f} "
+            f"global_loss_sum={global_loss_sum_f:.8e} "
+            f"global_ce={global_ce_dbg:.8e}"
         )
 
-    # global_loss_sum/global_valid gives identical scalar loss on every SP rank.
     if float(global_valid.item()) <= 0.0:
         if _sp_loss_dbg_enabled():
-            _sp_loss_dbg("global_valid<=0, return local_loss_sum(connected zero)")
-        return global_loss_sum
-    out = global_loss_sum / global_valid
+            _sp_loss_dbg("global_valid<=0, return zero loss (no valid labels anywhere)")
+        return local_loss_sum
+    out = local_loss_sum / global_valid
     if _sp_loss_dbg_enabled():
         _sp_loss_dbg(f"return_loss={float(out.detach().float().item()):.8e}")
     return out

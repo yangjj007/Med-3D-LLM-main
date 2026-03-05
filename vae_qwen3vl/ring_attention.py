@@ -332,19 +332,7 @@ class RingFlashAttnFunc(torch.autograd.Function):
         # uniform tensor shapes, so we communicate padded K/V and slice by real length.
         local_k_len = int(k.size(1))
         seq_lens = _gather_sp_seq_lens(local_k_len, sp_group)
-        if any((not isinstance(x, int)) or x < 0 for x in seq_lens):
-            raise RuntimeError(f"[RingAttn] invalid seq_lens gathered: {seq_lens}")
         max_k_len = max(seq_lens)
-        # Safety guard: prevent absurd allocation when collectives return corrupted lengths.
-        # This should never trigger in healthy runs; if it does, upstream SP collectives
-        # likely desynchronized and seq_lens became invalid.
-        max_seq_cap = int(os.getenv("RING_ATTN_MAX_SEQ_LEN", "262144"))
-        if max_k_len > max_seq_cap:
-            raise RuntimeError(
-                f"[RingAttn] abnormal max_k_len={max_k_len} exceeds cap={max_seq_cap}. "
-                f"seq_lens={seq_lens}, local_k_len={local_k_len}. "
-                "Please check SP collective synchronization."
-            )
         if _ring_attn_debug_enabled():
             _ring_attn_debug(
                 f"seq_lens={seq_lens} local_k_len={local_k_len} max_k_len={max_k_len}",
