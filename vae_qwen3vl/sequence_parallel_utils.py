@@ -47,6 +47,23 @@ def _sp_dbg(msg: str, *, force: bool = False) -> None:
     print(f"[SP-DBG {ts}][rank{rank}] {msg}", flush=True)
 
 
+def _sp_loss_dbg_enabled() -> bool:
+    return os.getenv("DEBUG_LOSS", "0") == "1"
+
+
+def _sp_loss_dbg(msg: str) -> None:
+    if not _sp_loss_dbg_enabled():
+        return
+    rank = "?"
+    try:
+        if dist.is_initialized():
+            rank = str(dist.get_rank())
+    except Exception:
+        pass
+    ts = time.strftime("%H:%M:%S")
+    print(f"[SP-LOSSDBG {ts}][rank{rank}] {msg}", flush=True)
+
+
 def _gather_world_int(value: int, device: torch.device) -> List[int]:
     """Gather one int from every global rank."""
     if not dist.is_initialized():
@@ -313,6 +330,12 @@ def sp_cross_entropy_loss(
     """
     shift_logits = logits[..., :-1, :].contiguous().view(-1, logits.size(-1))
     shift_labels = labels[..., 1:].contiguous().view(-1).to(shift_logits.device)
+    if _sp_loss_dbg_enabled():
+        finite_ratio = float(torch.isfinite(logits.detach()).float().mean().item())
+        _sp_loss_dbg(
+            f"enter logits={tuple(logits.shape)} labels={tuple(labels.shape)} "
+            f"shift={tuple(shift_logits.shape)} finite_ratio={finite_ratio:.6f}"
+        )
 
     valid_mask = shift_labels.ne(-100)
     local_valid = valid_mask.sum()
@@ -328,15 +351,39 @@ def sp_cross_entropy_loss(
             ignore_index=-100,
             reduction="sum",
         )
+    elif _sp_loss_dbg_enabled():
+        _sp_loss_dbg("local_valid=0 on this rank; local_loss_sum will stay 0")
 
     global_valid = local_valid_f.clone()
     if sp_group is not None and dist.get_world_size(group=sp_group) > 1:
         dist.all_reduce(global_valid, op=dist.ReduceOp.SUM, group=sp_group)
+    if _sp_loss_dbg_enabled():
+        local_valid_i = int(local_valid.item())
+        global_valid_f = float(global_valid.item())
+        local_loss_sum_f = float(local_loss_sum.detach().float().item())
+        global_loss_sum_dbg = local_loss_sum.detach().clone()
+        if sp_group is not None and dist.get_world_size(group=sp_group) > 1:
+            try:
+                dist.all_reduce(global_loss_sum_dbg, op=dist.ReduceOp.SUM, group=sp_group)
+            except Exception as e:
+                _sp_loss_dbg(f"global_loss_sum all_reduce failed: {e}")
+        global_loss_sum_f = float(global_loss_sum_dbg.detach().float().item())
+        global_ce_dbg = global_loss_sum_f / max(global_valid_f, 1.0)
+        _sp_loss_dbg(
+            f"stats local_valid={local_valid_i} global_valid={global_valid_f:.0f} "
+            f"local_loss_sum={local_loss_sum_f:.8e} global_loss_sum={global_loss_sum_f:.8e} "
+            f"global_ce_dbg={global_ce_dbg:.8e}"
+        )
 
     # Keep graph on local_loss_sum; global_valid is a scalar normalizer.
     if float(global_valid.item()) <= 0.0:
+        if _sp_loss_dbg_enabled():
+            _sp_loss_dbg("global_valid<=0, return local_loss_sum(connected zero)")
         return local_loss_sum
-    return local_loss_sum / global_valid
+    out = local_loss_sum / global_valid
+    if _sp_loss_dbg_enabled():
+        _sp_loss_dbg(f"return_loss={float(out.detach().float().item()):.8e}")
+    return out
 
 
 def _get_llm_layers(vl_model: nn.Module) -> nn.ModuleList:

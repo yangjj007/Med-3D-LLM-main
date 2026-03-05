@@ -7,6 +7,7 @@ Supports multi-GPU training via HuggingFace Accelerate.
 import argparse
 import os
 import time
+import math
 from datetime import timedelta
 
 # 确保 3D-VL 训练使用 torchsparse（新终端直接 python 运行时不会走 shell 脚本的 export）
@@ -390,6 +391,9 @@ def main():
     if getattr(args, "debug_parallel", False) and "RING_ATTN_DEBUG" not in os.environ:
         # 统一打开 ring attention 关键路径日志（send/recv 与 step）。
         os.environ["RING_ATTN_DEBUG"] = "1"
+    if getattr(args, "debug_loss", False):
+        # 供 model / sequence_parallel_utils 读取，输出 loss 相关详细日志。
+        os.environ["DEBUG_LOSS"] = "1"
 
     # -----------------------------------------------------------------------
     # Distributed setup: TP+FSDP2 path vs. legacy Accelerate path
@@ -844,6 +848,134 @@ def main():
             if getattr(args, "debug_sync_points", False):
                 _dlog(f"barrier leave waited={time.time() - t0:.3f}s", all_ranks=True, force=True)
 
+        def _should_log_loss(step_idx: int, valid_tokens: int) -> bool:
+            return bool(getattr(args, "debug_loss", False) or step_idx < 5 or valid_tokens == 0)
+
+        def _log_detailed_loss_debug(
+            *,
+            epoch_idx: int,
+            step_idx: int,
+            batch_dict: dict,
+            outputs_obj,
+            loss_tensor: torch.Tensor,
+            valid_tokens: int,
+            total_tokens: int,
+        ) -> None:
+            if not _should_log_loss(step_idx, valid_tokens):
+                return
+            if loss_tensor is None:
+                _print_mem(f"[LOSSDBG] {_rank_prefix()} ep={epoch_idx} step={step_idx} loss is None")
+                return
+            if "labels" not in batch_dict or not isinstance(batch_dict["labels"], torch.Tensor):
+                _print_mem(f"[LOSSDBG] {_rank_prefix()} ep={epoch_idx} step={step_idx} labels missing")
+                return
+
+            with torch.no_grad():
+                labels_now = batch_dict["labels"]
+                attn_now = batch_dict.get("attention_mask")
+                logits_now = getattr(outputs_obj, "logits", None)
+                if logits_now is None and isinstance(outputs_obj, dict):
+                    logits_now = outputs_obj.get("logits", None)
+                lr_now = opt.param_groups[0]["lr"] if opt.param_groups else 0.0
+                loss_val_now = float(loss_tensor.detach().float().item())
+                loss_state = "finite"
+                if math.isnan(loss_val_now):
+                    loss_state = "nan"
+                elif math.isinf(loss_val_now):
+                    loss_state = "inf"
+                labels_valid_mask = labels_now.ne(-100)
+                per_sample_valid = labels_valid_mask.sum(dim=1).detach().cpu().tolist()
+                attn_tokens = int(attn_now.sum().item()) if isinstance(attn_now, torch.Tensor) else -1
+                _print_mem(
+                    f"[LOSSDBG] {_rank_prefix()} ep={epoch_idx} step={step_idx} "
+                    f"loss={loss_val_now:.8e} ({loss_state}) lr={lr_now:.3e} "
+                    f"valid={valid_tokens}/{total_tokens} attn_tokens={attn_tokens} "
+                    f"labels_shape={tuple(labels_now.shape)}"
+                )
+                _print_mem(
+                    f"[LOSSDBG] {_rank_prefix()} per_sample_valid={per_sample_valid[:8]} "
+                    f"(show<=8) grad_accum={grad_accum_steps}"
+                )
+                if labels_now.numel() > 0:
+                    tail_len = min(12, labels_now.shape[1])
+                    tail_labels = labels_now[0, -tail_len:].detach().cpu().tolist()
+                    _print_mem(f"[LOSSDBG] {_rank_prefix()} sample0_tail_labels={tail_labels}")
+
+                if not isinstance(logits_now, torch.Tensor):
+                    _print_mem(f"[LOSSDBG] {_rank_prefix()} logits missing in outputs, skip CE recompute")
+                    return
+
+                logits_det = logits_now.detach().float()
+                finite_ratio = float(torch.isfinite(logits_det).float().mean().item())
+                logits_absmax = float(logits_det.abs().max().item())
+                logits_mean = float(logits_det.mean().item())
+                logits_std = float(logits_det.std(unbiased=False).item())
+                _print_mem(
+                    f"[LOSSDBG] {_rank_prefix()} logits_shape={tuple(logits_now.shape)} dtype={logits_now.dtype} "
+                    f"finite_ratio={finite_ratio:.6f} mean={logits_mean:.6e} std={logits_std:.6e} absmax={logits_absmax:.6e}"
+                )
+
+                if logits_now.ndim != 3 or labels_now.ndim != 2 or logits_now.shape[:2] != labels_now.shape:
+                    _print_mem(
+                        f"[LOSSDBG WARN] {_rank_prefix()} logits/labels shape mismatch for CE recompute: "
+                        f"logits={tuple(logits_now.shape)} labels={tuple(labels_now.shape)}"
+                    )
+                    return
+
+                shift_logits = logits_det[..., :-1, :].contiguous().view(-1, logits_det.size(-1))
+                shift_labels = labels_now[..., 1:].contiguous().view(-1).to(shift_logits.device)
+                shift_valid = shift_labels.ne(-100)
+                local_valid = int(shift_valid.sum().item())
+                if local_valid <= 0:
+                    _print_mem(
+                        f"[LOSSDBG WARN] {_rank_prefix()} shift 后 valid_label_tokens=0 "
+                        f"(原始valid={valid_tokens}/{total_tokens})"
+                    )
+                    return
+
+                ce_sum_local = torch.nn.functional.cross_entropy(
+                    shift_logits,
+                    shift_labels,
+                    ignore_index=-100,
+                    reduction="sum",
+                )
+                ce_mean_local = ce_sum_local / max(local_valid, 1)
+                pred = shift_logits.argmax(dim=-1)
+                valid_pred = pred[shift_valid]
+                valid_labels = shift_labels[shift_valid]
+                token_acc = float((valid_pred == valid_labels).float().mean().item())
+                ppl = float(torch.exp(torch.clamp(ce_mean_local, max=20.0)).item())
+                ce_sum_global = ce_sum_local.detach().clone()
+                valid_global_t = torch.tensor(
+                    float(local_valid),
+                    device=ce_sum_local.device,
+                    dtype=ce_sum_local.dtype,
+                )
+                if use_tp and sp_group is not None and dist.is_initialized():
+                    try:
+                        if dist.get_world_size(group=sp_group) > 1:
+                            dist.all_reduce(ce_sum_global, op=dist.ReduceOp.SUM, group=sp_group)
+                            dist.all_reduce(valid_global_t, op=dist.ReduceOp.SUM, group=sp_group)
+                    except Exception as e:
+                        _print_mem(f"[LOSSDBG WARN] {_rank_prefix()} all_reduce debug stats failed: {e}")
+                global_valid = max(float(valid_global_t.item()), 1.0)
+                ce_mean_global = float((ce_sum_global / global_valid).item())
+                _print_mem(
+                    f"[LOSSDBG] {_rank_prefix()} shift_valid_local={local_valid} "
+                    f"ce_local={float(ce_mean_local.item()):.8e} ce_global={ce_mean_global:.8e} "
+                    f"token_acc={token_acc:.4f} ppl={ppl:.4f}"
+                )
+                loss_abs_diff = abs(loss_val_now - ce_mean_global)
+                _print_mem(
+                    f"[LOSSDBG] {_rank_prefix()} reported_loss={loss_val_now:.8e} "
+                    f"vs_recomputed_global_ce={ce_mean_global:.8e} diff={loss_abs_diff:.8e}"
+                )
+                if loss_val_now < 1e-8 and ce_mean_global > 1e-4:
+                    _print_mem(
+                        f"[LOSSDBG WARN] {_rank_prefix()} loss 接近 0 但重算 CE={ce_mean_global:.6e}，"
+                        "请重点检查 SP loss 的 local/global 聚合。"
+                    )
+
         grad_accum_steps = getattr(args, "gradient_accumulation_steps", 1)
         if debug_memory and is_main_process:
             _print("[DEBUG_MEMORY] 显存调试已开启。")
@@ -902,7 +1034,7 @@ def main():
                 if isinstance(labels, torch.Tensor):
                     valid_label_tokens = int((labels != -100).sum().item())
                     total_label_tokens = int(labels.numel())
-                    if step < 5 or valid_label_tokens == 0 or getattr(args, "debug_loss", False):
+                    if _should_log_loss(step, valid_label_tokens):
                         lr_now = opt.param_groups[0]["lr"] if opt.param_groups else 0.0
                         _print_mem(
                             f"[LOSSCHK] {_rank_prefix()} step={step} valid_label_tokens="
@@ -1001,6 +1133,15 @@ def main():
                         )
                         opt.zero_grad()
                         continue
+                _log_detailed_loss_debug(
+                    epoch_idx=epoch,
+                    step_idx=step,
+                    batch_dict=batch,
+                    outputs_obj=outputs,
+                    loss_tensor=loss,
+                    valid_tokens=valid_label_tokens,
+                    total_tokens=total_label_tokens,
+                )
                 # Scale loss for gradient accumulation
                 scaled_loss = loss / grad_accum_steps
 
