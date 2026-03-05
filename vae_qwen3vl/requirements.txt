@@ -4,6 +4,3 @@ transformers>=4.47
 accelerate>=0.25
 peft>=0.10
 pyyaml>=6.0
-
-# trellis 子模块依赖
-easydict

@@ -25,82 +25,6 @@ import argparse
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-
-def _find_env_python(env_name: str) -> str | None:
-    """不依赖 conda activate/run，直接定位指定 conda 环境的 Python 路径。
-
-    优先用 `conda info --base` 获取 conda 根目录；失败时遍历常见安装路径。
-    """
-    # 方法1：conda info --base（轻量，不激活环境，通常 <1s）
-    try:
-        r = subprocess.run(
-            ["conda", "info", "--base"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if r.returncode == 0:
-            candidate = os.path.join(r.stdout.strip(), "envs", env_name, "bin", "python")
-            if os.path.isfile(candidate):
-                return candidate
-    except Exception:
-        pass
-
-    # 方法2：遍历常见 conda 安装根目录
-    home = os.path.expanduser("~")
-    cwd = os.getcwd()
-    # 动态搜索当前目录及其祖先目录下的 anaconda3/miniconda3
-    extra_bases = []
-    for d in [cwd, os.path.dirname(cwd)]:
-        for name in ("anaconda3", "miniconda3", "miniforge3"):
-            p = os.path.join(d, name)
-            if os.path.isdir(p):
-                extra_bases.append(p)
-    for base in [
-        f"{home}/anaconda3", f"{home}/miniconda3", f"{home}/miniforge3",
-        "/opt/conda", "/usr/local/anaconda3", "/usr/local/miniconda3",
-        "/yangjunjie/anaconda3",
-        *extra_bases,
-    ]:
-        candidate = os.path.join(base, "envs", env_name, "bin", "python")
-        if os.path.isfile(candidate):
-            return candidate
-
-    return None
-
-
-def _setup_conda_env_vars(env_name: str, python_path: str) -> None:
-    """设置 conda 环境变量（CONDA_DEFAULT_ENV / CONDA_PREFIX / PATH），
-    使后续 subprocess 能找到该环境下的 torchrun、accelerate 等命令。"""
-    env_prefix = os.path.dirname(os.path.dirname(python_path))  # .../envs/trellis
-    os.environ["CONDA_DEFAULT_ENV"] = env_name
-    os.environ["CONDA_PREFIX"] = env_prefix
-    env_bin = os.path.join(env_prefix, "bin")
-    path = os.environ.get("PATH", "")
-    if env_bin not in path.split(os.pathsep):
-        os.environ["PATH"] = env_bin + os.pathsep + path
-
-
-def _ensure_conda_env(env_name: str = "trellis") -> None:
-    """若当前 Python 不在指定 conda 环境，用 os.execv 原地切换后重启。"""
-    if os.environ.get("CONDA_DEFAULT_ENV") == env_name:
-        return
-
-    python_path = _find_env_python(env_name)
-    if python_path is None:
-        print(f"[Launcher] 警告: 找不到 {env_name} 环境的 Python，继续使用当前 Python")
-        return
-
-    if os.path.realpath(sys.executable) == os.path.realpath(python_path):
-        print(f"[Launcher] 已在 {env_name} 环境中 ({python_path})，设置环境变量")
-        _setup_conda_env_vars(env_name, python_path)
-        return
-
-    print(f"[Launcher] 切换至 {env_name} 环境: {python_path}", flush=True)
-    _setup_conda_env_vars(env_name, python_path)
-    os.execv(python_path, [python_path] + sys.argv)
-
-
-_ensure_conda_env("trellis")
-
 os.environ["SPARSE_BACKEND"] = "torchsparse"
 
 
@@ -154,10 +78,6 @@ def main():
     error_file = os.path.join(PROJECT_ROOT, "configs", ".elastic_error.txt")
     env.setdefault("TORCHELASTIC_ERROR_FILE", error_file)
 
-    # 使用当前 Python 解释器路径，确保子进程与 launcher 处于同一 conda 环境
-    # 等效于 "python -m torch.distributed.run" / "python -m accelerate.commands.launch"
-    PYTHON = sys.executable
-
     # Decide launch mode based on tensor_parallel_size
     tp_size = int(cfg.get("tensor_parallel_size", 1))
     acc_cfg = dict(cfg.get("accelerate", {}))
@@ -169,9 +89,8 @@ def main():
             f"[Launcher] TP mode: tensor_parallel_size={tp_size}, "
             f"nproc_per_node={num_gpus}, dp_size={num_gpus // tp_size}"
         )
-        print(f"[Launcher] Python: {PYTHON}")
         cmd = [
-            PYTHON, "-m", "torch.distributed.run",
+            "torchrun",
             f"--nproc_per_node={num_gpus}",
             "--master_port=29500",
             train_script,
@@ -212,9 +131,8 @@ def main():
         with open(acc_path, "w", encoding="utf-8") as f:
             yaml.dump(acc_cfg, f, default_flow_style=False, allow_unicode=True)
 
-        print(f"[Launcher] Python: {PYTHON}")
         cmd = [
-            PYTHON, "-m", "accelerate.commands.launch",
+            "accelerate", "launch",
             "--config_file", acc_path,
             train_script,
             "--config", config_path,
