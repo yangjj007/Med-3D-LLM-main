@@ -373,15 +373,35 @@ def main():
                         help="每步打印 valid_label_tokens 与 lr，用于排查 loss=NaN/Inf（默认仅前 5 步打印）")
     parser.add_argument("--dist_timeout_seconds", type=int, default=600,
                         help="torch.distributed init_process_group 超时时间（秒）")
+    # torchrun/accelerate 可能注入 --local-rank，用 parse_known_args 避免未知参数导致失败
+    parser.add_argument("--local_rank", "--local-rank", type=int, default=-1,
+                        help="Local rank (injected by torchrun, prefer env LOCAL_RANK)")
     args, remaining = parser.parse_known_args()
     known_keys = {a.dest for a in parser._actions if a.dest != "help"}
-    if args.config and os.path.isfile(args.config):
-        cfg = _load_config(args.config, PROJECT_ROOT)
+
+    # 将 config 路径解析为绝对路径，避免 torchrun 子进程 cwd 不同导致相对路径找不到文件
+    config_path = None
+    if args.config:
+        config_path = args.config if os.path.isabs(args.config) else os.path.normpath(os.path.join(PROJECT_ROOT, args.config))
+    cfg = {}
+    if config_path and os.path.isfile(config_path):
+        cfg = _load_config(config_path, PROJECT_ROOT)
         overrides = {k: v for k, v in cfg.items() if not k.startswith("_") and k in known_keys}
         parser.set_defaults(**overrides)
-        args = parser.parse_args(remaining)
+        args, _ = parser.parse_known_args(remaining)
     else:
-        args = parser.parse_args(remaining if remaining else [])
+        args, _ = parser.parse_known_args(remaining if remaining else [])
+
+    # 兜底：config 已加载但 overrides 可能未覆盖（如 known_keys 差异），显式补齐关键参数
+    for key in ("vl_model", "vae_config", "vae_ckpt", "data_dir", "output_dir"):
+        if key in cfg and getattr(args, key, None) is None and cfg[key]:
+            setattr(args, key, cfg[key])
+
+    if not getattr(args, "vl_model", None):
+        raise ValueError(
+            "vl_model 未设置。请确保 config YAML 中有 vl_model 字段，"
+            "或通过 --vl_model 传参。当前 config_path=%r" % (config_path,)
+        )
 
     # 并行调试开关写入环境变量，供其它模块（TP/SP/ring attention）复用。
     if getattr(args, "debug_parallel", False):
