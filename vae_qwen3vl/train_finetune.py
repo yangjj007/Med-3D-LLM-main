@@ -916,11 +916,37 @@ def main():
                 )
 
                 if logits_now.ndim != 3 or labels_now.ndim != 2 or logits_now.shape[:2] != labels_now.shape:
-                    _print_mem(
-                        f"[LOSSDBG WARN] {_rank_prefix()} logits/labels shape mismatch for CE recompute: "
-                        f"logits={tuple(logits_now.shape)} labels={tuple(labels_now.shape)}"
-                    )
-                    return
+                    # SP 下 outputs.logits 可能是本 rank 分片后的局部长度；尝试先做同样的 split 再重算 CE。
+                    if use_tp and sp_group is not None and dist.is_initialized():
+                        try:
+                            from vae_qwen3vl.sequence_parallel_utils import split_for_sp
+                            _local = split_for_sp({"labels": labels_now}, sp_group)
+                            labels_local = _local.get("labels")
+                            if isinstance(labels_local, torch.Tensor) and logits_now.shape[:2] == labels_local.shape:
+                                labels_now = labels_local
+                                _print_mem(
+                                    f"[LOSSDBG] {_rank_prefix()} align labels by SP split: "
+                                    f"local_labels={tuple(labels_now.shape)}"
+                                )
+                            else:
+                                _print_mem(
+                                    f"[LOSSDBG WARN] {_rank_prefix()} logits/labels shape mismatch for CE recompute: "
+                                    f"logits={tuple(logits_now.shape)} labels={tuple(labels_now.shape)} "
+                                    f"labels_local={tuple(labels_local.shape) if isinstance(labels_local, torch.Tensor) else None}"
+                                )
+                                return
+                        except Exception as e:
+                            _print_mem(
+                                f"[LOSSDBG WARN] {_rank_prefix()} SP label align failed: {e}; "
+                                f"logits={tuple(logits_now.shape)} labels={tuple(labels_now.shape)}"
+                            )
+                            return
+                    else:
+                        _print_mem(
+                            f"[LOSSDBG WARN] {_rank_prefix()} logits/labels shape mismatch for CE recompute: "
+                            f"logits={tuple(logits_now.shape)} labels={tuple(labels_now.shape)}"
+                        )
+                        return
 
                 shift_logits = logits_det[..., :-1, :].contiguous().view(-1, logits_det.size(-1))
                 shift_labels = labels_now[..., 1:].contiguous().view(-1).to(shift_logits.device)

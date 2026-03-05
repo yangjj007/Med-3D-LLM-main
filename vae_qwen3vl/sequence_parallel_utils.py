@@ -355,16 +355,23 @@ def sp_cross_entropy_loss(
         _sp_loss_dbg("local_valid=0 on this rank; local_loss_sum will stay 0")
 
     global_valid = local_valid_f.clone()
+    global_loss_sum = local_loss_sum
     if sp_group is not None and dist.get_world_size(group=sp_group) > 1:
         dist.all_reduce(global_valid, op=dist.ReduceOp.SUM, group=sp_group)
+        # NOTE:
+        # Use global loss sum so every SP rank observes identical scalar loss.
+        # Without this, ranks with local_valid=0 always report loss=0 even when
+        # other SP ranks contribute non-zero CE, which makes training logs misleading.
+        dist.all_reduce(global_loss_sum, op=dist.ReduceOp.SUM, group=sp_group)
     if _sp_loss_dbg_enabled():
         local_valid_i = int(local_valid.item())
         global_valid_f = float(global_valid.item())
         local_loss_sum_f = float(local_loss_sum.detach().float().item())
-        global_loss_sum_dbg = local_loss_sum.detach().clone()
+        global_loss_sum_dbg = global_loss_sum.detach().clone()
         if sp_group is not None and dist.get_world_size(group=sp_group) > 1:
             try:
-                dist.all_reduce(global_loss_sum_dbg, op=dist.ReduceOp.SUM, group=sp_group)
+                # Already reduced above; keep debug block side-effect free.
+                pass
             except Exception as e:
                 _sp_loss_dbg(f"global_loss_sum all_reduce failed: {e}")
         global_loss_sum_f = float(global_loss_sum_dbg.detach().float().item())
@@ -375,12 +382,12 @@ def sp_cross_entropy_loss(
             f"global_ce_dbg={global_ce_dbg:.8e}"
         )
 
-    # Keep graph on local_loss_sum; global_valid is a scalar normalizer.
+    # global_loss_sum/global_valid gives identical scalar loss on every SP rank.
     if float(global_valid.item()) <= 0.0:
         if _sp_loss_dbg_enabled():
             _sp_loss_dbg("global_valid<=0, return local_loss_sum(connected zero)")
-        return local_loss_sum
-    out = local_loss_sum / global_valid
+        return global_loss_sum
+    out = global_loss_sum / global_valid
     if _sp_loss_dbg_enabled():
         _sp_loss_dbg(f"return_loss={float(out.detach().float().item()):.8e}")
     return out
