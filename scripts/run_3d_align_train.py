@@ -99,7 +99,7 @@ def main():
         if os.environ.get("VAE_CKPT"):
             cmd.extend(["--vae_ckpt", vae_ckpt])
         print("Running:", " ".join(cmd))
-        print("(若失败，报错会写入 configs/.train_error_rank*.txt)")
+        print("(若失败，报错会写入 configs/train_error_grank*.txt 和 configs/train_diag_rank*.txt)")
         subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
 
     else:
@@ -140,7 +140,7 @@ def main():
         if os.environ.get("VAE_CKPT"):
             cmd.extend(["--vae_ckpt", vae_ckpt])
         print("Running:", " ".join(cmd))
-        print("(若失败，报错会写入 configs/.train_error_rank*.txt)")
+        print("(若失败，报错会写入 configs/train_error_grank*.txt 和 configs/train_diag_rank*.txt)")
         subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
 
 

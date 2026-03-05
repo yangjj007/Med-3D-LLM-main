@@ -477,7 +477,7 @@ def main():
         _diag_msg = "\n".join(_diag_lines)
         print(_diag_msg, flush=True)
         _diag_log_path = os.path.join(
-            PROJECT_ROOT, "configs", f".train_diag_rank{_diag_rank}.txt"
+            PROJECT_ROOT, "configs", f"train_diag_rank{_diag_rank}.txt"
         )
         os.makedirs(os.path.dirname(_diag_log_path), exist_ok=True)
         with open(_diag_log_path, "w", encoding="utf-8") as _df:
@@ -1391,7 +1391,7 @@ if __name__ == "__main__":
                 f"LOCAL_WORLD_SIZE={os.environ.get('LOCAL_WORLD_SIZE', '?')}  "
                 f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', '(not set)')}\n\n"
             )
-            err_path = os.path.join(PROJECT_ROOT, "configs", f".train_error_{label}.txt")
+            err_path = os.path.join(PROJECT_ROOT, "configs", f"train_error_{label}.txt")
             os.makedirs(os.path.dirname(err_path), exist_ok=True)
             with open(err_path, "w", encoding="utf-8") as f:
                 f.write(header + tb)
@@ -1401,7 +1401,7 @@ if __name__ == "__main__":
     except BaseException as e:
         _save_error(type(e), e, e.__traceback__)
         label = _error_rank_label()
-        err_path = os.path.join(PROJECT_ROOT, "configs", f".train_error_{label}.txt")
+        err_path = os.path.join(PROJECT_ROOT, "configs", f"train_error_{label}.txt")
         try:
             print(f"[{label}] Error saved to {err_path}", file=sys.stderr)
         except Exception:
