@@ -337,6 +337,7 @@ def main():
     parser.add_argument("--data_dir", type=str, default=None, help="Path to SDF dataset")
     parser.add_argument("--data_format", type=str, default="sdf_caption", choices=["sdf_caption"])
     parser.add_argument("--max_samples", type=int, default=2000, help="Max samples (0 = all)")
+    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader CPU worker 数（0=主进程加载；>0 多进程预取，可按 CPU 核数调整）")
     parser.add_argument("--prompt", type=str, default="Describe this 3D shape in one sentence:", help="Caption prompt")
     parser.add_argument("--use_discrete_3d_tokens", action="store_true", help="Use discrete mesh tokens (8x8x8 pool) and no Projector")
     parser.add_argument("--use_variable_length_3d_tokens", action="store_true", help="Variable-length 3D: keep all VAE points, Morton sort, dynamic pad (use with use_discrete_3d_tokens)")
@@ -784,6 +785,7 @@ def main():
                     batch_size=args.batch_size,
                     sampler=_sampler,
                     collate_fn=lambda b: collate_3d_text(b, latent_dim=latent_dim),
+                    num_workers=getattr(args, "num_workers", 0),
                 )
             else:
                 dataloader = DataLoader(
@@ -791,6 +793,7 @@ def main():
                     batch_size=args.batch_size,
                     shuffle=True,
                     collate_fn=lambda b: collate_3d_text(b, latent_dim=latent_dim),
+                    num_workers=getattr(args, "num_workers", 0),
                 )
         elif args.data_dir:
             from vae_qwen3vl.dataset_sdf_caption import (
@@ -848,7 +851,7 @@ def main():
                     batch_size=args.batch_size,
                     sampler=_sampler,
                     collate_fn=collate_fn,
-                    num_workers=0,
+                    num_workers=getattr(args, "num_workers", 0),
                 )
             else:
                 dataloader = DataLoader(
@@ -856,7 +859,7 @@ def main():
                     batch_size=args.batch_size,
                     shuffle=True,
                     collate_fn=collate_fn,
-                    num_workers=0,
+                    num_workers=getattr(args, "num_workers", 0),
                 )
         else:
             if use_discrete:

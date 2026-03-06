@@ -24,9 +24,9 @@ output_dir: "outputs_3d_align"
 # === 离散 + 变长 3D ===
 use_discrete_3d_tokens: true
 use_variable_length_3d_tokens: true
-max_safe_3d_length: 30000
+max_safe_3d_length: 15000
 coord_max_3d: 64
-max_length_variable: 32768
+max_length_variable: 16384
 reconstruction_ratio: 0.0
 training_stage: "warmup"
 
@@ -39,8 +39,8 @@ sequence_parallel_size: 1
 # gpus_per_node: 0 表示自动检测（nvidia-smi / torch.cuda.device_count）
 # num_nodes: 0 表示自动推算（num_processes / gpus_per_node）
 # master_addr / master_port: 留空则读 $MASTER_ADDR / $MASTER_PORT 环境变量
-gpus_per_node: 4
-num_nodes: 2
+gpus_per_node: 8
+num_nodes: 1
 # master_addr: "pytorch-38492b6f-master-0"
 # master_port: 29500
 
@@ -48,7 +48,7 @@ num_nodes: 2
 # TP=2 + FSDP2 约降低每卡峰值激活内存 2 倍，加上 GC 后可承受更长序列。
 # gradient_accumulation_steps 等效 global batch = DP=2 × bs=1 × accum=8 = 16
 batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 32
 use_flash_attn_2: true
 use_gradient_checkpointing: true   # TP 模式下 GC 无条件生效（无 DeepSpeed 兼容性 bug）
 
@@ -84,6 +84,13 @@ prompt: "Describe this 3D shape in one sentence:"
 
 # === 数据 ===
 max_samples: 0
+num_workers: 2   # DataLoader CPU worker 数（每个 GPU 进程独立创建 DataLoader）
+                 # 说明：collate_fn（VAE Encode + FPS + Morton）在主进程执行，与 worker 无关。
+                 # worker 仅负责预取 .npz → tensor（I/O 密集）。
+                 # TP=8 时 dp_world=1，8 个 GPU 进程均加载相同数据：
+                 #   total_workers = 8 × num_workers，过大会争抢磁盘带宽并浪费 CPU 核心。
+                 # 推荐：num_workers=2（16 个预取 worker）；若磁盘 I/O 成为瓶颈可调至 4。
+                 # 注：num_workers>0 时需确保 collate_fn 中无共享 CUDA 资源（当前已满足）。
 dummy_data: false
 dummy_samples: 50
 data_format: "sdf_caption"

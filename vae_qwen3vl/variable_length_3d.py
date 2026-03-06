@@ -3,6 +3,11 @@ Variable-length 3D tokenization: use all VAE output points (no grid pooling).
 - Morton code (Z-order) sorting so adjacent tokens are spatially adjacent.
 - Optional FPS downsample only when exceeding max_safe_length (soft cap).
 - No fixed 512; sequence length = N (typically 8k~12k) with dynamic padding in batch.
+
+性能说明：
+- fps_downsample_indices: 设备无关，直接在 GPU 张量上运行（避免 .cpu() 往返）。
+- morton_sort_indices: 全向量化 numpy，无 Python for 循环。
+- variable_length_sequence_to_mesh_token_string: .tolist() 转换后再做字符串拼接，避免逐元素 numpy 标量开销。
 """
 
 from typing import List, Optional, Tuple
@@ -18,7 +23,7 @@ DEFAULT_MAX_SAFE_LENGTH = 15000
 def morton_sort_indices(coords_xyz: np.ndarray, coord_max: int = 512) -> np.ndarray:
     """
     Return permutation indices that sort points by Morton (Z-order) curve.
-    Vectorized: no per-point Python loop.
+    Fully vectorized via numpy broadcasting: no Python per-bit loop.
     coords_xyz: [N, 3] int, (x, y, z). coord_max: max coordinate value (e.g. 512 or 64).
     """
     n = coords_xyz.shape[0]
@@ -28,11 +33,12 @@ def morton_sort_indices(coords_xyz: np.ndarray, coord_max: int = 512) -> np.ndar
     x = coords_xyz[:, 0].astype(np.int64)
     y = coords_xyz[:, 1].astype(np.int64)
     z = coords_xyz[:, 2].astype(np.int64)
-    codes = np.zeros(n, dtype=np.int64)
-    for i in range(bits):
-        codes |= ((x >> i) & 1) << (3 * i)
-        codes |= ((y >> i) & 1) << (3 * i + 1)
-        codes |= ((z >> i) & 1) << (3 * i + 2)
+    # Vectorized bit interleaving: shape [N, bits] → sum over bits axis
+    bit_idx = np.arange(bits, dtype=np.int64)          # [bits]
+    x_bits = ((x[:, None] >> bit_idx) & 1) << (3 * bit_idx)       # [N, bits]
+    y_bits = ((y[:, None] >> bit_idx) & 1) << (3 * bit_idx + 1)   # [N, bits]
+    z_bits = ((z[:, None] >> bit_idx) & 1) << (3 * bit_idx + 2)   # [N, bits]
+    codes = x_bits.sum(axis=1) + y_bits.sum(axis=1) + z_bits.sum(axis=1)
     return np.argsort(codes)
 
 
@@ -43,7 +49,8 @@ def fps_downsample_indices(
 ) -> torch.Tensor:
     """
     Farthest Point Sampling with incremental min-distance tracking.
-    O(N * num_sample) instead of O(N * num_sample^2).
+    O(N * num_sample). Device-agnostic: runs on whatever device coords_xyz lives on.
+    传入 CUDA 张量时在 GPU 上执行，远快于强制移至 CPU。
     coords_xyz: [N, 3]. Returns long tensor of shape [num_sample].
     """
     N = coords_xyz.shape[0]
@@ -104,8 +111,8 @@ def encoding_indices_to_variable_length_sequence(
     print(f"[DEBUG varlen] batch_idx={batch_idx} N={N} (max_safe={max_safe_length})", flush=True)
     if N > max_safe_length:
         t0 = time.time()
-        xyz_cpu = xyz_b.cpu().float()
-        fps_idx = fps_downsample_indices(xyz_cpu, max_safe_length)
+        # 直接在原设备（GPU）上运行 FPS，避免 .cpu() 数据搬运开销
+        fps_idx = fps_downsample_indices(xyz_b.float(), max_safe_length)
         idx_b = idx_b[fps_idx]
         xyz_b = xyz_b[fps_idx]
         N = idx_b.shape[0]
@@ -120,12 +127,13 @@ def encoding_indices_to_variable_length_sequence(
 
 
 def variable_length_sequence_to_mesh_token_string(indices: np.ndarray) -> str:
-    """Convert variable-length index array to mesh token string (no padding here; batch will pad)."""
-    parts = ["<mesh_start>"]
-    for v in indices:
-        parts.append(f"<mesh_{int(v)}>")
-    parts.append("<mesh_end>")
-    return "".join(parts)
+    """Convert variable-length index array to mesh token string (no padding here; batch will pad).
+    使用 .tolist() 将 numpy 数组转为 Python list，避免逐元素 numpy 标量的格式化开销。
+    """
+    if len(indices) == 0:
+        return "<mesh_start><mesh_end>"
+    vals = indices.tolist()
+    return "<mesh_start>" + "".join(f"<mesh_{v}>" for v in vals) + "<mesh_end>"
 
 
 def batch_encoding_indices_to_variable_length_sequences(
