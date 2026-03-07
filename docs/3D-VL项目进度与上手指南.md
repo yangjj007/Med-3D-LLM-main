@@ -112,14 +112,16 @@ export PARALLEL_DEBUG=1
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export NCCL_DEBUG=INFO
 export NCCL_ASYNC_ERROR_HANDLING=1
-python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug.log
+python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml --log-file align_debug.log
 ```
+
+说明：`--log-file align_debug.log` 会将子进程的 stdout/stderr 实时写入该文件，且训练进程内发生的异常与 traceback 也会被追加到同一文件中；无需再使用 `2>&1 | tee`。
 
 若需要进一步看每层 patch 与梯度同步细节（日志非常大）：
 
 ```bash
 export PARALLEL_DEBUG_VERBOSE=1
-python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml 2>&1 | tee align_debug_verbose.log
+python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml --log-file align_debug_verbose.log
 ```
 
 ### 3.3 配置要点速查

@@ -1398,6 +1398,16 @@ if __name__ == "__main__":
             os.makedirs(os.path.dirname(err_path), exist_ok=True)
             with open(err_path, "w", encoding="utf-8") as f:
                 f.write(header + tb)
+            # 同时追加到 Launcher 指定的 --log-file，确保 align_debug.log 中有完整 traceback
+            align_log = os.environ.get("ALIGN_DEBUG_LOG")
+            if align_log:
+                try:
+                    with open(align_log, "a", encoding="utf-8") as f:
+                        f.write("\n" + "=" * 60 + "\n")
+                        f.write(f"[train_finetune] 异常已写入 {err_path}\n")
+                        f.write("=" * 60 + "\n" + header + tb)
+                except Exception:
+                    pass
     sys.excepthook = _save_error
     try:
         main()

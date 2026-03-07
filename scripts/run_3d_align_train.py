@@ -16,6 +16,7 @@
   python scripts/run_3d_align_train.py
   python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_length.yaml
   python scripts/run_3d_align_train.py --debug   # 单卡调试
+  python scripts/run_3d_align_train.py --config ... --log-file align_debug.log  # 报错与 traceback 写入该文件
 """
 
 import os
@@ -23,6 +24,7 @@ import sys
 import subprocess
 import argparse
 import socket
+import threading
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
@@ -76,6 +78,56 @@ def _detect_node_rank() -> int:
     return 0
 
 
+def _run_with_log(cmd, cwd, env, log_path):
+    """
+    运行 cmd，将 stdout/stderr 实时写入 log_path，并同时打印到当前 stdout。
+    若子进程非零退出，在 log 文件末尾追加报错摘要，再抛出 CalledProcessError。
+    """
+    log_path = os.path.normpath(os.path.join(cwd, log_path) if not os.path.isabs(log_path) else log_path)
+    os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+    env = env.copy()
+    env["ALIGN_DEBUG_LOG"] = os.path.abspath(log_path)
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        encoding="utf-8",
+        errors="replace",
+    )
+    lines_buffer = []
+    max_tail = 500
+
+    def read_and_tee():
+        nonlocal lines_buffer
+        with open(log_path, "w", encoding="utf-8") as f:
+            for line in proc.stdout:
+                lines_buffer.append(line)
+                if len(lines_buffer) > max_tail * 2:
+                    lines_buffer = lines_buffer[-max_tail:]
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                f.write(line)
+                f.flush()
+
+    t = threading.Thread(target=read_and_tee)
+    t.daemon = True
+    t.start()
+    proc.wait()
+    t.join(timeout=5)
+    if proc.returncode != 0:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 60 + "\n")
+            f.write(f"[Launcher] 子进程退出码: {proc.returncode}\n")
+            f.write("(若上方无完整 traceback，请查看 configs/train_error_*.txt)\n")
+            f.write("=" * 60 + "\n")
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Launch 3D-VL alignment training")
     parser.add_argument(
@@ -88,6 +140,12 @@ def main():
         "--debug",
         action="store_true",
         help="单卡调试模式（nproc=1），便于查看完整报错",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default="",
+        help="将子进程的 stdout/stderr 及报错、traceback 写入该文件（建议：align_debug.log）",
     )
     args = parser.parse_args()
     config_path = os.path.normpath(
@@ -183,7 +241,11 @@ def main():
             cmd.extend(["--vae_ckpt", vae_ckpt])
         print("Running:", " ".join(cmd))
         print("(若失败，报错会写入 configs/train_error_grank*.txt 和 configs/train_diag_rank*.txt)")
-        subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
+        if args.log_file:
+            print(f"(同时写入 --log-file: {args.log_file})")
+            _run_with_log(cmd, PROJECT_ROOT, env, args.log_file)
+        else:
+            subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
 
     else:
         # Legacy Accelerate mode (tp_size=1): write accelerate.yaml and launch
@@ -224,7 +286,11 @@ def main():
             cmd.extend(["--vae_ckpt", vae_ckpt])
         print("Running:", " ".join(cmd))
         print("(若失败，报错会写入 configs/train_error_grank*.txt 和 configs/train_diag_rank*.txt)")
-        subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
+        if args.log_file:
+            print(f"(同时写入 --log-file: {args.log_file})")
+            _run_with_log(cmd, PROJECT_ROOT, env, args.log_file)
+        else:
+            subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=True)
 
 
 if __name__ == "__main__":
