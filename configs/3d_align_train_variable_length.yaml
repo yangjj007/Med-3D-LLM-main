@@ -24,7 +24,7 @@ output_dir: "outputs_3d_align"
 # === 离散 + 变长 3D ===
 use_discrete_3d_tokens: true
 use_variable_length_3d_tokens: true
-max_safe_3d_length: 15000
+max_safe_3d_length: 12500
 coord_max_3d: 64
 max_length_variable: 16384
 reconstruction_ratio: 0.0
@@ -84,7 +84,7 @@ prompt: "Describe this 3D shape in one sentence:"
 
 # === 数据 ===
 max_samples: 0
-num_workers: 2   # DataLoader CPU worker 数（每个 GPU 进程独立创建 DataLoader）
+num_workers: 0   # DataLoader CPU worker 数（每个 GPU 进程独立创建 DataLoader）
                  # 说明：collate_fn（VAE Encode + FPS + Morton）在主进程执行，与 worker 无关。
                  # worker 仅负责预取 .npz → tensor（I/O 密集）。
                  # TP=8 时 dp_world=1，8 个 GPU 进程均加载相同数据：
