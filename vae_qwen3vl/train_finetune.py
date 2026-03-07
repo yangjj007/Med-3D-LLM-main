@@ -615,7 +615,7 @@ def main():
                 if os.path.isdir(tok_path):
                     tokenizer = AutoTokenizer.from_pretrained(tok_path, trust_remote_code=True)
                     if is_main_process:
-                        _print(f"Loaded tokenizer from warmup: {tok_path}")
+                        print(f"Loaded tokenizer from warmup: {tok_path}", flush=True)
                     break
             else:
                 tokenizer = AutoTokenizer.from_pretrained(args.vl_model, trust_remote_code=True)
@@ -700,9 +700,17 @@ def main():
                     # 可能被 FSDP/DP 包装，仅 main 加载并 broadcast 较复杂；这里各 rank 都加载同一文件
                     missing, unexpected = model.load_state_dict(ckpt, strict=False)
                     if is_main_process:
-                        _print(f"Loaded warmup embed+lm_head from {embed_ckpt} (missing={len(missing)}, unexpected={len(unexpected)})")
+                        print(
+                            f"Loaded warmup embed+lm_head from {embed_ckpt} "
+                            f"(missing={len(missing)}, unexpected={len(unexpected)})",
+                            flush=True,
+                        )
             elif is_main_process:
-                _print(f"[Warmup] No warmup_embed_lmhead*.pt in {warmup_dir}, SFT 使用当前初始化的 embed/lm_head")
+                print(
+                    f"[Warmup] No warmup_embed_lmhead*.pt in {warmup_dir}, "
+                    "SFT 使用当前初始化的 embed/lm_head",
+                    flush=True,
+                )
 
         latent_dim = model.projector.latent_dim if model.projector is not None else 16
 
