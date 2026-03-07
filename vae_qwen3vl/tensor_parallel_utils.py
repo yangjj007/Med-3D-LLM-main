@@ -471,3 +471,27 @@ def save_lora_tp(model: nn.Module, save_dir: str, is_main: bool) -> None:
             fallback_path = os.path.join(save_dir, "vl_model_state.pt")
             torch.save(vl_sd, fallback_path)
             print(f"[TP] (No lora_ keys found) Saved vl_model state → {fallback_path}", flush=True)
+
+
+def save_warmup_embed_lmhead_tp(model: nn.Module, save_path: str, is_main: bool) -> None:
+    """
+    Save only embedding layer and lm_head from vl_model (for warmup stage, discrete mode).
+    Used so SFT can load these weights and continue from warmup. All ranks must call.
+    """
+    full_sd = gather_full_state_dict(model)
+    if is_main:
+        # Keep keys under vl_model that are embed_tokens, embedding, or lm_head
+        embed_lmhead_sd = {
+            k: v for k, v in full_sd.items()
+            if k.startswith("vl_model.")
+            and (
+                "embed_tokens" in k
+                or "embedding" in k
+                or "lm_head" in k
+            )
+        }
+        if embed_lmhead_sd:
+            torch.save(embed_lmhead_sd, save_path)
+            print(f"[TP] Saved warmup embed+lm_head ({len(embed_lmhead_sd)} keys) → {save_path}", flush=True)
+        else:
+            print(f"[TP] WARN: no embed_tokens/embedding/lm_head keys found in state_dict, skip save", flush=True)

@@ -156,8 +156,8 @@ python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_le
 
 ### 4.4 训练与评估
 
-- 离散 run 的产出是 **tokenizer（含 mesh 词条）** + 可选 **LoRA**，**没有** `projector_final.pt`；评估脚本通过是否存在 `tokenizer_final` 判断离散 run。
-- 两阶段：先 **warmup**（只训 embed + lm_head），再 **sft**（LoRA + embed）；Stage2 可从 Stage1 的 tokenizer 继续，LoRA 按需加载。
+- 离散 run 的产出是 **tokenizer（含 mesh 词条）** + **warmup_embed_lmhead_*.pt**（embed 层与 lm_head）+ 可选 **LoRA**，**没有** `projector_final.pt`；评估脚本通过是否存在 `tokenizer_final` 判断离散 run。
+- 两阶段：先 **warmup**（只训 embed + lm_head，会保存 tokenizer 与 warmup_embed_lmhead_epochN.pt / warmup_embed_lmhead_final.pt），再 **sft**（LoRA + embed）。进入 SFT 时在配置中设 `training_stage: "sft"` 并设置 `warmup_output_dir` 为 warmup 输出目录（如 `outputs_3d_align/ep1_lr1e-4_bs1_nall_lora16_20260306_153214`），脚本会自动从该目录加载 tokenizer 与 embed/lm_head 权重。
 
 ### 4.5 loss=NaN/Inf 排查与解决
 
@@ -194,6 +194,6 @@ python scripts/run_3d_align_train.py --config configs/3d_align_train_variable_le
 ## 六、后续可做（可选）
 
 - **ZeRO-3 / CPU offload**：显存仍不足时可在 DeepSpeed 配置中开 Stage-3 或 offload。
-- **从 Stage1 继续 Stage2**：当前 Stage2 可从基座重新加载再挂 LoRA；若需从 Stage1 ckpt 连续训，需在脚本中加「加载上一阶段 ckpt」逻辑。
+- **从 Stage1 继续 Stage2**：已支持。Warmup 会保存 tokenizer 与 warmup_embed_lmhead_*.pt；SFT 时在配置中设置 `warmup_output_dir` 指向 warmup 输出目录即可自动加载。
 - **VAE 输出 512³**：若更换为「无下采样、输出 512³ 坐标」的 VAE，只需将 `coord_max_3d` 改为 512，并确认数据与 FPS/Morton 的数值范围一致。
 

@@ -346,6 +346,8 @@ def main():
     parser.add_argument("--max_length_variable", type=int, default=32768, help="Max token length when variable-length 3D (avoid truncating 8k~12k mesh)")
     parser.add_argument("--reconstruction_ratio", type=float, default=0.0, help="Fraction of samples as 3D reconstruction task (0..1), only when use_discrete_3d_tokens")
     parser.add_argument("--training_stage", type=str, default="sft", choices=["warmup", "sft"], help="warmup = only embed+lm_head; sft = LoRA + embed")
+    parser.add_argument("--warmup_output_dir", type=str, default=None,
+                        help="SFT 时从 warmup 输出目录加载 tokenizer 与 embed/lm_head；留空则从 vl_model 重新建词表")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation (recommend 4~8 for variable-length with batch_size=1)")
     parser.add_argument("--use_flash_attn_2", action="store_true", help="Use Flash Attention 2 for long sequences (variable-length)")
     parser.add_argument("--use_gradient_checkpointing", action="store_true", help="Gradient checkpointing to save VRAM (variable-length)")
@@ -394,7 +396,7 @@ def main():
         args, _ = parser.parse_known_args(remaining if remaining else [])
 
     # 兜底：config 已加载但 overrides 可能未覆盖（如 known_keys 差异），显式补齐关键参数
-    for key in ("vl_model", "vae_config", "vae_ckpt", "data_dir", "output_dir"):
+    for key in ("vl_model", "vae_config", "vae_ckpt", "data_dir", "output_dir", "warmup_output_dir"):
         if key in cfg and getattr(args, key, None) is None and cfg[key]:
             setattr(args, key, cfg[key])
 
@@ -603,9 +605,25 @@ def main():
         from transformers import AutoTokenizer
         from vae_qwen3vl import Qwen3VLWith3DBranch, add_mesh_tokens_to_tokenizer, resize_token_embeddings_and_init_mesh
 
-        tokenizer = AutoTokenizer.from_pretrained(args.vl_model, trust_remote_code=True)
-        if use_discrete:
-            add_mesh_tokens_to_tokenizer(tokenizer)
+        # SFT 时从 warmup 输出加载已扩展的 tokenizer；否则从 vl_model 建词表
+        warmup_dir = getattr(args, "warmup_output_dir", None) or os.environ.get("WARMUP_OUTPUT_DIR")
+        if warmup_dir and not os.path.isabs(warmup_dir):
+            warmup_dir = os.path.normpath(os.path.join(PROJECT_ROOT, warmup_dir))
+        if use_discrete and warmup_dir and os.path.isdir(warmup_dir):
+            for tok_name in ("tokenizer_final", "tokenizer_epoch0"):
+                tok_path = os.path.join(warmup_dir, tok_name)
+                if os.path.isdir(tok_path):
+                    tokenizer = AutoTokenizer.from_pretrained(tok_path, trust_remote_code=True)
+                    if is_main_process:
+                        _print(f"Loaded tokenizer from warmup: {tok_path}")
+                    break
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(args.vl_model, trust_remote_code=True)
+                add_mesh_tokens_to_tokenizer(tokenizer)
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(args.vl_model, trust_remote_code=True)
+            if use_discrete:
+                add_mesh_tokens_to_tokenizer(tokenizer)
 
         vl_kwargs = {}
         if getattr(args, "use_flash_attn_2", False):
@@ -659,6 +677,32 @@ def main():
             model.vl_model.config.use_cache = False
         if use_discrete:
             resize_token_embeddings_and_init_mesh(model, tokenizer)
+
+        # SFT 时从 warmup 输出加载已训练的 embed_tokens / lm_head
+        if use_discrete and training_stage == "sft" and warmup_dir and os.path.isdir(warmup_dir):
+            embed_ckpt = os.path.join(warmup_dir, "warmup_embed_lmhead_final.pt")
+            if not os.path.isfile(embed_ckpt):
+                import glob
+                candidates = glob.glob(os.path.join(warmup_dir, "warmup_embed_lmhead_epoch*.pt"))
+                if candidates:
+                    def _epoch_num(p):
+                        b = os.path.basename(p)
+                        import re
+                        m = re.search(r"warmup_embed_lmhead_epoch(\d+)\.pt", b)
+                        return int(m.group(1)) if m else -1
+                    embed_ckpt = max(candidates, key=_epoch_num)
+            if os.path.isfile(embed_ckpt):
+                try:
+                    ckpt = torch.load(embed_ckpt, map_location="cpu", weights_only=True)
+                except TypeError:
+                    ckpt = torch.load(embed_ckpt, map_location="cpu")
+                if ckpt:
+                    # 可能被 FSDP/DP 包装，仅 main 加载并 broadcast 较复杂；这里各 rank 都加载同一文件
+                    missing, unexpected = model.load_state_dict(ckpt, strict=False)
+                    if is_main_process:
+                        _print(f"Loaded warmup embed+lm_head from {embed_ckpt} (missing={len(missing)}, unexpected={len(unexpected)})")
+            elif is_main_process:
+                _print(f"[Warmup] No warmup_embed_lmhead*.pt in {warmup_dir}, SFT 使用当前初始化的 embed/lm_head")
 
         latent_dim = model.projector.latent_dim if model.projector is not None else 16
 
@@ -1302,13 +1346,16 @@ def main():
             _barrier()
             ckpt_path = os.path.join(args.output_dir, f"projector_epoch{epoch}.pt")
             if use_tp:
-                from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp
+                from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp, save_warmup_embed_lmhead_tp
                 if _model.projector is not None:
                     save_projector_tp(model, ckpt_path, is_main=is_main_process)
                 if use_discrete and is_main_process:
                     tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
                     tokenizer.save_pretrained(tok_path)
                     _print(f"Saved tokenizer to {tok_path}")
+                if use_discrete and training_stage == "warmup":
+                    warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
+                    save_warmup_embed_lmhead_tp(model, warmup_embed_path, is_main=is_main_process)
                 if use_lora_applied:
                     lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
                     save_lora_tp(model, lora_dir, is_main=is_main_process)
@@ -1323,6 +1370,17 @@ def main():
                         tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
                         tokenizer.save_pretrained(tok_path)
                         _print(f"Saved tokenizer to {tok_path}")
+                    if use_discrete and training_stage == "warmup":
+                        vl_sd = raw_model.vl_model.state_dict()
+                        embed_lmhead_sd = {
+                            "vl_model." + k: v.cpu().clone()
+                            for k, v in vl_sd.items()
+                            if "embed_tokens" in k or "embedding" in k or "lm_head" in k
+                        }
+                        if embed_lmhead_sd:
+                            warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
+                            torch.save(embed_lmhead_sd, warmup_embed_path)
+                            _print(f"Saved warmup embed+lm_head ({len(embed_lmhead_sd)} keys) → {warmup_embed_path}")
                     if use_lora_applied:
                         lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
                         raw_model.vl_model.save_pretrained(lora_dir)
@@ -1335,11 +1393,13 @@ def main():
         _barrier()
         final_proj_path = os.path.join(args.output_dir, "projector_final.pt")
         if use_tp:
-            from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp
+            from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp, save_warmup_embed_lmhead_tp
             if _model.projector is not None:
                 save_projector_tp(model, final_proj_path, is_main=is_main_process)
             if use_discrete and is_main_process:
                 tokenizer.save_pretrained(os.path.join(args.output_dir, "tokenizer_final"))
+            if use_discrete and training_stage == "warmup":
+                save_warmup_embed_lmhead_tp(model, os.path.join(args.output_dir, "warmup_embed_lmhead_final.pt"), is_main=is_main_process)
             if use_lora_applied:
                 save_lora_tp(model, os.path.join(args.output_dir, "lora_final"), is_main=is_main_process)
                 _print("Saved LoRA final.")
@@ -1350,6 +1410,16 @@ def main():
                     torch.save(raw_model.projector.state_dict(), final_proj_path)
                 if use_discrete:
                     tokenizer.save_pretrained(os.path.join(args.output_dir, "tokenizer_final"))
+                if use_discrete and training_stage == "warmup":
+                    vl_sd = raw_model.vl_model.state_dict()
+                    embed_lmhead_sd = {
+                        "vl_model." + k: v.cpu().clone()
+                        for k, v in vl_sd.items()
+                        if "embed_tokens" in k or "embedding" in k or "lm_head" in k
+                    }
+                    if embed_lmhead_sd:
+                        torch.save(embed_lmhead_sd, os.path.join(args.output_dir, "warmup_embed_lmhead_final.pt"))
+                        _print("Saved warmup embed+lm_head → warmup_embed_lmhead_final.pt")
                 if use_lora_applied:
                     lora_final_dir = os.path.join(args.output_dir, "lora_final")
                     raw_model.vl_model.save_pretrained(lora_final_dir)
