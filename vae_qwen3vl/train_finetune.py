@@ -1787,6 +1787,22 @@ def main():
                     if is_main_process:
                         _print(f"Saved LoRA final to {lora_final_dir} (with adapter_config.json)")
         _dlog("final_checkpoint leave", all_ranks=True, force=getattr(args, "debug_sync_points", False))
+    except Exception as e:
+        if is_main_process:
+            print(f"Training failed with error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+        raise
+    finally:
+        if metrics_file is not None:
+            metrics_file.close()
+        # Restore stdout
+        if '_log_tee' in locals():
+            sys.stdout = _orig_stdout
+            _log_tee.close()
+        # Cleanup distributed
+        if use_tp and dist.is_initialized():
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":
