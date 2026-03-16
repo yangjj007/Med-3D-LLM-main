@@ -28,9 +28,9 @@ max_safe_3d_length: 15000
 coord_max_3d: 64
 max_length_variable: 16384
 reconstruction_ratio: 0.0
-training_stage: "warmup"
+training_stage: "sft"
 # SFT 阶段：改为 training_stage: "sft" 并指定 warmup 输出目录以加载 tokenizer 与 embed/lm_head
-# warmup_output_dir: "outputs_3d_align/ep1_lr1e-4_bs1_nall_lora16_20260306_153214"
+warmup_output_dir: "/yangjunjie/Med-3D-LLM-main/outputs_3d_align/ep1_lr1e-4_bs1_nall_lora16_20260307_072046"
 
 # === 张量并行 + 序列并行 ===
 # TP=8: 8 GPU 上全量张量并行（2 机各 4 卡，DP=1）

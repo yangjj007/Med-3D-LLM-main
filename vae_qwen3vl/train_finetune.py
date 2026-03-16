@@ -418,10 +418,12 @@ def _load_checkpoint_state(
 
     # 【修复】延迟导入，避免模块加载时的循环依赖
     if use_tp:
-        from vae_qwen3vl.tensor_parallel_utils import (
-            load_projector_tp, 
-            load_lora_tp,  # 在函数内部导入
-            load_warmup_embed_lmhead_tp
+        # 仅用于确保模块可用；具体函数调用处仍单独 try-import，避免某些环境缺函数导致直接崩溃
+        from vae_qwen3vl.tensor_parallel_utils import (  # noqa: F401
+            load_projector_tp,
+            load_lora_tp,
+            load_warmup_embed_lmhead_tp,
+        )
 
     
     # 1. 尝试加载 Projector (仅当文件存在时)
