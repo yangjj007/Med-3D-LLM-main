@@ -8,7 +8,9 @@ import argparse
 import os
 import time
 import math
+import glob
 from datetime import timedelta
+from typing import Optional, Tuple
 
 # 确保 3D-VL 训练使用 torchsparse（新终端直接 python 运行时不会走 shell 脚本的 export）
 os.environ.setdefault("SPARSE_BACKEND", "torchsparse")
@@ -309,6 +311,204 @@ def _load_config(config_path: str, project_root: str) -> dict:
     return out
 
 
+def _find_latest_ckpt_epoch(ckpt_dir: str) -> Optional[int]:
+    """寻找目录下最大的 epoch 编号 (检查 lora 文件夹或 projector 文件)"""
+    import re
+    max_epoch = -1
+    if not os.path.isdir(ckpt_dir):
+        return None
+    
+    # 优先找 lora 文件夹，因为这是 LoRA 模式的核心
+    for d in os.listdir(ckpt_dir):
+        # 匹配 lora_epoch1 或 lora_epoch12
+        match = re.match(r"lora_epoch(\d+)", d)
+        if match:
+            max_epoch = max(max_epoch, int(match.group(1)))
+            
+    # 如果没找到 lora，再尝试找 projector 文件作为 fallback
+    if max_epoch == -1:
+        for f in os.listdir(ckpt_dir):
+            match = re.match(r"projector_epoch(\d+)\.pt", f)
+            if match:
+                max_epoch = max(max_epoch, int(match.group(1)))
+                
+    return max_epoch if max_epoch >= 0 else None
+
+def _save_lora_checkpoint(model, lora_dir, is_main_process, use_tp=False):
+    """
+    统一保存 LoRA 权重和配置，确保 adapter_config.json 存在。
+    【修复】无论 TP 还是非 TP 模式，都强制保存 adapter_config.json
+    """
+    import os
+    import torch
+    import json
+    from peft import PeftModel
+    
+    os.makedirs(lora_dir, exist_ok=True)
+    
+    # 1. 保存权重
+    if use_tp:
+        # TP 模式下使用专用工具保存权重
+        try:
+            from vae_qwen3vl.tensor_parallel_utils import save_lora_tp
+            save_lora_tp(model, lora_dir, is_main=is_main_process)
+        except ImportError:
+            if is_main_process:
+                print(f"[Warn] save_lora_tp not found, skipping TP weight save.", flush=True)
+    else:
+        # 非 TP 模式，尝试 unwrap 后保存
+        raw_model = getattr(model, "module", model)
+        if hasattr(raw_model, "vl_model") and isinstance(raw_model.vl_model, PeftModel):
+            raw_model.vl_model.save_pretrained(lora_dir)
+        else:
+            if is_main_process:
+                print(f"[Warn] Model is not a PeftModel or vl_model missing, skipping standard save.", flush=True)
+    
+    # 2. 【关键修复】强制保存 adapter_config.json
+    # 无论 TP 还是非 TP，PEFT 加载都需要这个文件。
+    if is_main_process:
+        try:
+            # 获取 PEFT 模型对象 (TP 模式下 model.vl_model 通常仍持有 config 对象)
+            peft_model = getattr(model, "vl_model", None)
+            if peft_model is not None and hasattr(peft_model, "peft_config"):
+                # peft_config 是一个字典，默认 key 为 "default"
+                config_obj = peft_model.peft_config.get("default", None)
+                if config_obj:
+                    config_path = os.path.join(lora_dir, "adapter_config.json")
+                    # 直接保存配置对象为 JSON
+                    config_dict = config_obj.to_dict()
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        json.dump(config_dict, f, indent=2)
+                    print(f"[Check] Saved adapter_config.json to {config_path}", flush=True)
+                else:
+                    print(f"[Warn] peft_config['default'] not found in model, config not saved.", flush=True)
+            else:
+                print(f"[Warn] Cannot access peft_config for saving JSON.", flush=True)
+        except Exception as e:
+            print(f"[Error] Failed to save adapter_config.json: {e}", flush=True)
+            # 【兜底】如果 peft_config 访问失败，尝试从模型属性推断并创建最小 config
+            try:
+                config_path = os.path.join(lora_dir, "adapter_config.json")
+                fallback_config = {
+                    "base_model_name_or_path": getattr(model, "base_model_name_or_path", "unknown"),
+                    "r": getattr(model, "r", 8),
+                    "lora_alpha": getattr(model, "lora_alpha", 16),
+                    "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
+                    "lora_dropout": 0.05,
+                    "bias": "none",
+                    "task_type": "CAUSAL_LM"
+                }
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(fallback_config, f, indent=2)
+                print(f"[Fallback] Created adapter_config.json with inferred config.", flush=True)
+            except Exception as e2:
+                print(f"[Error] Fallback config save also failed: {e2}", flush=True)
+
+def _load_checkpoint_state(
+    model, optimizer, scheduler, ckpt_dir: str, epoch: int,
+    is_main_process: bool, use_tp: bool, dp_mesh=None, accelerator=None, **kwargs
+) -> Tuple[int, int]:
+    """
+    从断点加载权重。增强 LoRA 配置检查。
+    【修复】加载前验证 adapter_config.json 存在，缺失时尝试修复
+    """
+    import json
+    import os
+    import torch
+
+    # 【修复】延迟导入，避免模块加载时的循环依赖
+    if use_tp:
+        from vae_qwen3vl.tensor_parallel_utils import (
+            load_projector_tp, 
+            load_lora_tp,  # 在函数内部导入
+            load_warmup_embed_lmhead_tp
+
+    
+    # 1. 尝试加载 Projector (仅当文件存在时)
+    proj_ckpt = os.path.join(ckpt_dir, f"projector_epoch{epoch}.pt")
+    if os.path.isfile(proj_ckpt):
+        if use_tp:
+            try:
+                from vae_qwen3vl.tensor_parallel_utils import load_projector_tp
+                load_projector_tp(model, proj_ckpt, is_main=is_main_process)
+            except ImportError:
+                if is_main_process:
+                    print(f"[Warn] load_projector_tp not found.", flush=True)
+        else:
+            raw_model = getattr(model, "module", model)
+            if hasattr(raw_model, "projector") and raw_model.projector is not None:
+                ckpt = torch.load(proj_ckpt, map_location="cpu")
+                raw_model.projector.load_state_dict(ckpt, strict=False)
+                if is_main_process:
+                    print(f"[Resume] Projector loaded from {proj_ckpt}", flush=True)
+    else:
+        if is_main_process:
+            print(f"[Resume Info] No projector found at {proj_ckpt}, skipping.", flush=True)
+    
+    # 2. 核心：加载 LoRA 权重
+    lora_dir = os.path.join(ckpt_dir, f"lora_epoch{epoch}")
+    if os.path.isdir(lora_dir):
+        # 【检查】确保 adapter_config.json 存在
+        config_path = os.path.join(lora_dir, "adapter_config.json")
+        if not os.path.isfile(config_path):
+            if is_main_process:
+                print(f"[Warn] {config_path} missing! PEFT may fail to load.", flush=True)
+                # 【尝试修复】检查是否有 adapter_config.json.bak 或其他变体
+                for alt_name in ["adapter_config.json.bak", "config.json", "lora_config.json"]:
+                    alt_path = os.path.join(lora_dir, alt_name)
+                    if os.path.isfile(alt_path):
+                        import shutil
+                        shutil.copy(alt_path, config_path)
+                        print(f"[Fix] Copied {alt_path} -> {config_path}", flush=True)
+                        break
+        
+        if use_tp:
+            try:
+                from vae_qwen3vl.tensor_parallel_utils import load_lora_tp
+                load_lora_tp(model, lora_dir, is_main=is_main_process)
+                if is_main_process:
+                    print(f"[Resume] LoRA weights loaded (TP) from {lora_dir}", flush=True)
+            except ImportError:
+                if is_main_process:
+                    print(f"[Warn] load_lora_tp not found.", flush=True)
+        else:
+            raw_model = getattr(model, "module", model)
+            if hasattr(raw_model.vl_model, "load_adapter"):
+                try:
+                    raw_model.vl_model.load_adapter(lora_dir, "default", is_trainable=True)
+                    if is_main_process:
+                        print(f"[Resume] LoRA weights loaded (PEFT) from {lora_dir}", flush=True)
+                except Exception as e:
+                    if is_main_process:
+                        print(f"[Error] Failed to load LoRA adapter: {e}", flush=True)
+            else:
+                if is_main_process:
+                    print(f"[Warn] model.vl_model does not have load_adapter.", flush=True)
+    else:
+        if is_main_process:
+            print(f"[Resume Info] No LoRA dir found at {lora_dir}, skipping.", flush=True)
+    
+    # 3. 加载训练状态 (Optimizer/Scheduler)
+    opt_path = os.path.join(ckpt_dir, f"optimizer_epoch{epoch}.pt")
+    if os.path.isfile(opt_path) and optimizer is not None:
+        optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
+        if is_main_process:
+            print(f"[Resume] Optimizer state loaded.", flush=True)
+    
+    # 4. 获取步数 (用于恢复进度条)
+    global_step = 0
+    metrics_path = os.path.join(ckpt_dir, "training_metrics.jsonl")
+    if os.path.isfile(metrics_path):
+        with open(metrics_path, "r") as f:
+            lines = f.readlines()
+            if lines:
+                try:
+                    global_step = json.loads(lines[-1]).get("step", 0)
+                except:
+                    pass
+    
+    return epoch + 1, global_step
+
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune 3D projector on Qwen2-VL / Qwen3-VL")
     parser.add_argument("--config", type=str, default=None, help="Path to YAML config (training + paths)")
@@ -358,6 +558,8 @@ def main():
     parser.add_argument("--sequence_parallel_size", type=int, default=1,
                         help="Sequence parallel degree (1=disabled). TP+SP hybrid: "
                              "e.g. 4 GPUs with tp=2, sp=2 -> DP=1, SP=2, TP=2.")
+    parser.add_argument("--debug_caption", action="store_true",
+                    help="Print training sample details (caption, sample_id, token lengths) to log")
     parser.add_argument("--debug_vl_forward", action="store_true",
                         help="打印 VL forward 输入的详细 debug 信息（combined_embeds 形状等）")
     parser.add_argument("--debug_qwen3vl_patch", action="store_true",
@@ -379,6 +581,10 @@ def main():
     # torchrun/accelerate 可能注入 --local-rank，用 parse_known_args 避免未知参数导致失败
     parser.add_argument("--local_rank", "--local-rank", type=int, default=-1,
                         help="Local rank (injected by torchrun, prefer env LOCAL_RANK)")
+    parser.add_argument("--resume_from", type=str, default=None, 
+                    help="Path to checkpoint directory to resume training (e.g., outputs_3d_align/ep3_...)")
+    parser.add_argument("--resume_ckpt_epoch", type=int, default=None,
+                    help="Specific epoch to resume from (if None, auto-find latest in resume_from)")
     args, remaining = parser.parse_known_args()
     known_keys = {a.dest for a in parser._actions if a.dest != "help"}
 
@@ -389,6 +595,9 @@ def main():
     cfg = {}
     if config_path and os.path.isfile(config_path):
         cfg = _load_config(config_path, PROJECT_ROOT)
+        # 在现有 config 加载逻辑后添加
+        if "resume_from" in cfg and getattr(args, "resume_from", None) is None and cfg["resume_from"]:
+            args.resume_from = cfg["resume_from"] if os.path.isabs(cfg["resume_from"]) else os.path.normpath(os.path.join(PROJECT_ROOT, cfg["resume_from"]))
         overrides = {k: v for k, v in cfg.items() if not k.startswith("_") and k in known_keys}
         parser.set_defaults(**overrides)
         args, _ = parser.parse_known_args(remaining)
@@ -678,33 +887,57 @@ def main():
         if use_discrete:
             resize_token_embeddings_and_init_mesh(model, tokenizer)
 
-        # SFT 时从 warmup 输出加载已训练的 embed_tokens / lm_head
-        if use_discrete and training_stage == "sft" and warmup_dir and os.path.isdir(warmup_dir):
-            embed_ckpt = os.path.join(warmup_dir, "warmup_embed_lmhead_final.pt")
-            if not os.path.isfile(embed_ckpt):
-                import glob
-                candidates = glob.glob(os.path.join(warmup_dir, "warmup_embed_lmhead_epoch*.pt"))
-                if candidates:
+        # SFT 时从 warmup 输出 或 resume_from 加载已训练的 embed_tokens / lm_head
+        # 优先级：resume_from > warmup_output_dir
+        if use_discrete and training_stage == "sft":
+            # 确定优先加载的目录
+            embed_source_dir = None
+            if getattr(args, "resume_from", None) and os.path.isdir(args.resume_from):
+                # 检查 resume_from 中是否有 embed/lm_head 权重
+                resume_embed_candidates = glob.glob(os.path.join(args.resume_from, "warmup_embed_lmhead_epoch*.pt"))
+                if resume_embed_candidates:
                     def _epoch_num(p):
                         b = os.path.basename(p)
                         import re
                         m = re.search(r"warmup_embed_lmhead_epoch(\d+)\.pt", b)
                         return int(m.group(1)) if m else -1
-                    embed_ckpt = max(candidates, key=_epoch_num)
-            if os.path.isfile(embed_ckpt):
+                    embed_ckpt = max(resume_embed_candidates, key=_epoch_num)
+                    embed_source_dir = args.resume_from
+                    if is_main_process:
+                        print(f"[Embed Source] Using embed/lm_head from resume_from: {embed_ckpt}", flush=True)
+            
+            # 如果 resume_from 中没有，再检查 warmup_output_dir
+            if embed_source_dir is None and warmup_dir and os.path.isdir(warmup_dir):
+                embed_ckpt = os.path.join(warmup_dir, "warmup_embed_lmhead_final.pt")
+                if not os.path.isfile(embed_ckpt):
+                    candidates = glob.glob(os.path.join(warmup_dir, "warmup_embed_lmhead_epoch*.pt"))
+                    if candidates:
+                        def _epoch_num(p):
+                            b = os.path.basename(p)
+                            import re
+                            m = re.search(r"warmup_embed_lmhead_epoch(\d+)\.pt", b)
+                            return int(m.group(1)) if m else -1
+                        embed_ckpt = max(candidates, key=_epoch_num)
+                if os.path.isfile(embed_ckpt):
+                    embed_source_dir = warmup_dir
+                    if is_main_process:
+                        print(f"[Embed Source] Using embed/lm_head from warmup_output_dir: {embed_ckpt}", flush=True)
+            
+            # 执行加载
+            if embed_source_dir and os.path.isfile(embed_ckpt):
                 try:
                     ckpt = torch.load(embed_ckpt, map_location="cpu", weights_only=True)
                 except TypeError:
                     ckpt = torch.load(embed_ckpt, map_location="cpu")
                 if ckpt:
-                    # 可能被 FSDP/DP 包装，仅 main 加载并 broadcast 较复杂；这里各 rank 都加载同一文件
                     missing, unexpected = model.load_state_dict(ckpt, strict=False)
                     if is_main_process:
                         print(
-                            f"Loaded warmup embed+lm_head from {embed_ckpt} "
+                            f"Loaded embed+lm_head from {embed_ckpt} "
                             f"(missing={len(missing)}, unexpected={len(unexpected)})",
                             flush=True,
                         )
+                        
             elif is_main_process:
                 print(
                     f"[Warmup] No warmup_embed_lmhead*.pt in {warmup_dir}, "
@@ -949,7 +1182,7 @@ def main():
         _debug_all_ranks = os.environ.get("DEBUG_MEMORY_ALL_RANKS", "0") == "1" or (use_tp and debug_memory)
         if _debug_all_ranks and "DEBUG_MEMORY_ALL_RANKS" not in os.environ:
             os.environ["DEBUG_MEMORY_ALL_RANKS"] = "1"  # 让 model 内 forward hooks 也打印所有 rank
-
+            
         def _print(*a, **kw):
             if is_main_process:
                 kw.setdefault("flush", True)
@@ -961,6 +1194,58 @@ def main():
             if _debug_all_ranks or is_main_process:
                 print(*a, **kw)
 
+        def _print_caption_debug(
+            *,
+            epoch_idx: int,
+            step_idx: int,
+            batch_dict: dict,
+            tokenizer,
+            max_samples: int = 4,
+        ) -> None:
+            """打印训练样本的 caption 详细信息（仅当 debug_caption=True 时）"""
+            if not getattr(args, "debug_caption", False):
+                return
+            
+            input_ids = batch_dict.get("input_ids")
+            labels = batch_dict.get("labels")
+            attention_mask = batch_dict.get("attention_mask")
+            
+            if input_ids is None:
+                return
+            
+            batch_size = input_ids.shape[0]
+            samples_to_show = min(batch_size, max_samples)
+            
+            _print_mem(f"[CAPTION_DBG] {_rank_prefix()} ep={epoch_idx} step={step_idx} batch_size={batch_size}")
+            
+            for i in range(samples_to_show):
+                sample_ids = input_ids[i].detach().cpu().tolist()
+                sample_labels = labels[i].detach().cpu().tolist() if labels is not None else None
+                sample_mask = attention_mask[i].detach().cpu().tolist() if attention_mask is not None else None
+                
+                # 解码文本
+                try:
+                    decoded_full = tokenizer.decode(sample_ids, skip_special_tokens=False)
+                    decoded_clean = tokenizer.decode(sample_ids, skip_special_tokens=True)
+                except Exception as e:
+                    decoded_full = f"<decode_error: {e}>"
+                    decoded_clean = decoded_full
+                
+                # 统计有效 label token
+                valid_count = 0
+                if sample_labels is not None:
+                    valid_count = sum(1 for l in sample_labels if l != -100)
+                
+                # 尝试获取 sample_id（如果 batch 中有）
+                sample_id_str = batch_dict.get("sample_id", [f"sample_{i}"])[i] if isinstance(batch_dict.get("sample_id"), list) else f"sample_{i}"
+                
+                _print_mem(
+                    f"[CAPTION_DBG]   sample[{i}] id={sample_id_str} "
+                    f"seq_len={len(sample_ids)} valid_labels={valid_count} "
+                    f"mask_sum={sum(sample_mask) if sample_mask else -1}"
+                )
+                _print_mem(f"[CAPTION_DBG]     text_preview={decoded_clean[:200]}...")
+
         def _barrier():
             t0 = time.time()
             if getattr(args, "debug_sync_points", False):
@@ -971,7 +1256,7 @@ def main():
                 accelerator.wait_for_everyone()
             if getattr(args, "debug_sync_points", False):
                 _dlog(f"barrier leave waited={time.time() - t0:.3f}s", all_ranks=True, force=True)
-
+                
         def _should_log_loss(step_idx: int, valid_tokens: int) -> bool:
             return bool(getattr(args, "debug_loss", False) or step_idx < 5 or valid_tokens == 0)
 
@@ -1127,9 +1412,54 @@ def main():
         if debug_memory:
             setattr(_model, "_debug_memory_fine", True)
         global_step = 0
+
+        # === 断点续训逻辑 ===
+        start_epoch = 0
+        resumed_global_step = 0
+        if getattr(args, "resume_from", None) and os.path.isdir(args.resume_from):
+            resume_epoch = args.resume_ckpt_epoch
+            if resume_epoch is None:
+                resume_epoch = _find_latest_ckpt_epoch(args.resume_from)
+            if resume_epoch is not None:
+                if is_main_process:
+                    print(f"[Resume] Loading checkpoint from epoch {resume_epoch} in {args.resume_from}", flush=True)
+                start_epoch, resumed_global_step = _load_checkpoint_state(
+                    model, opt, scheduler, args.resume_from,
+                    epoch=resume_epoch, is_main_process=is_main_process,
+                    use_tp=use_tp, dp_mesh=dp_mesh, accelerator=accelerator
+                )
+                if is_main_process:
+                    print(f"[Resume] Resuming from epoch={start_epoch}, global_step={resumed_global_step}", flush=True)
+                _barrier()  # 确保所有进程同步
+                
+        # === 断点续训逻辑结束 ===
+        _barrier()  # 确保所有进程同步
+
+        # 【新增】在 epoch1 开始前保存初始完整权重（便于调试和恢复）
+        if is_main_process and use_lora_applied:
+            init_lora_dir = os.path.join(args.output_dir, "lora_epoch0")
+            os.makedirs(init_lora_dir, exist_ok=True)
+
+            # 保存 LoRA 权重（使用修复后的函数）
+            _save_lora_checkpoint(model, init_lora_dir, is_main_process=True, use_tp=use_tp)
+
+            # 同时保存训练参数配置
+            with open(os.path.join(init_lora_dir, "training_args.json"), "w") as f:
+                json.dump(vars(args), f, indent=2)
+            _print(f"[Init] Saved initial LoRA weights to {init_lora_dir}")
+            _print(f"[Init] Saved training_args.json")
+
+            # 【验证】检查 adapter_config.json 是否存在
+            config_check_path = os.path.join(init_lora_dir, "adapter_config.json")
+            if os.path.isfile(config_check_path):
+                _print(f"[Init] [OK] adapter_config.json verified at {config_check_path}")
+            else:
+                _print(f"[Init] [WARN] adapter_config.json NOT found at {config_check_path}")
+
         # 训练指标记录（仅 main process），用于可视化
         metrics_path = os.path.join(args.output_dir, "training_metrics.jsonl")
         metrics_file = open(metrics_path, "w", encoding="utf-8") if is_main_process else None
+        
         grad_clip = getattr(args, "grad_clip", 0.0)
         # TP+FSDP: clip_grad_norm_ 会触发 "DTensor does not support cross-mesh operation"
         # (aten._foreach_norm)，已知限制。强制禁用 grad_clip 以避免崩溃。
@@ -1145,11 +1475,13 @@ def main():
         _accum_count = 0
         opt.zero_grad()  # zero once before the accumulation loop
 
-        for epoch in range(args.epochs):
+        for epoch in range(start_epoch, args.epochs):
             _epoch_t0 = time.time()
-            # Update DistributedSampler epoch so shuffle is different each epoch
-            if use_tp and hasattr(dataloader, "sampler") and hasattr(dataloader.sampler, "set_epoch"):
+            if epoch == start_epoch and use_tp and hasattr(dataloader, "sampler") and hasattr(dataloader.sampler, "set_epoch"):
+                # 恢复时确保 sampler 状态正确
                 dataloader.sampler.set_epoch(epoch)
+            # Update DistributedSampler epoch so shuffle is different each epoch
+            
 
             for step, batch in enumerate(dataloader):
                 _step_t0 = time.time()
@@ -1276,6 +1608,16 @@ def main():
                     valid_tokens=valid_label_tokens,
                     total_tokens=total_label_tokens,
                 )
+
+                if getattr(args, "debug_caption", False):
+                    _print_caption_debug(
+                        epoch_idx=epoch,
+                        step_idx=step,
+                        batch_dict=batch,
+                        tokenizer=tokenizer,
+                        max_samples=2,  # 每个 batch 打印前 2 个样本
+                    )
+                
                 # Scale loss for gradient accumulation
                 scaled_loss = loss / grad_accum_steps
 
@@ -1349,52 +1691,60 @@ def main():
                             f"total={_t_opt-_step_t0:.2f}s"
                         )
 
-            # --- End-of-epoch checkpoint ---
-            _dlog(f"epoch_end enter epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
-            _barrier()
-            ckpt_path = os.path.join(args.output_dir, f"projector_epoch{epoch}.pt")
-            if use_tp:
-                from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp, save_warmup_embed_lmhead_tp
-                if _model.projector is not None:
-                    save_projector_tp(model, ckpt_path, is_main=is_main_process)
-                if use_discrete and is_main_process:
+        # --- End-of-epoch checkpoint ---
+        _dlog(f"epoch_end enter epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
+        _barrier()
+        ckpt_path = os.path.join(args.output_dir, f"projector_epoch{epoch}.pt")
+        if use_tp:
+            from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp, save_warmup_embed_lmhead_tp
+            if _model.projector is not None:
+                save_projector_tp(model, ckpt_path, is_main=is_main_process)
+            if use_discrete and is_main_process:
+                tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
+                tokenizer.save_pretrained(tok_path)
+                _print(f"Saved tokenizer to {tok_path}")
+            if use_discrete and training_stage == "warmup":
+                warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
+                save_warmup_embed_lmhead_tp(model, warmup_embed_path, is_main=is_main_process)
+            if use_lora_applied:
+                lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
+                save_lora_tp(model, lora_dir, is_main=is_main_process)
+                _print(f"Saved LoRA to {lora_dir}")
+        else:
+            raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
+            if is_main_process:
+                if raw_model.projector is not None:
+                    torch.save(raw_model.projector.state_dict(), ckpt_path)
+                    _print(f"Saved {ckpt_path}")
+                if use_discrete:
                     tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
                     tokenizer.save_pretrained(tok_path)
                     _print(f"Saved tokenizer to {tok_path}")
                 if use_discrete and training_stage == "warmup":
-                    warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
-                    save_warmup_embed_lmhead_tp(model, warmup_embed_path, is_main=is_main_process)
+                    vl_sd = raw_model.vl_model.state_dict()
+                    embed_lmhead_sd = {
+                        "vl_model." + k: v.cpu().clone()
+                        for k, v in vl_sd.items()
+                        if "embed_tokens" in k or "embedding" in k or "lm_head" in k
+                    }
+                    if embed_lmhead_sd:
+                        warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
+                        torch.save(embed_lmhead_sd, warmup_embed_path)
+                        _print(f"Saved warmup embed+lm_head ({len(embed_lmhead_sd)} keys) → {warmup_embed_path}")
+                # 【修复核心】使用 _save_lora_checkpoint 保存完整 LoRA（包含 adapter_config.json）
                 if use_lora_applied:
                     lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
-                    save_lora_tp(model, lora_dir, is_main=is_main_process)
-                    _print(f"Saved LoRA to {lora_dir}")
-            else:
-                raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
-                if is_main_process:
-                    if raw_model.projector is not None:
-                        torch.save(raw_model.projector.state_dict(), ckpt_path)
-                        _print(f"Saved {ckpt_path}")
-                    if use_discrete:
-                        tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
-                        tokenizer.save_pretrained(tok_path)
-                        _print(f"Saved tokenizer to {tok_path}")
-                    if use_discrete and training_stage == "warmup":
-                        vl_sd = raw_model.vl_model.state_dict()
-                        embed_lmhead_sd = {
-                            "vl_model." + k: v.cpu().clone()
-                            for k, v in vl_sd.items()
-                            if "embed_tokens" in k or "embedding" in k or "lm_head" in k
-                        }
-                        if embed_lmhead_sd:
-                            warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
-                            torch.save(embed_lmhead_sd, warmup_embed_path)
-                            _print(f"Saved warmup embed+lm_head ({len(embed_lmhead_sd)} keys) → {warmup_embed_path}")
-                    if use_lora_applied:
-                        lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
-                        raw_model.vl_model.save_pretrained(lora_dir)
-                        _print(f"Saved LoRA to {lora_dir}")
-            _barrier()
-            _dlog(f"epoch_end leave epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
+                    _save_lora_checkpoint(model, lora_dir, is_main_process, use_tp=use_tp)
+                    if is_main_process:
+                        _print(f"Saved LoRA to {lora_dir} (with adapter_config.json)")
+                        # 验证保存是否完整
+                        config_path = os.path.join(lora_dir, "adapter_config.json")
+                        if os.path.isfile(config_path):
+                            _print(f"[OK] adapter_config.json 已保存")
+                        else:
+                            _print(f"[WARN] adapter_config.json 未保存，检查 PEFT 版本")
+        _barrier()
+        _dlog(f"epoch_end leave epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
 
         # --- Final checkpoint ---
         _dlog("final_checkpoint enter", all_ranks=True, force=getattr(args, "debug_sync_points", False))
@@ -1428,23 +1778,13 @@ def main():
                     if embed_lmhead_sd:
                         torch.save(embed_lmhead_sd, os.path.join(args.output_dir, "warmup_embed_lmhead_final.pt"))
                         _print("Saved warmup embed+lm_head → warmup_embed_lmhead_final.pt")
+                # 【修复核心】使用 _save_lora_checkpoint 保存完整 LoRA
                 if use_lora_applied:
                     lora_final_dir = os.path.join(args.output_dir, "lora_final")
-                    raw_model.vl_model.save_pretrained(lora_final_dir)
-                    _print(f"Saved LoRA final to {lora_final_dir}")
+                    _save_lora_checkpoint(model, lora_final_dir, is_main_process, use_tp=use_tp)
+                    if is_main_process:
+                        _print(f"Saved LoRA final to {lora_final_dir} (with adapter_config.json)")
         _dlog("final_checkpoint leave", all_ranks=True, force=getattr(args, "debug_sync_points", False))
-        if is_main_process:
-            with open(os.path.join(args.output_dir, "train_args.json"), "w") as f:
-                json.dump(vars(args), f, indent=2)
-            _print("Done.")
-    finally:
-        if metrics_file is not None:
-            try:
-                metrics_file.close()
-            except Exception:
-                pass
-        sys.stdout = _orig_stdout
-        _log_tee.close()
 
 
 if __name__ == "__main__":

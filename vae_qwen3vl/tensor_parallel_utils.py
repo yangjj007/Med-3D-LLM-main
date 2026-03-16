@@ -495,3 +495,122 @@ def save_warmup_embed_lmhead_tp(model: nn.Module, save_path: str, is_main: bool)
             print(f"[TP] Saved warmup embed+lm_head ({len(embed_lmhead_sd)} keys) → {save_path}", flush=True)
         else:
             print(f"[TP] WARN: no embed_tokens/embedding/lm_head keys found in state_dict, skip save", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint Loading helpers for FSDP2 + TP
+# ---------------------------------------------------------------------------
+
+def load_projector_tp(model: nn.Module, load_path: str, is_main: bool) -> None:
+    """
+    将 Projector 权重加载到 FSDP2 封装的模型中。
+    所有 rank 都必须参与调用。
+    """
+    from torch.distributed.checkpoint.state_dict import set_model_state_dict, StateDictOptions
+    
+    # 1. 只有主进程读取磁盘文件
+    if is_main:
+        if not os.path.isfile(load_path):
+            print(f"[TP WARN] Projector file not found: {load_path}", flush=True)
+            checkpoint = {}
+        else:
+            checkpoint = torch.load(load_path, map_location="cpu")
+            # 补回保存时去掉的 "projector." 前缀
+            checkpoint = {f"projector.{k}": v for k, v in checkpoint.items()}
+    else:
+        checkpoint = {}
+
+    # 2. 使用 set_model_state_dict 自动处理广播和分片加载
+    try:
+        set_model_state_dict(
+            model,
+            model_state_dict=checkpoint,
+            options=StateDictOptions(full_state_dict=True)
+        )
+        if is_main:
+            print(f"[TP] Projector loaded from {load_path}", flush=True)
+    except Exception as e:
+        if is_main:
+            print(f"[TP ERROR] Failed to load projector: {e}", flush=True)
+
+
+def load_lora_tp(model: nn.Module, load_dir: str, is_main: bool) -> None:
+    """
+    将 LoRA 权重加载到 FSDP2 封装的模型中。
+    所有 rank 都必须参与调用。
+    """
+    from torch.distributed.checkpoint.state_dict import set_model_state_dict, StateDictOptions
+    import os
+
+    # 1. 确定权重文件路径
+    lora_path = os.path.join(load_dir, "adapter_model.bin")
+    fallback_path = os.path.join(load_dir, "vl_model_state.pt")
+    
+    if is_main:
+        target_path = lora_path if os.path.exists(lora_path) else fallback_path
+        if not os.path.exists(target_path):
+            print(f"[TP WARN] LoRA file not found in {load_dir}", flush=True)
+            checkpoint = {}
+        else:
+            checkpoint = torch.load(target_path, map_location="cpu")
+            # 补回保存时去掉的 "vl_model." 前缀
+            checkpoint = {f"vl_model.{k}": v for k, v in checkpoint.items()}
+    else:
+        checkpoint = {}
+
+    # 2. 分发并加载权重
+    try:
+        set_model_state_dict(
+            model,
+            model_state_dict=checkpoint,
+            options=StateDictOptions(full_state_dict=True)
+        )
+        if is_main:
+            print(f"[TP] LoRA weights loaded from {load_dir}", flush=True)
+    except Exception as e:
+        if is_main:
+            print(f"[TP ERROR] Failed to load LoRA: {e}", flush=True)
+
+
+def load_warmup_embed_lmhead_tp(model: nn.Module, load_path: str, is_main: bool) -> None:
+    """
+    加载由 save_warmup_embed_lmhead_tp 保存的权重（用于离散模式 SFT 承接 Warmup）。
+    """
+    from torch.distributed.checkpoint.state_dict import set_model_state_dict, StateDictOptions
+    
+    if is_main:
+        if not os.path.isfile(load_path):
+            print(f"[TP WARN] Warmup weights not found: {load_path}", flush=True)
+            checkpoint = {}
+        else:
+            checkpoint = torch.load(load_path, map_location="cpu")
+            # 这里的 key 在保存时已经是带 vl_model. 前缀的了，不需要处理
+    else:
+        checkpoint = {}
+
+    try:
+        set_model_state_dict(
+            model,
+            model_state_dict=checkpoint,
+            options=StateDictOptions(full_state_dict=True)
+        )
+        if is_main:
+            print(f"[TP] Warmup embed/lm_head loaded from {load_path}", flush=True)
+    except Exception as e:
+        if is_main:
+            print(f"[TP ERROR] Failed to load warmup weights: {e}", flush=True)
+
+__all__ = [
+    "get_tp_dp_mesh",
+    "get_3d_mesh", 
+    "apply_tp_to_qwen3vl",
+    "apply_fsdp2_dp",
+    "register_dp_grad_hooks",
+    "gather_full_state_dict",
+    "save_projector_tp",
+    "save_lora_tp",
+    "save_warmup_embed_lmhead_tp",
+    "load_projector_tp",
+    "load_lora_tp",  # ✅ 确保这一行存在
+    "load_warmup_embed_lmhead_tp",
+]
