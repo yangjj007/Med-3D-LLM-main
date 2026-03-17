@@ -36,12 +36,19 @@ def add_mesh_tokens_to_tokenizer(tokenizer: Any) -> Any:
 def resize_token_embeddings_and_init_mesh(
     model: nn.Module,
     tokenizer: Any,
-    num_original_tokens_for_stats: int = 1000,
+    num_original_tokens_for_stats: int = 10000,
 ) -> None:
     """
     Resize the VL model's embedding and lm_head to the new vocab size, then
-    initialize the new mesh token embeddings using mean and std of the first
-    num_original_tokens_for_stats tokens from the original vocab.
+    initialize the new token embeddings using a mean + small-covariance-noise
+    distribution estimated from the original token embeddings.
+
+    Notes:
+    - The "full covariance" estimator on the whole vocab is too expensive
+      (O(vocab_size * hidden_size^2)). We therefore estimate statistics using
+      the first `num_original_tokens_for_stats` rows (configurable) which is
+      consistent with the previous implementation's cost profile.
+    - For numerical stability, covariance is scaled and jittered.
     """
     if not hasattr(model, "resize_token_embeddings"):
         # Maybe it's the wrapper; try vl_model
@@ -54,21 +61,51 @@ def resize_token_embeddings_and_init_mesh(
     if new_size <= old_size:
         return
     model.resize_token_embeddings(new_size)
-    # Initialize new token rows with mean/std of original embeddings
+
     emb = model.get_input_embeddings().weight
-    ref = emb[:num_original_tokens_for_stats].detach()
-    mean = ref.mean(dim=0)
-    std = ref.std(dim=0).clamp(min=1e-6)
-    with torch.no_grad():
-        emb[old_size:].normal_(mean=0, std=1)
-        emb[old_size:].mul_(std).add_(mean)
-    # lm_head if exists (tied or not)
+    device = emb.device
+    dtype = emb.dtype
+    stats_n = min(int(num_original_tokens_for_stats), int(old_size))
+    if stats_n <= 1:
+        # Fallback: keep HF default init if we can't estimate stats.
+        return
+
+    # Estimate mean/cov on a subset to control cost.
+    ref = emb[:stats_n].detach().to(torch.float32)  # stable stats in fp32
+    mu = ref.mean(dim=0)  # [d]
+    xc = ref - mu
+    # Sample covariance (biased, matching user's n divisor); scale down to create "small noise".
+    sigma = (xc.T @ xc) / float(stats_n)  # [d,d]
+    # Stabilize covariance: PSD jitter and strong scaling
+    eps = 1e-6
+    cov = (1e-5 * sigma) + (eps * torch.eye(sigma.shape[0], device=sigma.device, dtype=sigma.dtype))
+
+    num_new = int(new_size - old_size)
+    if num_new <= 0:
+        return
+
+    try:
+        from torch.distributions import MultivariateNormal
+
+        dist = MultivariateNormal(mu, covariance_matrix=cov)
+        with torch.no_grad():
+            samples = dist.sample((num_new,))  # [num_new, d] fp32
+            emb[old_size:].copy_(samples.to(device=device, dtype=dtype))
+    except Exception:
+        # Fallback to diagonal std noise if MVN is unavailable / fails PSD checks.
+        var = torch.diag(cov).clamp(min=1e-12)
+        std = torch.sqrt(var)
+        with torch.no_grad():
+            samples = torch.randn((num_new, mu.numel()), device=mu.device, dtype=mu.dtype)
+            samples = samples * std + mu
+            emb[old_size:].copy_(samples.to(device=device, dtype=dtype))
+
+    # lm_head:
+    # - In Qwen3(-VL) HF implementations lm_head is typically tied to embed_tokens,
+    #   so initializing embeddings is sufficient.
+    # - If not tied (or tying is disabled), align lm_head new rows to embeddings.
     if hasattr(model, "lm_head") and model.lm_head is not None:
         lm = model.lm_head
         if isinstance(lm, nn.Linear) and lm.weight.shape[0] == new_size:
-            ref_lm = lm.weight[:num_original_tokens_for_stats].detach()
-            mean_lm = ref_lm.mean(dim=0)
-            std_lm = ref_lm.std(dim=0).clamp(min=1e-6)
             with torch.no_grad():
-                lm.weight[old_size:].normal_(mean=0, std=1)
-                lm.weight[old_size:].mul_(std_lm).add_(mean_lm)
+                lm.weight[old_size:].copy_(emb[old_size:].detach())

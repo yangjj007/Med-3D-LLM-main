@@ -188,14 +188,17 @@ def apply_tp_to_qwen3vl(
         → full TP on all projections; ~2× activation memory reduction per layer.
 
     SFT stage with LoRA (peft applied BEFORE this call):
-        apply_to_attention=False, apply_to_mlp=True
+        - If LoRA targets attention only:
+            apply_to_attention=False, apply_to_mlp=True
+        - If LoRA also targets MLP (e.g. discrete mode with gate/up/down_proj LoRA):
+            apply_to_attention=False, apply_to_mlp=False
         → SKIP attention TP to avoid conflict with peft LoRA wrappers.
         Reason: peft replaces nn.Linear with a custom module whose lora_A/B
         matrices are regular (non-DTensor) tensors.  Applying ColwiseParallel /
         RowwiseParallel on top of a peft layer would shard the base weight but
         leave lora_A/B unsharded, producing incorrect all-reduce boundaries for
         RowwiseParallel (o_proj) that expects sharded input.
-        → MLP layers are not LoRA-targeted → always safe to parallelize.
+        → MLP layers are safe to parallelize only when they are not LoRA-targeted.
         Memory savings: MLP contributes ~65% of per-layer activations for
         Qwen3-VL 2B (intermediate=8960 vs. hidden=1536), so MLP-only TP still
         yields meaningful memory reduction.
@@ -235,6 +238,23 @@ def apply_tp_to_qwen3vl(
                         flush=True,
                     )
                     apply_to_attention = False
+                    break
+
+    # Sanity check for MLP LoRA wrappers
+    if apply_to_mlp and len(layers) > 0:
+        first_mlp = getattr(layers[0], "mlp", None)
+        if first_mlp is not None:
+            for proj_name in ("gate_proj", "up_proj", "down_proj"):
+                proj = getattr(first_mlp, proj_name, None)
+                if proj is not None and not isinstance(proj, nn.Linear):
+                    print(
+                        f"[TP WARNING] {proj_name} in layer 0 is {type(proj).__name__}, "
+                        f"not nn.Linear — likely a peft LoRA wrapper. "
+                        f"MLP TP will be skipped to avoid DTensor+LoRA incompatibility. "
+                        f"Pass apply_to_mlp=False explicitly to suppress this warning.",
+                        flush=True,
+                    )
+                    apply_to_mlp = False
                     break
 
     for idx, layer in enumerate(layers):
@@ -451,6 +471,7 @@ def save_projector_tp(model: nn.Module, save_path: str, is_main: bool) -> None:
 def save_lora_tp(model: nn.Module, save_dir: str, is_main: bool) -> None:
     """Save LoRA adapter weights from an FSDP2-wrapped model. All ranks participate."""
     import os
+    import json
     full_sd = gather_full_state_dict(model)
     if is_main:
         os.makedirs(save_dir, exist_ok=True)
@@ -472,6 +493,61 @@ def save_lora_tp(model: nn.Module, save_dir: str, is_main: bool) -> None:
             torch.save(vl_sd, fallback_path)
             print(f"[TP] (No lora_ keys found) Saved vl_model state → {fallback_path}", flush=True)
 
+        # Write adapter_config.json so that `PeftModel.from_pretrained(..., save_dir)`
+        # works in eval code. We must NOT fabricate defaults silently: extract the
+        # real config from the live peft model if available.
+        peft_model = getattr(model, "vl_model", None)
+        config_obj = None
+        if peft_model is not None and hasattr(peft_model, "peft_config"):
+            try:
+                config_obj = peft_model.peft_config.get("default", None)
+            except Exception:
+                config_obj = None
+        if config_obj is not None:
+            try:
+                config_dict = config_obj.to_dict()
+                # Ensure JSON-serializable (target_modules may be set)
+                def _json_compatible(obj):
+                    if obj is None or isinstance(obj, (bool, int, float, str)):
+                        return obj
+                    if isinstance(obj, dict):
+                        return {str(k): _json_compatible(v) for k, v in obj.items()}
+                    if isinstance(obj, (list, tuple)):
+                        return [_json_compatible(v) for v in obj]
+                    if isinstance(obj, set):
+                        try:
+                            return sorted([_json_compatible(v) for v in obj])
+                        except Exception:
+                            return [_json_compatible(v) for v in obj]
+                    try:
+                        import enum
+                        if isinstance(obj, enum.Enum):
+                            return obj.value
+                    except Exception:
+                        pass
+                    try:
+                        from pathlib import Path
+                        if isinstance(obj, Path):
+                            return str(obj)
+                    except Exception:
+                        pass
+                    return str(obj)
+
+                config_dict = _json_compatible(config_dict)
+                config_dict["peft_type"] = config_dict.get("peft_type") or "LORA"
+                config_path = os.path.join(save_dir, "adapter_config.json")
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(config_dict, f, indent=2, ensure_ascii=False)
+                print(f"[TP] Saved adapter_config.json → {config_path}", flush=True)
+            except Exception as e:
+                print(f"[TP WARN] Failed to write adapter_config.json: {e}", flush=True)
+        else:
+            print(
+                "[TP WARN] peft_config not found on model.vl_model; "
+                "adapter_config.json not written (eval may not load LoRA by directory).",
+                flush=True,
+            )
+
 
 def save_warmup_embed_lmhead_tp(model: nn.Module, save_path: str, is_main: bool) -> None:
     """
@@ -480,13 +556,13 @@ def save_warmup_embed_lmhead_tp(model: nn.Module, save_path: str, is_main: bool)
     """
     full_sd = gather_full_state_dict(model)
     if is_main:
-        # Keep keys under vl_model that are embed_tokens, embedding, or lm_head
+        # Keep keys under vl_model that are text embed_tokens or lm_head.
+        # Avoid broad "embedding" substring which may match non-text embeddings.
         embed_lmhead_sd = {
             k: v for k, v in full_sd.items()
             if k.startswith("vl_model.")
             and (
                 "embed_tokens" in k
-                or "embedding" in k
                 or "lm_head" in k
             )
         }

@@ -334,75 +334,127 @@ def _find_latest_ckpt_epoch(ckpt_dir: str) -> Optional[int]:
                 
     return max_epoch if max_epoch >= 0 else None
 
-def _save_lora_checkpoint(model, lora_dir, is_main_process, use_tp=False):
+def _save_lora_checkpoint(
+    model,
+    lora_dir: str,
+    *,
+    is_main_process: bool,
+    use_tp: bool = False,
+    tokenizer=None,
+    expected_lora: Optional[dict] = None,
+):
     """
-    统一保存 LoRA 权重和配置，确保 adapter_config.json 存在。
-    【修复】无论 TP 还是非 TP 模式，都强制保存 adapter_config.json
+    保存 LoRA 权重 + adapter_config.json，并（可选）保存 tokenizer。
+
+    重要原则：
+    - 不允许“读不到配置就写默认值”的 silent fallback（会导致 r/alpha/dropout 不一致，进而 missing adapter keys）。
+    - adapter_config.json 必须包含 peft_type="LORA"。
+    - 如提供 expected_lora，则会强校验保存配置与训练参数一致，不一致直接报错中止。
     """
     import os
-    import torch
     import json
+
     from peft import PeftModel
-    
-    os.makedirs(lora_dir, exist_ok=True)
-    
-    # 1. 保存权重
-    if use_tp:
-        # TP 模式下使用专用工具保存权重
-        try:
-            from vae_qwen3vl.tensor_parallel_utils import save_lora_tp
-            save_lora_tp(model, lora_dir, is_main=is_main_process)
-        except ImportError:
-            if is_main_process:
-                print(f"[Warn] save_lora_tp not found, skipping TP weight save.", flush=True)
-    else:
-        # 非 TP 模式，尝试 unwrap 后保存
-        raw_model = getattr(model, "module", model)
-        if hasattr(raw_model, "vl_model") and isinstance(raw_model.vl_model, PeftModel):
-            raw_model.vl_model.save_pretrained(lora_dir)
-        else:
-            if is_main_process:
-                print(f"[Warn] Model is not a PeftModel or vl_model missing, skipping standard save.", flush=True)
-    
-    # 2. 【关键修复】强制保存 adapter_config.json
-    # 无论 TP 还是非 TP，PEFT 加载都需要这个文件。
-    if is_main_process:
-        try:
-            # 获取 PEFT 模型对象 (TP 模式下 model.vl_model 通常仍持有 config 对象)
-            peft_model = getattr(model, "vl_model", None)
-            if peft_model is not None and hasattr(peft_model, "peft_config"):
-                # peft_config 是一个字典，默认 key 为 "default"
-                config_obj = peft_model.peft_config.get("default", None)
-                if config_obj:
-                    config_path = os.path.join(lora_dir, "adapter_config.json")
-                    # 直接保存配置对象为 JSON
-                    config_dict = config_obj.to_dict()
-                    with open(config_path, "w", encoding="utf-8") as f:
-                        json.dump(config_dict, f, indent=2)
-                    print(f"[Check] Saved adapter_config.json to {config_path}", flush=True)
-                else:
-                    print(f"[Warn] peft_config['default'] not found in model, config not saved.", flush=True)
-            else:
-                print(f"[Warn] Cannot access peft_config for saving JSON.", flush=True)
-        except Exception as e:
-            print(f"[Error] Failed to save adapter_config.json: {e}", flush=True)
-            # 【兜底】如果 peft_config 访问失败，尝试从模型属性推断并创建最小 config
+
+    def _json_compatible(obj):
+        """
+        将 peft_config.to_dict() 里的对象递归转换为 JSON 可序列化类型。
+        典型问题：某些字段（如 target_modules）在不同 peft 版本里可能是 set。
+        """
+        # 原始标量
+        if obj is None or isinstance(obj, (bool, int, float, str)):
+            return obj
+        # dict
+        if isinstance(obj, dict):
+            return {str(k): _json_compatible(v) for k, v in obj.items()}
+        # list/tuple
+        if isinstance(obj, (list, tuple)):
+            return [_json_compatible(v) for v in obj]
+        # set -> 排序 list（保证输出稳定）
+        if isinstance(obj, set):
             try:
-                config_path = os.path.join(lora_dir, "adapter_config.json")
-                fallback_config = {
-                    "base_model_name_or_path": getattr(model, "base_model_name_or_path", "unknown"),
-                    "r": getattr(model, "r", 8),
-                    "lora_alpha": getattr(model, "lora_alpha", 16),
-                    "target_modules": ["q_proj", "v_proj", "k_proj", "o_proj"],
-                    "lora_dropout": 0.05,
-                    "bias": "none",
-                    "task_type": "CAUSAL_LM"
-                }
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(fallback_config, f, indent=2)
-                print(f"[Fallback] Created adapter_config.json with inferred config.", flush=True)
-            except Exception as e2:
-                print(f"[Error] Fallback config save also failed: {e2}", flush=True)
+                return sorted([_json_compatible(v) for v in obj])
+            except Exception:
+                return [_json_compatible(v) for v in obj]
+        # enum / Path / 其它对象：尽量转成 str
+        try:
+            import enum
+
+            if isinstance(obj, enum.Enum):
+                return obj.value
+        except Exception:
+            pass
+        try:
+            from pathlib import Path
+
+            if isinstance(obj, Path):
+                return str(obj)
+        except Exception:
+            pass
+        # 最后兜底：转字符串（避免 TypeError: not JSON serializable）
+        return str(obj)
+
+    os.makedirs(lora_dir, exist_ok=True)
+
+    # 1) 保存 LoRA 权重
+    if use_tp:
+        from vae_qwen3vl.tensor_parallel_utils import save_lora_tp
+        save_lora_tp(model, lora_dir, is_main=is_main_process)
+    else:
+        raw_model = getattr(model, "module", model)
+        if not (hasattr(raw_model, "vl_model") and isinstance(raw_model.vl_model, PeftModel)):
+            raise RuntimeError(
+                "LoRA 保存失败：raw_model.vl_model 不是 PeftModel（或 vl_model 缺失）。"
+            )
+        raw_model.vl_model.save_pretrained(lora_dir)
+
+    if not is_main_process:
+        return
+
+    # 2) 保存 adapter_config.json（只允许来自真实 peft_config）
+    peft_model = getattr(model, "vl_model", None)
+    if peft_model is None or not hasattr(peft_model, "peft_config"):
+        raise RuntimeError(
+            "LoRA 保存失败：无法访问 model.vl_model.peft_config；"
+            "拒绝写入默认 adapter_config.json（会导致加载 missing adapter keys）。"
+        )
+    config_obj = peft_model.peft_config.get("default", None)
+    if config_obj is None:
+        raise RuntimeError(
+            "LoRA 保存失败：model.vl_model.peft_config['default'] 不存在；"
+            "拒绝写入默认 adapter_config.json。"
+        )
+
+    config_dict = config_obj.to_dict()
+    config_dict = _json_compatible(config_dict)
+    # 强制写入 peft_type
+    config_dict["peft_type"] = config_dict.get("peft_type") or "LORA"
+
+    # 训练参数一致性校验（防止保存出来的 JSON 与训练实际不一致）
+    if expected_lora:
+        mismatches = []
+        for k in ("r", "lora_alpha", "lora_dropout"):
+            if k in expected_lora and expected_lora[k] is not None:
+                if k not in config_dict or config_dict[k] != expected_lora[k]:
+                    mismatches.append((k, expected_lora[k], config_dict.get(k, None)))
+        if mismatches:
+            msg = "; ".join([f"{k}: expected={ev} got={gv}" for k, ev, gv in mismatches])
+            raise RuntimeError(
+                "adapter_config.json 与训练 LoRA 参数不一致，已中止保存以避免后续加载失败。"
+                f" {msg}"
+            )
+
+    config_path = os.path.join(lora_dir, "adapter_config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_dict, f, indent=2, ensure_ascii=False)
+    print(f"[Check] Saved adapter_config.json to {config_path}", flush=True)
+
+    # 3) 保存 tokenizer（与该 LoRA checkpoint 绑定）
+    if tokenizer is not None:
+        tok_dir = os.path.join(lora_dir, "tokenizer")
+        os.makedirs(tok_dir, exist_ok=True)
+        tokenizer.save_pretrained(tok_dir)
+        print(f"[Check] Saved tokenizer to {tok_dir}", flush=True)
 
 def _load_checkpoint_state(
     model, optimizer, scheduler, ckpt_dir: str, epoch: int,
@@ -453,16 +505,10 @@ def _load_checkpoint_state(
         # 【检查】确保 adapter_config.json 存在
         config_path = os.path.join(lora_dir, "adapter_config.json")
         if not os.path.isfile(config_path):
-            if is_main_process:
-                print(f"[Warn] {config_path} missing! PEFT may fail to load.", flush=True)
-                # 【尝试修复】检查是否有 adapter_config.json.bak 或其他变体
-                for alt_name in ["adapter_config.json.bak", "config.json", "lora_config.json"]:
-                    alt_path = os.path.join(lora_dir, alt_name)
-                    if os.path.isfile(alt_path):
-                        import shutil
-                        shutil.copy(alt_path, config_path)
-                        print(f"[Fix] Copied {alt_path} -> {config_path}", flush=True)
-                        break
+            raise FileNotFoundError(
+                f"断点续训失败：缺少 {config_path}。为避免 LoRA 参数不一致导致 missing adapter keys，"
+                "本脚本不再尝试自动拷贝/修复。请使用正确保存的 LoRA checkpoint 重新训练或手动补齐该文件。"
+            )
         
         if use_tp:
             try:
@@ -616,6 +662,21 @@ def main():
             "vl_model 未设置。请确保 config YAML 中有 vl_model 字段，"
             "或通过 --vl_model 传参。当前 config_path=%r" % (config_path,)
         )
+
+    # LoRA 参数解析必须严格：训练用的 lora_alpha（默认 2*r）要落地为确定值，后续保存/校验都依赖它。
+    if getattr(args, "use_lora", False):
+        if getattr(args, "lora_r", None) is None:
+            raise ValueError("use_lora=True 但 lora_r 未设置（不允许 fallback 默认值）。")
+        if getattr(args, "lora_dropout", None) is None:
+            raise ValueError("use_lora=True 但 lora_dropout 未设置（不允许 fallback 默认值）。")
+        if getattr(args, "lora_alpha", None) is None:
+            args.lora_alpha = 2 * int(args.lora_r)
+
+    expected_lora = {
+        "r": int(getattr(args, "lora_r", 0)) if getattr(args, "use_lora", False) else None,
+        "lora_alpha": int(getattr(args, "lora_alpha", 0)) if getattr(args, "use_lora", False) else None,
+        "lora_dropout": float(getattr(args, "lora_dropout", 0.0)) if getattr(args, "use_lora", False) else None,
+    }
 
     # 并行调试开关写入环境变量，供其它模块（TP/SP/ring attention）复用。
     if getattr(args, "debug_parallel", False):
@@ -950,11 +1011,18 @@ def main():
         latent_dim = model.projector.latent_dim if model.projector is not None else 16
 
         # Stage1 warmup: only embedding + lm_head; Stage2 sft: projector (if any) or LoRA + embed
+        def _is_text_embed_or_lm_head_param(param_name: str) -> bool:
+            # Qwen3-VL (HF) common names:
+            # - ...embed_tokens.weight (often under vl_model.model.language_model.embed_tokens)
+            # - ...lm_head.weight
+            # Avoid broad substring like "embedding" which may match vision/other embeddings.
+            return ("embed_tokens" in param_name) or ("lm_head" in param_name)
+
         for name, p in model.named_parameters():
             p.requires_grad = False
         if training_stage == "warmup":
             for name, p in model.named_parameters():
-                if "embed_tokens" in name or "embedding" in name or "lm_head" in name:
+                if _is_text_embed_or_lm_head_param(name):
                     p.requires_grad = True
         else:
             if model.projector is not None:
@@ -962,17 +1030,24 @@ def main():
                     if "projector" in name:
                         p.requires_grad = True
             for name, p in model.named_parameters():
-                if "embed_tokens" in name or "embedding" in name or "lm_head" in name:
+                if _is_text_embed_or_lm_head_param(name):
                     p.requires_grad = True
         use_lora_applied = False
         if args.use_lora and training_stage == "sft":
             try:
                 from peft import get_peft_model, LoraConfig, TaskType
                 lora_alpha = args.lora_alpha if args.lora_alpha is not None else (2 * args.lora_r)
+                # Qwen3/Qwen3-VL uses:
+                # - Attention: q_proj/k_proj/v_proj/o_proj
+                # - MLP: gate_proj/up_proj/down_proj
+                # Discrete mode SFT needs MLP LoRA as well.
+                target_modules = ["q_proj", "v_proj", "k_proj", "o_proj"]
+                if use_discrete:
+                    target_modules += ["gate_proj", "up_proj", "down_proj"]
                 lora_config = LoraConfig(
                     r=args.lora_r,
                     lora_alpha=lora_alpha,
-                    target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+                    target_modules=target_modules,
                     lora_dropout=args.lora_dropout,
                     bias="none",
                     task_type=TaskType.CAUSAL_LM,
@@ -982,7 +1057,7 @@ def main():
                     if "lora" in name:
                         p.requires_grad = True
                 use_lora_applied = True
-                print("LoRA applied successfully.", flush=True)
+                print(f"LoRA applied successfully. target_modules={target_modules}", flush=True)
             except ImportError:
                 print("peft not installed; skipping LoRA", flush=True)
 
@@ -999,16 +1074,21 @@ def main():
             # AssertionError: FSDP expects uniform original parameter dtype but got {torch.bfloat16, torch.float32}
             target_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
             model = model.to(target_dtype)
-            # In SFT+LoRA: LoRA wraps attention projections (q/k/v/o_proj).
+            # In SFT+LoRA:
+            # - Attention TP must be skipped because LoRA wraps q/k/v/o_proj.
+            # - In discrete mode we also LoRA-wrap MLP (gate/up/down_proj), so MLP TP must be skipped too.
             apply_attn_tp = not use_lora_applied
+            apply_mlp_tp = True
+            if use_lora_applied and use_discrete:
+                apply_mlp_tp = False
             apply_tp_to_qwen3vl(
                 model.vl_model,
                 tp_mesh,
                 apply_to_attention=apply_attn_tp,
-                apply_to_mlp=True,
+                apply_to_mlp=apply_mlp_tp,
             )
             _dlog(
-                f"apply_tp_to_qwen3vl finished attn={apply_attn_tp} mlp=True",
+                f"apply_tp_to_qwen3vl finished attn={apply_attn_tp} mlp={apply_mlp_tp}",
                 all_ranks=True,
                 force=getattr(args, "debug_parallel", False),
             )
@@ -1443,7 +1523,14 @@ def main():
             os.makedirs(init_lora_dir, exist_ok=True)
 
             # 保存 LoRA 权重（使用修复后的函数）
-            _save_lora_checkpoint(model, init_lora_dir, is_main_process=True, use_tp=use_tp)
+            _save_lora_checkpoint(
+                model,
+                init_lora_dir,
+                is_main_process=True,
+                use_tp=use_tp,
+                tokenizer=tokenizer,
+                expected_lora=expected_lora,
+            )
 
             # 同时保存训练参数配置
             with open(os.path.join(init_lora_dir, "training_args.json"), "w") as f:
@@ -1736,7 +1823,14 @@ def main():
                 # 【修复核心】使用 _save_lora_checkpoint 保存完整 LoRA（包含 adapter_config.json）
                 if use_lora_applied:
                     lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
-                    _save_lora_checkpoint(model, lora_dir, is_main_process, use_tp=use_tp)
+                    _save_lora_checkpoint(
+                        model,
+                        lora_dir,
+                        is_main_process=is_main_process,
+                        use_tp=use_tp,
+                        tokenizer=tokenizer,
+                        expected_lora=expected_lora,
+                    )
                     if is_main_process:
                         _print(f"Saved LoRA to {lora_dir} (with adapter_config.json)")
                         # 验证保存是否完整
@@ -1783,7 +1877,14 @@ def main():
                 # 【修复核心】使用 _save_lora_checkpoint 保存完整 LoRA
                 if use_lora_applied:
                     lora_final_dir = os.path.join(args.output_dir, "lora_final")
-                    _save_lora_checkpoint(model, lora_final_dir, is_main_process, use_tp=use_tp)
+                    _save_lora_checkpoint(
+                        model,
+                        lora_final_dir,
+                        is_main_process=is_main_process,
+                        use_tp=use_tp,
+                        tokenizer=tokenizer,
+                        expected_lora=expected_lora,
+                    )
                     if is_main_process:
                         _print(f"Saved LoRA final to {lora_final_dir} (with adapter_config.json)")
         _dlog("final_checkpoint leave", all_ranks=True, force=getattr(args, "debug_sync_points", False))
