@@ -101,6 +101,7 @@ class SparseStructureVaeTrainer(BasicTrainer):
         num_samples: int,
         batch_size: int,
         verbose: bool = False,
+        **kwargs,
     ) -> Dict:
         dataloader = DataLoader(
             copy.deepcopy(self.dataset),

@@ -136,7 +136,7 @@ class Qwen3VLWith3DBranch(nn.Module):
         projector_num_layers: int = 1,
         torch_dtype: Optional[torch.dtype] = None,
         use_vl_model: Optional[nn.Module] = None,
-        truncate_mode: str = "head",
+        truncate_mode: str = "fps",
         use_discrete_3d_tokens: bool = False,
         **vl_kwargs,
     ):

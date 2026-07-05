@@ -1,4 +1,6 @@
 import os
+import re
+import glob
 import copy
 import time
 from functools import partial
@@ -47,6 +49,7 @@ class BasicTrainer(Trainer):
         i_sample (int): Sample interval.
         i_save (int): Save interval.
         i_ddpcheck (int): DDP check interval.
+        save_total_limit (int): 最多保留的按-step 成套 checkpoint 数量（默认 3）；<=0 不删旧权重。
     """
 
     def __str__(self):
@@ -74,22 +77,31 @@ class BasicTrainer(Trainer):
             lines.append(f'  - Gradient clip: {indent(str(self.grad_clip), 2)}')
         lines.append(f'  - EMA rate: {self.ema_rate}')
         lines.append(f'  - FP16 mode: {self.fp16_mode}')
+        lines.append(f'  - save_total_limit: {getattr(self, "save_total_limit", 3)}')
         return '\n'.join(lines)
-            
+
+    def _warmup_then_cosine_t_max(self, warmup_steps: int) -> int:
+        """CosineAnnealingLR 在 WarmupThenScheduler 之后的有效步数 = 总训练步 − warmup。"""
+        return max(1, int(self.max_steps) - int(warmup_steps))
+
     def init_models_and_more(self, **kwargs):
         """
         Initialize models and more.
         """
         if self.world_size > 1:
-            # Prepare distributed data parallel
+            # DDP：decoder 内 SparseSubdivideBlock3d 使用 gradient checkpoint（非重入）。
+            # find_unused_parameters=True 与 checkpoint 组合时，易触发
+            # “Expected to mark a variable ready only once / decoder.out_layer.weight marked twice”
+            #（PyTorch reducer 与重入反向不兼容）。band 裁剪与损失路径稳定后，应始终对 decoder 有梯度；
+            # 若仍出现 “unused parameter” 报错，可在配置中关闭 decoder 的 use_checkpoint 或暂时单卡训练。
             self.training_models = {
-                name: DDP(
+                name:                 DDP(
                     model,
                     device_ids=[self.local_rank],
                     output_device=self.local_rank,
                     bucket_cap_mb=128,
                     find_unused_parameters=False,
-                    static_graph=True
+                    static_graph=False,
                 )
                 for name, model in self.models.items()
             }
@@ -131,9 +143,16 @@ class BasicTrainer(Trainer):
             if scheduler_name == 'WarmupThenScheduler':
                 main_scheduler_class_name = scheduler_args.pop('main_scheduler_class')
                 if hasattr(torch.optim.lr_scheduler, main_scheduler_class_name):
-                    scheduler_args['main_scheduler_class'] = getattr(torch.optim.lr_scheduler, main_scheduler_class_name)
+                    main_cls = getattr(torch.optim.lr_scheduler, main_scheduler_class_name)
                 else:
-                    scheduler_args['main_scheduler_class'] = globals()[main_scheduler_class_name]
+                    main_cls = globals()[main_scheduler_class_name]
+                scheduler_args['main_scheduler_class'] = main_cls
+                warmup_steps = int(scheduler_args.get('warmup_steps', 0))
+                m_kw = scheduler_args.get('main_scheduler_kwargs')
+                m_kw = dict(m_kw) if m_kw is not None else {}
+                if main_cls is torch.optim.lr_scheduler.CosineAnnealingLR:
+                    m_kw['T_max'] = self._warmup_then_cosine_t_max(warmup_steps)
+                scheduler_args['main_scheduler_kwargs'] = m_kw
                 self.lr_scheduler = globals()[scheduler_name](self.optimizer, **scheduler_args)
             elif hasattr(torch.optim.lr_scheduler, scheduler_name):
                 self.lr_scheduler = getattr(torch.optim.lr_scheduler, scheduler_name)(self.optimizer, **scheduler_args)
@@ -222,6 +241,22 @@ class BasicTrainer(Trainer):
             self.log_scale = misc_ckpt['log_scale']
         if self.lr_scheduler_config is not None:
             self.lr_scheduler.load_state_dict(misc_ckpt['lr_scheduler'])
+            sched_cfg = self.lr_scheduler_config
+            if isinstance(sched_cfg, dict) and sched_cfg.get('name') == 'WarmupThenScheduler':
+                args = sched_cfg.get('args') or {}
+                warmup_steps = int(args.get('warmup_steps', 0))
+                m_kw = args.get('main_scheduler_kwargs') or {}
+                ms = getattr(self.lr_scheduler, 'main_scheduler', None)
+                if ms is not None:
+                    if isinstance(ms, torch.optim.lr_scheduler.CosineAnnealingLR):
+                        ms.T_max = self._warmup_then_cosine_t_max(warmup_steps)
+                        if 'eta_min' in m_kw:
+                            ms.eta_min = m_kw['eta_min']
+                        # checkpoint 里 optimizer 的 lr 可能按旧 T_max 保存；按当前 last_epoch + 新 T_max 对齐
+                        lr_vals = self.lr_scheduler.get_lr()
+                        for pg, lr in zip(self.optimizer.param_groups, lr_vals):
+                            pg['lr'] = lr
+                        self.lr_scheduler._last_lr = [pg['lr'] for pg in self.optimizer.param_groups]
         if self.elastic_controller_config is not None:
             self.elastic_controller.load_state_dict(misc_ckpt['elastic_controller'])
         if self.grad_clip is not None and not isinstance(self.grad_clip, float):
@@ -271,6 +306,50 @@ class BasicTrainer(Trainer):
             misc_ckpt['grad_clip'] = self.grad_clip.state_dict()
         torch.save(misc_ckpt, os.path.join(self.output_dir, 'ckpts', f'misc_step{self.step:07d}.pt'))
         print(' Done.')
+        self._prune_old_checkpoints()
+
+    def _prune_old_checkpoints(self) -> None:
+        """
+        按 step 保留最近 save_total_limit 套权重（misc / 各模型 / EMA），删除更旧 step 的全部相关文件。
+        save_total_limit <= 0 时不做任何删除。
+        """
+        limit = int(getattr(self, "save_total_limit", 3) or 0)
+        if limit <= 0:
+            return
+        ckpt_dir = os.path.join(self.output_dir, "ckpts")
+        if not os.path.isdir(ckpt_dir):
+            return
+        step_re = re.compile(r"step(\d+)\.pt$")
+        misc_files = glob.glob(os.path.join(ckpt_dir, "misc_step*.pt"))
+        steps: list[int] = []
+        for fp in misc_files:
+            m = step_re.search(os.path.basename(fp))
+            if m:
+                steps.append(int(m.group(1)))
+        if not steps:
+            return
+        steps_unique = sorted(set(steps), reverse=True)
+        if len(steps_unique) <= limit:
+            return
+        drop = set(steps_unique[limit:])
+        removed = 0
+        for fp in glob.glob(os.path.join(ckpt_dir, "*.pt")):
+            base = os.path.basename(fp)
+            m = step_re.search(base)
+            if not m:
+                continue
+            s = int(m.group(1))
+            if s in drop:
+                try:
+                    os.remove(fp)
+                    removed += 1
+                except OSError as e:
+                    print(f"\n[save_total_limit] Warning: could not remove {base}: {e}")
+        if removed:
+            print(
+                f"\n[save_total_limit] Kept newest {limit} checkpoint step(s); "
+                f"removed {removed} file(s) for older steps {sorted(drop)}."
+            )
 
     def finetune_from(self, finetune_ckpt):
         """
@@ -365,6 +444,7 @@ class BasicTrainer(Trainer):
         losses = []
         statuses = []
         elastic_controller_logs = []
+        skip_flags = []
         zero_grad(self.model_params)
         
         # 记录训练各阶段时间
@@ -384,13 +464,16 @@ class BasicTrainer(Trainer):
                 
                 ## backward
                 backward_start = time.time()
-                if self.fp16_mode == 'amp':
-                    self.scaler.scale(l).backward()
-                elif self.fp16_mode == 'inflat_all':
-                    scaled_l = l * (2 ** self.log_scale)
-                    scaled_l.backward()
-                else:
-                    l.backward()
+                skip_b = bool(status.get('skip_backward', False))
+                skip_flags.append(skip_b)
+                if not skip_b:
+                    if self.fp16_mode == 'amp':
+                        self.scaler.scale(l).backward()
+                    elif self.fp16_mode == 'inflat_all':
+                        scaled_l = l * (2 ** self.log_scale)
+                        scaled_l.backward()
+                    else:
+                        l.backward()
                 backward_time += time.time() - backward_start
             
             ## log
@@ -398,41 +481,46 @@ class BasicTrainer(Trainer):
             statuses.append(dict_foreach(status, lambda x: x.item() if isinstance(x, torch.Tensor) else x))
             if self.elastic_controller_config is not None:
                 elastic_controller_logs.append(self.elastic_controller.log())
-        ## gradient clip
-        if self.grad_clip is not None:
-            if self.fp16_mode == 'amp':
-                self.scaler.unscale_(self.optimizer)
-            elif self.fp16_mode == 'inflat_all':
-                model_grads_to_master_grads(self.model_params, self.master_params)
-                self.master_params[0].grad.mul_(1.0 / (2 ** self.log_scale))
-            if isinstance(self.grad_clip, float):
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.master_params, self.grad_clip)
-            else:
-                grad_norm = self.grad_clip(self.master_params)
-            if torch.isfinite(grad_norm):
-                statuses[-1]['grad_norm'] = grad_norm.item()
-        ## step
-        if self.fp16_mode == 'amp':
-            prev_scale = self.scaler.get_scale()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-        elif self.fp16_mode == 'inflat_all':
-            prev_scale = 2 ** self.log_scale
-            if not any(not p.grad.isfinite().all() for p in self.model_params):
-                if self.grad_clip is None:
+        step_fully_skipped = len(skip_flags) > 0 and all(skip_flags)
+
+        if step_fully_skipped:
+            prev_scale = float(self.scaler.get_scale()) if self.fp16_mode == 'amp' else 1.0
+        else:
+            ## gradient clip
+            if self.grad_clip is not None:
+                if self.fp16_mode == 'amp':
+                    self.scaler.unscale_(self.optimizer)
+                elif self.fp16_mode == 'inflat_all':
                     model_grads_to_master_grads(self.model_params, self.master_params)
                     self.master_params[0].grad.mul_(1.0 / (2 ** self.log_scale))
-                self.optimizer.step()
-                master_params_to_model_params(self.model_params, self.master_params)
-                self.log_scale += self.fp16_scale_growth
+                if isinstance(self.grad_clip, float):
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.master_params, self.grad_clip)
+                else:
+                    grad_norm = self.grad_clip(self.master_params)
+                if torch.isfinite(grad_norm):
+                    statuses[-1]['grad_norm'] = grad_norm.item()
+            ## step
+            if self.fp16_mode == 'amp':
+                prev_scale = self.scaler.get_scale()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            elif self.fp16_mode == 'inflat_all':
+                prev_scale = 2 ** self.log_scale
+                if not any(not p.grad.isfinite().all() for p in self.model_params):
+                    if self.grad_clip is None:
+                        model_grads_to_master_grads(self.model_params, self.master_params)
+                        self.master_params[0].grad.mul_(1.0 / (2 ** self.log_scale))
+                    self.optimizer.step()
+                    master_params_to_model_params(self.model_params, self.master_params)
+                    self.log_scale += self.fp16_scale_growth
+                else:
+                    self.log_scale -= 1
             else:
-                self.log_scale -= 1
-        else:
-            prev_scale = 1.0
-            if not any(not p.grad.isfinite().all() for p in self.model_params):
-                self.optimizer.step()
-            else:
-                print('\n\033[93mWarning: NaN detected in gradients. Skipping update.\033[0m') 
+                prev_scale = 1.0
+                if not any(not p.grad.isfinite().all() for p in self.model_params):
+                    self.optimizer.step()
+                else:
+                    print('\n\033[93mWarning: NaN detected in gradients. Skipping update.\033[0m') 
         ## adjust learning rate
         if self.lr_scheduler_config is not None:
             statuses[-1]['lr'] = self.lr_scheduler.get_last_lr()[0]
@@ -440,7 +528,37 @@ class BasicTrainer(Trainer):
 
         # Logs
         step_log['loss'] = dict_reduce(losses, lambda x: np.mean(x))
-        step_log['status'] = dict_reduce(statuses, lambda x: np.mean(x), special_func={'min': lambda x: np.min(x), 'max': lambda x: np.max(x)})
+
+        def _reduce_codebook_unique_codes(vlist):
+            unique_codes = set()
+            for values in vlist:
+                if values is None:
+                    continue
+                if isinstance(values, torch.Tensor):
+                    values = values.detach().cpu().reshape(-1).tolist()
+                elif isinstance(values, np.ndarray):
+                    values = values.reshape(-1).tolist()
+                elif isinstance(values, (list, tuple, set)):
+                    values = list(values)
+                else:
+                    values = [values]
+
+                for code in values:
+                    try:
+                        unique_codes.add(int(code))
+                    except (TypeError, ValueError):
+                        continue
+            return sorted(unique_codes)
+
+        step_log['status'] = dict_reduce(
+            statuses,
+            lambda x: np.mean(x),
+            special_func={
+                'min': lambda x: np.min(x),
+                'max': lambda x: np.max(x),
+                'codebook_batch_unique_codes': _reduce_codebook_unique_codes,
+            },
+        )
         if self.elastic_controller_config is not None:
             step_log['elastic'] = dict_reduce(elastic_controller_logs, lambda x: np.mean(x))
         if self.grad_clip is not None:
@@ -465,7 +583,7 @@ class BasicTrainer(Trainer):
             step_log['param_grads'] = param_grads
 
         # Update exponential moving average
-        if self.is_master:
+        if self.is_master and not step_fully_skipped:
             self.update_ema()
 
         return step_log

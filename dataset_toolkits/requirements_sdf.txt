@@ -1,0 +1,3 @@
+# Optional: watertight mesh repair before sparse SDF (use sdf_voxelize.py --watertight)
+pymeshfix>=1.0.0
+pyvista>=0.43.0

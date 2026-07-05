@@ -45,11 +45,13 @@ def find_ckpt(cfg):
     return cfg
 
 
-def setup_rng(rank):
-    torch.manual_seed(rank)
-    torch.cuda.manual_seed_all(rank)
-    np.random.seed(rank)
-    random.seed(rank)
+def setup_rng(seed_base: int, rank: int):
+    """与 rank 对齐的随机种子：seed_base=0 时等价于旧版 torch.manual_seed(rank)。"""
+    s = int(seed_base) + int(rank)
+    torch.manual_seed(s)
+    torch.cuda.manual_seed_all(s)
+    np.random.seed(s)
+    random.seed(s)
 
 
 def get_model_summary(model):
@@ -76,8 +78,8 @@ def main(local_rank, cfg):
     if world_size > 1:
         setup_dist(rank, local_rank, world_size, cfg.master_addr, cfg.master_port)
 
-    # Seed rngs
-    setup_rng(rank)
+    # Seed rngs（--seed 控制基种子；DataLoader 的 ResumableSampler 另用相同 seed 作 epoch shuffle）
+    setup_rng(cfg.seed, rank)
     
     # Print training configuration
     if rank == 0:
@@ -137,7 +139,15 @@ def main(local_rank, cfg):
     # Build trainer
     if rank == 0:
         print(f'\n🎓 正在初始化训练器...')
-    trainer = getattr(trainers, cfg.trainer.name)(model_dict, dataset, **cfg.trainer.args, output_dir=cfg.output_dir, load_dir=cfg.load_dir, step=cfg.load_ckpt)
+    trainer = getattr(trainers, cfg.trainer.name)(
+        model_dict,
+        dataset,
+        **cfg.trainer.args,
+        output_dir=cfg.output_dir,
+        load_dir=cfg.load_dir,
+        step=cfg.load_ckpt,
+        seed=cfg.seed,
+    )
     if rank == 0:
         print(f'✅ 训练器初始化完成\n')
 
@@ -169,6 +179,12 @@ if __name__ == '__main__':
     parser.add_argument('--num_gpus', type=int, default=-1, help='Number of GPUs per node, default to all')
     parser.add_argument('--master_addr', type=str, default='localhost', help='Master address for distributed training')
     parser.add_argument('--master_port', type=str, default='12345', help='Port for distributed training')
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=0,
+        help='随机种子基值（默认0与旧版一致）。每轮希望数据顺序不同可传不同整数，例如 bash: --seed $RANDOM',
+    )
     opt = parser.parse_args()
     opt.load_dir = opt.load_dir if opt.load_dir != '' else opt.output_dir
     opt.num_gpus = torch.cuda.device_count() if opt.num_gpus == -1 else opt.num_gpus

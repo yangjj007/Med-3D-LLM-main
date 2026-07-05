@@ -4,13 +4,15 @@ max_3d_tokens, and build attention_mask. Supports batched (batch_idx in coords).
 
 Truncate modes when sequence is longer than max_3d_tokens:
   - "head": take the first L tokens after sort (original behavior).
-  - "random_sample": randomly sample L tokens without replacement, preserving
-    spatial spread for better understanding while avoiding OOM.
+  - "random_sample": randomly sample L tokens without replacement.
+  - "fps": Farthest Point Sampling — geometrically uniform downsample, same as training.
 """
 
 from typing import Tuple, Optional, Literal
 import torch
 import numpy as np
+
+from vae_qwen3vl.variable_length_3d import fps_downsample_indices
 
 
 def _sort_coords_feats(
@@ -36,7 +38,7 @@ def prepare_3d_sequence(
     max_3d_tokens: int = 2048,
     pad_value: float = 0.0,
     sort: bool = True,
-    truncate_mode: Literal["head", "random_sample"] = "head",
+    truncate_mode: Literal["head", "random_sample", "fps"] = "fps",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Turn (feats, coords) into fixed-length token sequence and mask for LLM.
@@ -48,8 +50,9 @@ def prepare_3d_sequence(
                        If > 0: longer sequences truncated, shorter padded to max_3d_tokens.
         pad_value: Value to use for padding feats.
         sort: Whether to sort by (batch_idx, z, y, x) before truncate/pad.
-        truncate_mode: When N > max_3d_tokens, "head" = take first L tokens;
-                       "random_sample" = randomly sample L tokens (better spatial coverage, avoids OOM).
+        truncate_mode: When N > max_3d_tokens:
+                       "fps" = Farthest Point Sampling (geometrically uniform, matches training);
+                       "head" = take first L tokens; "random_sample" = randomly sample L tokens.
 
     Returns:
         feats_out: [L, 16] with L = max_3d_tokens (or N when max_3d_tokens <= 0).
@@ -66,7 +69,14 @@ def prepare_3d_sequence(
     target_len = max_3d_tokens if max_3d_tokens > 0 else N
 
     if N >= target_len:
-        if truncate_mode == "random_sample":
+        if truncate_mode == "fps":
+            xyz = coords[:, 1:4].float()
+            fps_idx = fps_downsample_indices(xyz, target_len)
+            feats = feats[fps_idx]
+            coords = coords[fps_idx]
+            if sort:
+                coords, feats = _sort_coords_feats(coords, feats)
+        elif truncate_mode == "random_sample":
             perm = torch.randperm(N, device=device)
             idx = perm[:target_len]
             feats = feats[idx]
@@ -100,7 +110,7 @@ def prepare_3d_sequence_batched(
     max_3d_tokens: int = 2048,
     pad_value: float = 0.0,
     sort: bool = True,
-    truncate_mode: Literal["head", "random_sample"] = "head",
+    truncate_mode: Literal["head", "random_sample", "fps"] = "fps",
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Batched version: coords have coords[:, 0] = batch_idx. Produces

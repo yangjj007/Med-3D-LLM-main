@@ -55,7 +55,8 @@ class SDF3DCaptionDataset(Dataset):
     """
     Dataset of 3D SDF (from .npz) + caption for alignment training.
     
-    Each sample: load npz (sparse_sdf [N,1], sparse_index [N,3]) and one caption.
+    Each sample: load npz (sparse_sdf [N,1], sparse_index [N,3]) and caption(s).
+    ``caption`` is the first caption; ``captions_all`` lists every caption from metadata.
     Returns inputs_3d dict + will be collated with text to form full batch.
     
     Args:
@@ -126,7 +127,7 @@ class SDF3DCaptionDataset(Dataset):
             sparse_sdf = sparse_sdf[perm]
             sparse_index = sparse_index[perm]
 
-        # Parse captions (JSON array)
+        # Parse captions (JSON array); expose all for SFT JSONL / multi-reference training.
         captions_raw = item["captions"]
         if isinstance(captions_raw, str):
             try:
@@ -135,10 +136,13 @@ class SDF3DCaptionDataset(Dataset):
                 captions = [str(captions_raw)]
         else:
             captions = [str(captions_raw)]
-        if captions:
-            caption = captions[sample_seed % len(captions)]
+        if isinstance(captions, list):
+            captions_all = [str(c).strip() for c in captions if c is not None and str(c).strip()]
         else:
-            caption = "A 3D object."
+            captions_all = [str(captions).strip()] if str(captions).strip() else []
+        if not captions_all:
+            captions_all = ["A 3D object."]
+        caption = captions_all[0]
 
         return {
             "inputs_3d": {
@@ -147,6 +151,7 @@ class SDF3DCaptionDataset(Dataset):
                 "batch_idx": torch.zeros(len(sparse_sdf), dtype=torch.long),
             },
             "caption": caption,
+            "captions_all": captions_all,
             "sample_id": sample_id,
         }
 

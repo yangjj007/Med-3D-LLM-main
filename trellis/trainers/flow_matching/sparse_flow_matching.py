@@ -60,6 +60,7 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
         self.data_sampler = BalancedResumableSampler(
             self.dataset,
             shuffle=True,
+            seed=int(kwargs.get('seed', 0)),
             batch_size=self.batch_size_per_gpu,
         )
         self.dataloader = DataLoader(
@@ -122,6 +123,7 @@ class SparseFlowMatchingTrainer(FlowMatchingTrainer):
         num_samples: int,
         batch_size: int,
         verbose: bool = False,
+        **kwargs,
     ) -> Dict:
         dataloader = DataLoader(
             copy.deepcopy(self.dataset),

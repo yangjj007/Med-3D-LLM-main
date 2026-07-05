@@ -136,6 +136,18 @@ def variable_length_sequence_to_mesh_token_string(indices: np.ndarray) -> str:
     return "<mesh_start>" + "".join(f"<mesh_{v}>" for v in vals) + "<mesh_end>"
 
 
+def encoding_indices_points_per_batch(encoding_indices: "SparseTensor", batch_size: int) -> List[int]:
+    """
+    Per-sample sparse point count N before FPS (same N as in encoding_indices_to_variable_length_sequence).
+    """
+    coords = encoding_indices.coords
+    counts: List[int] = []
+    for b in range(batch_size):
+        mask = coords[:, 0] == b
+        counts.append(int(mask.sum().item()))
+    return counts
+
+
 def batch_encoding_indices_to_variable_length_sequences(
     encoding_indices: "SparseTensor",
     batch_size: int,

@@ -207,6 +207,24 @@ def main():
             nnodes = max(1, total_processes // gpus_per_node)
 
         nproc_per_node = gpus_per_node
+
+        # 安全检查：nproc_per_node * nnodes 应等于 tp_size * dp_size
+        actual_world = nproc_per_node * nnodes
+        if actual_world % tp_size != 0:
+            print(
+                f"[Launcher] ERROR: nproc_per_node({nproc_per_node}) * nnodes({nnodes}) = {actual_world} "
+                f"不能被 tensor_parallel_size({tp_size}) 整除！"
+                f"\n  请检查 gpus_per_node 和 num_nodes 配置。"
+            )
+            sys.exit(1)
+        dp_size_actual = actual_world // tp_size
+        if dp_size_actual != total_processes // tp_size:
+            print(
+                f"[Launcher] WARNING: 实际 dp_size={dp_size_actual} "
+                f"(from {nproc_per_node}*{nnodes}/{tp_size}) "
+                f"与 accelerate.num_processes 推算的 dp_size={total_processes // tp_size} 不一致。"
+                f"\n  实际将启动 {actual_world} 个进程。"
+            )
         node_rank = _detect_node_rank()
 
         master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")

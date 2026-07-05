@@ -26,7 +26,8 @@
         "args": {
             "resolution": 1024,
             "min_points": 1000,
-            "max_points": 2000000
+            "max_points": 2000000,
+            "snapshot_mc_threshold": 0.0
         }
     },
     "trainer": {

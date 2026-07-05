@@ -73,6 +73,7 @@ class SparseSDFEncoder(SparseTransformerBase):
         use_fp16: bool = False,
         use_checkpoint: bool = False,
         qk_rms_norm: bool = False,
+        extra_down_up_levels: int = 0,
     ):
         super().__init__(
             in_channels=in_channels,
@@ -90,24 +91,44 @@ class SparseSDFEncoder(SparseTransformerBase):
         )
 
         self.input_layer1 = sp.SparseLinear(1, model_channels // 16)
-        
-        self.downsample = nn.ModuleList([
+
+        self.extra_down_up_levels = int(extra_down_up_levels)
+        if self.extra_down_up_levels < 0:
+            raise ValueError("extra_down_up_levels must be >= 0")
+
+        # 渐进 4 级下采样：C/16→C/8→C/4→C/2→C，相对输入体素网格共 ×16（原 3 级为 ×8）
+        C = model_channels
+        down_blocks = [
             SparseDownBlock3d(
-                channels=model_channels//16,
-                out_channels=model_channels // 8,
+                channels=C // 16,
+                out_channels=C // 8,
                 use_checkpoint=use_checkpoint,
             ),
             SparseDownBlock3d(
-                channels=model_channels // 8,
-                out_channels=model_channels // 4,
+                channels=C // 8,
+                out_channels=C // 4,
                 use_checkpoint=use_checkpoint,
             ),
             SparseDownBlock3d(
-                channels=model_channels // 4,
-                out_channels=model_channels,
+                channels=C // 4,
+                out_channels=C // 2,
                 use_checkpoint=use_checkpoint,
+            ),
+            SparseDownBlock3d(
+                channels=C // 2,
+                out_channels=C,
+                use_checkpoint=use_checkpoint,
+            ),
+        ]
+        for _ in range(self.extra_down_up_levels):
+            down_blocks.append(
+                SparseDownBlock3d(
+                    channels=C,
+                    out_channels=C,
+                    use_checkpoint=use_checkpoint,
+                )
             )
-        ])
+        self.downsample = nn.ModuleList(down_blocks)
 
         self.resolution = resolution
         # VQVAE: 输出2*latent_channels保持与VAE架构兼容，但forward只返回mean

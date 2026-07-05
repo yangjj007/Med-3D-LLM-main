@@ -4,6 +4,7 @@ import time
 import json
 
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import DataLoader
 import numpy as np
@@ -39,6 +40,10 @@ def convert_to_serializable(obj):
 class Trainer:
     """
     Base class for training.
+
+    Checkpoint retention: ``save_total_limit`` (default 3) caps how many distinct
+    training-step checkpoint bundles are kept under ``output_dir/ckpts/`` after
+    each ``save()``; set to 0 to disable pruning.
     """
     def __init__(self,
         models,
@@ -68,6 +73,7 @@ class Trainer:
         i_sample=10000,
         i_save=10000,
         i_ddpcheck=10000,
+        save_total_limit=3,
         **kwargs
     ):
         assert batch_size is not None or batch_size_per_gpu is not None, 'Either batch_size or batch_size_per_gpu must be specified.'
@@ -95,7 +101,11 @@ class Trainer:
         self.i_log = i_log
         self.i_sample = i_sample
         self.i_save = i_save
-        self.i_ddpcheck = i_ddpcheck        
+        self.i_ddpcheck = i_ddpcheck
+        # 磁盘：最多保留最近 N 套 checkpoint（与 i_save 对齐的 step 目录）；<=0 表示不限制
+        self.save_total_limit = int(save_total_limit) if save_total_limit is not None else 3
+        self._codebook_seen_codes_all = set()
+        self._codebook_seen_codes_since_log = set()
 
         if dist.is_initialized():
             # Multi-GPU params
@@ -171,9 +181,11 @@ class Trainer:
         """
         Prepare dataloader.
         """
+        sampler_seed = int(kwargs.get('seed', 0))
         self.data_sampler = ResumableSampler(
             self.dataset,
             shuffle=True,
+            seed=sampler_seed,
         )
         
         # 优化num_workers配置
@@ -297,7 +309,12 @@ class Trainer:
             # Assign tasks
             num_samples_per_process = int(np.ceil(num_samples / self.world_size))
             
-            samples = self.run_snapshot(num_samples_per_process, batch_size=batch_size, verbose=verbose)
+            samples = self.run_snapshot(
+                num_samples_per_process,
+                batch_size=batch_size,
+                verbose=verbose,
+                snapshot_export_suffix=suffix,
+            )
 
             # Preprocess images
             for key in list(samples.keys()):
@@ -323,12 +340,55 @@ class Trainer:
         # Gather results
         if self.world_size > 1:
             backend = dist.get_backend() if dist.is_initialized() else None
+            exp_rows = int(np.ceil(num_samples / self.world_size))
             for key in samples.keys():
+                if samples[key]['type'] != 'image':
+                    continue
                 value = samples[key]['value'].contiguous()
                 # NCCL only supports CUDA tensors. Some visualize paths may return CPU tensors.
                 if backend == 'nccl' and not value.is_cuda:
                     value = value.to(self.device, non_blocking=True)
 
+                # NCCL gather 要求各 rank 的 tensor 形状与 rank0 的 gather 缓冲区一致。
+                # 不同样本 / 不同可视化退路可能产生不同的 (B,H,W)，此处统一后再 gather。
+                if isinstance(value, torch.Tensor) and value.ndim >= 3:
+                    if value.ndim == 3:
+                        value = value.unsqueeze(0)
+                    h, w = int(value.shape[-2]), int(value.shape[-1])
+                    hw = torch.tensor([h, w], device=value.device, dtype=torch.long)
+                    dist.all_reduce(hw, op=dist.ReduceOp.MAX)
+                    h_max, w_max = int(hw[0].item()), int(hw[1].item())
+                    if h != h_max or w != w_max:
+                        vf = value.float()
+                        value = F.interpolate(
+                            vf, size=(h_max, w_max), mode='bilinear', align_corners=False
+                        ).to(dtype=value.dtype)
+                    b = int(value.shape[0])
+                    if b > exp_rows:
+                        value = value[:exp_rows]
+                    elif b < exp_rows:
+                        pad = torch.zeros(
+                            exp_rows - b,
+                            *value.shape[1:],
+                            device=value.device,
+                            dtype=value.dtype,
+                        )
+                        value = torch.cat([value, pad], dim=0)
+                    value = value.contiguous()
+
+                if self.is_master:
+                    all_images = [torch.empty_like(value) for _ in range(self.world_size)]
+                else:
+                    all_images = []
+                dist.gather(value, all_images, dst=0)
+                if self.is_master:
+                    samples[key]['value'] = torch.cat(all_images, dim=0)[:num_samples]
+            for key in samples.keys():
+                if samples[key]['type'] == 'image':
+                    continue
+                value = samples[key]['value'].contiguous()
+                if backend == 'nccl' and not value.is_cuda:
+                    value = value.to(self.device, non_blocking=True)
                 if self.is_master:
                     all_images = [torch.empty_like(value) for _ in range(self.world_size)]
                 else:
@@ -456,6 +516,26 @@ class Trainer:
         time_data_load = 0.0
         time_forward = 0.0
         time_backward = 0.0
+
+        def _normalize_codebook_unique_codes(raw_codes):
+            if raw_codes is None:
+                return []
+            if isinstance(raw_codes, torch.Tensor):
+                raw_codes = raw_codes.detach().cpu().reshape(-1).tolist()
+            elif isinstance(raw_codes, np.ndarray):
+                raw_codes = raw_codes.reshape(-1).tolist()
+            elif isinstance(raw_codes, (list, tuple, set)):
+                raw_codes = list(raw_codes)
+            else:
+                raw_codes = [raw_codes]
+
+            normalized_codes = []
+            for code in raw_codes:
+                try:
+                    normalized_codes.append(int(code))
+                except (TypeError, ValueError):
+                    continue
+            return normalized_codes
         
         if self.is_master:
             print(f"\n{'='*100}")
@@ -502,6 +582,14 @@ class Trainer:
             time_elapsed += step_time
 
             self.step += 1
+            if self.is_master and step_log is not None and 'status' in step_log:
+                status_info = step_log['status']
+                if 'codebook_batch_unique_codes' in status_info:
+                    batch_unique_codes = _normalize_codebook_unique_codes(
+                        status_info.pop('codebook_batch_unique_codes')
+                    )
+                    self._codebook_seen_codes_all.update(batch_unique_codes)
+                    self._codebook_seen_codes_since_log.update(batch_unique_codes)
             
             # Update epoch counter
             self.epoch = self.step // self.steps_per_epoch
@@ -581,6 +669,15 @@ class Trainer:
                             print(f"  - 困惑度 (Perplexity): {status_info['codebook_perplexity']:.2f}")
                         print(f"  - 信息熵 (Entropy): {status_info['codebook_entropy']:.4f}")
                         print(f"  - 活跃码本比例 (per-sample): {status_info['codebook_utilization_ratio']:.2f}%")
+                        if codebook_size is not None and codebook_size > 0:
+                            all_sample_active_ratio = (
+                                100.0 * len(self._codebook_seen_codes_all) / float(codebook_size)
+                            )
+                            i_log_window_active_ratio = (
+                                100.0 * len(self._codebook_seen_codes_since_log) / float(codebook_size)
+                            )
+                            print(f"  - 活跃码本比例 (all sample 累计): {all_sample_active_ratio:.2f}%")
+                            print(f"  - 活跃码本比例 (上一i_log到当前累计): {i_log_window_active_ratio:.2f}%")
                         if codebook_size is not None:
                             print(f"  - 唯一码本数量 (per-sample): {status_info['codebook_unique_count']:.1f} / {codebook_size}")
                             if 'codebook_batch_unique_count' in status_info:
@@ -638,6 +735,7 @@ class Trainer:
                     for key, value in log_show.items():
                         self.writer.add_scalar(key, value, self.step)
                     log = []
+                    self._codebook_seen_codes_since_log.clear()
 
                 # Save checkpoint
                 if self.step % self.i_save == 0:

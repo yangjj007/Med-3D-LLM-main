@@ -3,11 +3,11 @@ Evaluate 3D-VL alignment: run 3D -> text generation and optionally validate mesh
 
 Usage:
   # 使用配置文件（与训练一致，含 LoRA + 真实数据）
-  python vae_qwen3vl/eval_3d_vl.py --config configs/3d_align_train.yaml
+  python vae_qwen3vl/eval_3d_vl.py --config configs/3d_align_train_variable_length.yaml
 
   # 指定路径
-  python vae_qwen3vl/eval_3d_vl.py --vae_config ... --vae_ckpt ... --projector_ckpt outputs_3d_align/projector_final.pt --lora_dir outputs_3d_align/lora_final --vl_model ... --data_dir train_sdf_dataset --output_dir ./eval_out
-
+  python vae_qwen3vl/eval_3d_vl.py --config configs/3d_align_train_variable_length.yaml  --lora_dir outputs_3d_align/ep4_lr5e-5_bs1_nall_lora64_20260321_051741/lora_epoch1 --data_dir train_sdf_dataset/res512_thre0.1_small 2>&1 | tee eval_debug.log
+  
   # With mesh reconstruction check (save decoded mesh)
   python vae_qwen3vl/eval_3d_vl.py ... --save_mesh
 """
@@ -114,10 +114,278 @@ def _to_device(x, device):
     return x
 
 
-def _run_generation(model, inputs_3d, tokenizer, prompt, max_new_tokens, device, vae_model=None):
+def _find_adapter_bin(lora_dir: str):
+    """Locate the adapter weight file (safetensors or bin)."""
+    import glob as _glob
+    for name in ("adapter_model.safetensors", "adapter_model.bin"):
+        p = os.path.join(lora_dir, name)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _check_lora_weights_are_nonzero(model) -> bool:
+    """
+    检查 LoRA-B 权重是否为非零（非默认初始化）。
+    PEFT 默认 lora_B 初始化为全零，若仍为全零则说明权重未被真正注入。
+    """
+    lora_b_all_zero = True
+    lora_b_count = 0
+    for name, param in model.vl_model.named_parameters():
+        if "lora_B" in name and "weight" in name:
+            lora_b_count += 1
+            if param.abs().max().item() > 1e-8:
+                lora_b_all_zero = False
+                break
+    if lora_b_count == 0:
+        return False
+    return not lora_b_all_zero
+
+
+def _force_inject_lora_weights(model, ckpt_sd: dict, ckpt_keys: set, model_lora_keys: set) -> int:
+    """
+    将 checkpoint 中的 LoRA 权重强制注入模型，支持 key 完全匹配和 remap 两种路径。
+    返回成功注入的权重数量。
+    """
+    matched = ckpt_keys & model_lora_keys
+    if matched == ckpt_keys:
+        final_sd = ckpt_sd
+    else:
+        remap = _build_lora_key_remap(ckpt_keys, model_lora_keys)
+        if not remap:
+            print(f"[LoRA INJECT] 无法建立 key 映射 (ckpt 示例: {sorted(ckpt_keys)[:2]}, model 示例: {sorted(model_lora_keys)[:2]})")
+            return 0
+        print(f"[LoRA INJECT] 发现 key 映射规则，remap {len(remap)} 个 key")
+        final_sd = {remap.get(k, k): v for k, v in ckpt_sd.items()}
+
+    param_dict = dict(model.vl_model.named_parameters())
+    loaded_count = 0
+    shape_mismatch = 0
+    for k, v in final_sd.items():
+        if k in param_dict:
+            if param_dict[k].shape == v.shape:
+                with torch.no_grad():
+                    param_dict[k].copy_(v.to(param_dict[k].device))
+                loaded_count += 1
+            else:
+                shape_mismatch += 1
+                if shape_mismatch <= 3:
+                    print(f"[LoRA INJECT] Shape mismatch: {k} ckpt={v.shape} model={param_dict[k].shape}")
+    if shape_mismatch > 3:
+        print(f"[LoRA INJECT] ... 共 {shape_mismatch} 个 shape 不匹配")
+    return loaded_count
+
+
+def _verify_and_fix_lora_loading(model, lora_dir: str, device: str) -> bool:
+    """
+    PeftModel.from_pretrained 之后，检查 LoRA 权重是否真正加载到模型中。
+    核心验证：检查 lora_B 是否仍为全零（PEFT 默认初始化），若是则说明加载失败，
+    尝试手动 remap 并注入。返回 True 仅当权重值验证通过。
+    """
+    from peft import PeftModel
+    if not isinstance(model.vl_model, PeftModel):
+        print("[LoRA DIAG] model.vl_model 不是 PeftModel，跳过验证")
+        return False
+
+    adapter_path = _find_adapter_bin(lora_dir)
+    if adapter_path is None:
+        print(f"[LoRA DIAG] 未找到 adapter_model.bin/.safetensors in {lora_dir}")
+        return False
+
+    if adapter_path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+        ckpt_sd = load_file(adapter_path, device="cpu")
+    else:
+        ckpt_sd = torch.load(adapter_path, map_location="cpu")
+
+    model_lora_keys = {
+        n for n, _ in model.vl_model.named_parameters() if "lora_" in n
+    }
+    ckpt_keys = set(ckpt_sd.keys())
+
+    matched = ckpt_keys & model_lora_keys
+    missing_in_model = ckpt_keys - model_lora_keys
+    missing_in_ckpt = model_lora_keys - ckpt_keys
+
+    print(f"[LoRA DIAG] Checkpoint keys: {len(ckpt_keys)}, Model LoRA keys: {len(model_lora_keys)}")
+    print(f"[LoRA DIAG] Key 匹配: {len(matched)}, 仅在 ckpt: {len(missing_in_model)}, 仅在 model: {len(missing_in_ckpt)}")
+
+    # === 打印 checkpoint 权重详细信息 ===
+    model_param_dict = dict(model.vl_model.named_parameters())
+    _printed = 0
+    _shape_mismatch_count = 0
+    _shape_ratios = set()
+    for ck in sorted(ckpt_keys):
+        ckpt_tensor = ckpt_sd[ck]
+        model_shape = tuple(model_param_dict[ck].shape) if ck in model_param_dict else None
+        ckpt_shape = tuple(ckpt_tensor.shape)
+        is_mismatch = model_shape is not None and ckpt_shape != model_shape
+        if is_mismatch:
+            _shape_mismatch_count += 1
+            for d in range(len(ckpt_shape)):
+                if ckpt_shape[d] != model_shape[d]:
+                    _shape_ratios.add(model_shape[d] / ckpt_shape[d])
+        if _printed < 4:
+            abs_max = ckpt_tensor.abs().max().item()
+            abs_mean = ckpt_tensor.abs().mean().item()
+            tag = " *** SHAPE MISMATCH ***" if is_mismatch else ""
+            print(f"[LoRA CKPT] {ck}: ckpt_shape={ckpt_shape} model_shape={model_shape} "
+                  f"|max|={abs_max:.6f} |mean|={abs_mean:.6f}{tag}")
+            _printed += 1
+
+    if _shape_mismatch_count > 0:
+        print(f"[LoRA DIAG] ⚠️  共 {_shape_mismatch_count}/{len(ckpt_keys)} 个权重 shape 不匹配！")
+        print(f"[LoRA DIAG]   model/ckpt 维度比率: {sorted(_shape_ratios)}")
+        if 2.0 in _shape_ratios:
+            print(f"[LoRA DIAG]   检测到 2x 比率 → 极可能是 FSDP2 分片问题：")
+            print(f"[LoRA DIAG]   训练时 save_lora_tp 使用了 to_local() 保存了 FSDP 的 1/2 分片，")
+            print(f"[LoRA DIAG]   而非完整权重。请使用修复后的 save_lora_tp 重新保存 LoRA 权重。")
+        return False
+
+    # 第 1 步：检查 PEFT from_pretrained 是否已经成功注入了权重
+    weights_live = _check_lora_weights_are_nonzero(model)
+    if weights_live:
+        print(f"[LoRA DIAG] ✓ lora_B 权重非零，PEFT 加载已成功生效")
+        return True
+
+    print(f"[LoRA DIAG] ⚠️  lora_B 权重全零！PEFT from_pretrained 未真正注入权重，尝试手动注入 ...")
+
+    # 第 2 步：手动注入（支持 key 完全匹配或 remap）
+    loaded_count = _force_inject_lora_weights(model, ckpt_sd, ckpt_keys, model_lora_keys)
+
+    if loaded_count > 0:
+        # 第 3 步：注入后再次验证
+        weights_live_after = _check_lora_weights_are_nonzero(model)
+        if weights_live_after:
+            print(f"[LoRA DIAG] ✓ 手动注入成功：{loaded_count}/{len(ckpt_sd)} 个权重，lora_B 验证通过")
+            return True
+        else:
+            print(f"[LoRA DIAG] ✗ 手动注入了 {loaded_count} 个权重，但 lora_B 仍为全零（可能注入到了错误位置）")
+            return False
+    else:
+        if len(missing_in_model) > 0:
+            print(f"[LoRA DIAG] ✗ Key 不匹配且无法建立映射")
+            print(f"[LoRA DIAG]   Checkpoint 示例 key: {sorted(missing_in_model)[:2]}")
+            print(f"[LoRA DIAG]   Model 示例 key:      {sorted(model_lora_keys)[:2]}")
+        else:
+            print(f"[LoRA DIAG] ✗ Key 匹配但注入失败（shape 不一致？）")
+        return False
+
+
+def _build_lora_key_remap(ckpt_keys, model_keys):
+    """
+    尝试找到 checkpoint key → model key 的系统性映射。
+    处理常见的结构差异：
+    - Qwen3-VL (model.language_model.layers) vs Qwen2-VL (model.layers)
+    - PEFT 版本差异（有/无 base_model.model. 前缀）
+    """
+    remap = {}
+
+    remap_rules = [
+        ("model.language_model.layers.", "model.layers."),
+        ("model.layers.", "model.language_model.layers."),
+        ("model.language_model.model.layers.", "model.language_model.layers."),
+        ("model.language_model.layers.", "model.language_model.model.layers."),
+    ]
+
+    prefix_rules = [
+        ("base_model.model.", ""),
+        ("", "base_model.model."),
+    ]
+
+    for rule_old, rule_new in remap_rules:
+        candidate = {}
+        for ck in ckpt_keys:
+            if rule_old in ck:
+                new_key = ck.replace(rule_old, rule_new)
+                if new_key in model_keys:
+                    candidate[ck] = new_key
+        if len(candidate) == len(ckpt_keys):
+            return candidate
+
+    for prefix_old, prefix_new in prefix_rules:
+        for rule_old, rule_new in remap_rules + [("", "")]:
+            candidate = {}
+            for ck in ckpt_keys:
+                nk = ck
+                if prefix_old and nk.startswith(prefix_old):
+                    nk = nk[len(prefix_old):]
+                if prefix_new:
+                    nk = prefix_new + nk
+                if rule_old and rule_old in nk:
+                    nk = nk.replace(rule_old, rule_new)
+                if nk in model_keys:
+                    candidate[ck] = nk
+            if len(candidate) == len(ckpt_keys):
+                return candidate
+
+    return {}
+
+
+def _manual_load_lora(model, lora_dir: str, device: str) -> bool:
+    """
+    当 PeftModel.from_pretrained 完全失败时，手动创建 PeftModel 并加载权重。
+    加载后通过 lora_B 非零检查验证是否真正生效。
+    """
+    adapter_path = _find_adapter_bin(lora_dir)
+    config_path = os.path.join(lora_dir, "adapter_config.json")
+    if not adapter_path or not os.path.isfile(config_path):
+        print(f"[LoRA Manual] 缺少 adapter 文件: bin={adapter_path}, config={os.path.isfile(config_path)}")
+        return False
+
+    try:
+        from peft import PeftModel, LoraConfig, get_peft_model
+
+        with open(config_path, "r") as f:
+            cfg = json.load(f)
+
+        target_modules = cfg.get("target_modules", ["q_proj", "v_proj"])
+        if isinstance(target_modules, dict):
+            target_modules = list(target_modules.keys())
+
+        lora_config = LoraConfig(
+            r=cfg.get("r", 8),
+            lora_alpha=cfg.get("lora_alpha", 16),
+            target_modules=target_modules,
+            lora_dropout=cfg.get("lora_dropout", 0.0),
+            bias=cfg.get("bias", "none"),
+        )
+
+        model.vl_model = get_peft_model(model.vl_model, lora_config)
+
+        if adapter_path.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            ckpt_sd = load_file(adapter_path, device="cpu")
+        else:
+            ckpt_sd = torch.load(adapter_path, map_location="cpu")
+
+        model_lora_keys = {n for n, _ in model.vl_model.named_parameters() if "lora_" in n}
+        loaded = _force_inject_lora_weights(model, ckpt_sd, set(ckpt_sd.keys()), model_lora_keys)
+
+        if loaded > 0:
+            weights_ok = _check_lora_weights_are_nonzero(model)
+            if weights_ok:
+                print(f"[LoRA Manual] ✓ 手动注入 {loaded}/{len(ckpt_sd)} 个权重，lora_B 验证通过")
+                return True
+            else:
+                print(f"[LoRA Manual] ✗ 注入了 {loaded} 个权重，但 lora_B 仍全零")
+                return False
+        else:
+            print(f"[LoRA Manual] ✗ 未能注入任何权重 (ckpt keys: {len(ckpt_sd)}, model keys: {len(model_lora_keys)})")
+            return False
+    except Exception as e:
+        print(f"[LoRA Manual] ✗ 手动加载异常: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def _run_generation(model, inputs_3d, tokenizer, prompt, max_new_tokens, device, vae_model=None,
+                    max_safe_3d_length=15000, coord_max_3d=64):
     """Run 3D -> text generation for one sample."""
     if getattr(model, "use_discrete_3d_tokens", False) and vae_model is not None:
-        return _run_generation_discrete(model, inputs_3d, tokenizer, prompt, max_new_tokens, device, vae_model)
+        return _run_generation_discrete(model, inputs_3d, tokenizer, prompt, max_new_tokens, device, vae_model,
+                                        max_safe_3d_length=max_safe_3d_length, coord_max_3d=coord_max_3d)
 
     with torch.no_grad():
         embeds_3d, mask_3d, encoding_indices = model.get_3d_embeds_and_encoding_indices(inputs_3d, device=device)
@@ -125,7 +393,7 @@ def _run_generation(model, inputs_3d, tokenizer, prompt, max_new_tokens, device,
 
     try:
         prompt_text = tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}, {"role": "assistant", "content": ""}],
+            [{"role": "user", "content": prompt}],
             tokenize=False,
             add_generation_prompt=True,
         )
@@ -184,11 +452,13 @@ def _run_generation(model, inputs_3d, tokenizer, prompt, max_new_tokens, device,
         "embeds_3d_shape": list(embeds_3d.shape)
     }
 
-def _run_generation_discrete(model, inputs_3d, tokenizer, prompt, max_new_tokens, device, vae_model):
+def _run_generation_discrete(model, inputs_3d, tokenizer, prompt, max_new_tokens, device, vae_model,
+                             max_safe_3d_length=15000, coord_max_3d=64):
     """Discrete 3D token path: VAE Encode -> Text Serialization -> Chat Template -> Generate.
     序列结构与训练完全一致：
     先将 VAE codes 转换为 <mesh_start><mesh_X>...<mesh_end> 字符串，
     再与 prompt 拼接为 user_content，整体使用 tokenizer.apply_chat_template 编码。
+    当点数超过 max_safe_3d_length 时，使用 FPS 下采样（与训练一致）。
     """
     with torch.no_grad():
         inputs_3d_dev = {}
@@ -220,19 +490,18 @@ def _run_generation_discrete(model, inputs_3d, tokenizer, prompt, max_new_tokens
     num_3d_tokens = codes_3d.shape[0]
     print(f"[DEBUG Discrete] VAE encoded {num_3d_tokens} 3D tokens")
     
-    # 构建 mesh_str (优先尝试使用训练时带可能 Morton Sort 的方法，失败则回退至直接拼接)
+    # 构建 mesh_str：FPS 下采样 + Morton Sort，与训练时 collate 完全一致
     mesh_str = ""
     try:
-        from vae_qwen3vl.dataset.variable_length_3d import (
+        from vae_qwen3vl.variable_length_3d import (
             batch_encoding_indices_to_variable_length_sequences,
             variable_length_sequence_to_mesh_token_string
         )
         seq_list = batch_encoding_indices_to_variable_length_sequences(
-            encoding_indices, batch_size=1, max_safe_length=16384, coord_max=64
+            encoding_indices, batch_size=1, max_safe_length=max_safe_3d_length, coord_max=coord_max_3d
         )
         mesh_str = variable_length_sequence_to_mesh_token_string(seq_list[0])
     except Exception:
-        # 兜底逻辑：直接遍历 code 生成特殊 token 字符串
         mesh_tokens = [f"<mesh_{c.item()}>" for c in codes_3d]
         mesh_str = "<mesh_start>" + "".join(mesh_tokens) + "<mesh_end>"
     
@@ -243,7 +512,7 @@ def _run_generation_discrete(model, inputs_3d, tokenizer, prompt, max_new_tokens
     
     try:
         prompt_text = tokenizer.apply_chat_template(
-            [{"role": "user", "content": user_content}, {"role": "assistant", "content": ""}],
+            [{"role": "user", "content": user_content}],
             tokenize=False,
             add_generation_prompt=True,
         )
@@ -328,16 +597,18 @@ def main():
     parser.add_argument("--data_dir", type=str, default=None, help="SDF dataset dir (same as training, e.g. train_sdf_dataset)")
     parser.add_argument("--data_path", type=str, default=None, help="Path to .pt batch file (legacy); if set, overrides data_dir")
     parser.add_argument("--prompt", type=str, default="Describe this 3D shape in one sentence:")
-    parser.add_argument("--max_new_tokens", type=int, default=1024)
-    parser.add_argument("--max_eval_samples", type=int, default=50, help="Max samples when using data_dir")
+    parser.add_argument("--max_new_tokens", type=int, default=8192)
+    parser.add_argument("--max_eval_samples", type=int, default=10, help="Max samples when using data_dir")
     parser.add_argument("--output_dir", type=str, default="./eval_3d_vl_out")
     parser.add_argument("--output_run", type=str, default=None, help="训练子目录名，用于指定要评估的 run")
     parser.add_argument("--save_mesh", action="store_true")
     parser.add_argument("--voxel_resolution", type=int, default=512)
-    parser.add_argument("--mc_threshold", type=float, default=0.5)
-    parser.add_argument("--max_3d_tokens", type=int, default=16384)
-    parser.add_argument("--truncate_mode", type=str, default=None, choices=["head", "random_sample"],
-                        help="When 3D tokens exceed max_3d_tokens: head=first L; random_sample=randomly sample L (default from config or head)")
+    parser.add_argument("--mc_threshold", type=float, default=0.1)
+    parser.add_argument("--max_3d_tokens", type=int, default=8000)
+    parser.add_argument("--truncate_mode", type=str, default=None, choices=["head", "random_sample", "fps"],
+                        help="When 3D tokens exceed max_3d_tokens: fps=Farthest Point Sampling (matches training, default); head=first L; random_sample=randomly sample L")
+    parser.add_argument("--max_safe_3d_length", type=int, default=None,
+                        help="Soft cap for variable-length discrete path: FPS downsample only when N > this (default from config or 15000, matches training)")
     parser.add_argument("--use_3d_pos", action="store_true", default=None, help="Use 3D positional encoding")
     parser.add_argument("--projector_layers", type=int, default=None, help="Projector MLP layers (须与训练一致，默认 1)")
     args, remaining = parser.parse_known_args()
@@ -370,7 +641,7 @@ def main():
         cfg = _load_config(cfg_path, PROJECT_ROOT)
         for k in (
             "vl_model", "vae_config", "vae_ckpt", "data_dir", "prompt",
-            "max_3d_tokens", "projector_layers", "truncate_mode", "use_discrete_3d_tokens",
+            "max_3d_tokens", "projector_layers", "truncate_mode", "max_safe_3d_length", "use_discrete_3d_tokens",
         ):
             if k in cfg and getattr(args, k, None) is None:
                 setattr(args, k, cfg[k])
@@ -527,7 +798,7 @@ def main():
         use_3d_pos=args.use_3d_pos,
         projector_num_layers=projector_layers,
         torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
-        truncate_mode=args.truncate_mode or "head",
+        truncate_mode=args.truncate_mode or "fps",
         use_discrete_3d_tokens=use_discrete,
     )
     
@@ -560,13 +831,21 @@ def main():
                 tokenizer = processor.tokenizer
                 print(f"[WEIGHT] ✓ 使用 Processor Tokenizer: {args.vl_model}")
 
+    _lora_loaded = False
     if args.lora_dir and os.path.isdir(args.lora_dir):
         try:
             from peft import PeftModel
             model.vl_model = PeftModel.from_pretrained(model.vl_model, args.lora_dir)
-            print(f"[WEIGHT] ✓ LoRA 权重加载完成：{args.lora_dir}")
+            _lora_loaded = _verify_and_fix_lora_loading(model, args.lora_dir, device)
         except Exception as e:
-            print(f"[WEIGHT] ⚠️  LoRA 加载失败 ({e})，继续不使用 LoRA")
+            print(f"[WEIGHT] ⚠️  PeftModel.from_pretrained 失败 ({e})，尝试手动加载...")
+            _lora_loaded = _manual_load_lora(model, args.lora_dir, device)
+
+        if _lora_loaded:
+            print(f"[WEIGHT] ✓ LoRA 权重已验证生效：{args.lora_dir}")
+        else:
+            print(f"[WEIGHT] ✗ LoRA 权重未能正确加载！模型将以 base model 运行（输出大概率无意义）")
+            print(f"[WEIGHT]   请检查: 1) adapter 文件是否完整  2) 模型结构是否匹配  3) PEFT 版本是否兼容")
     
     model = model.to(device)
     model.eval()
@@ -579,11 +858,16 @@ def main():
     if not use_discrete:
         print(f"  Projector: {args.projector_ckpt}")
     if args.lora_dir:
-        print(f"  LoRA: {args.lora_dir}")
+        lora_status = "✓ 已验证生效" if _lora_loaded else "✗ 加载失败（lora_B 全零）"
+        print(f"  LoRA: {args.lora_dir}  [{lora_status}]")
     if use_discrete:
         print(f"  3D Token Embeddings: 已扩展 (discrete mode, tokenizer: {os.path.basename(discrete_tok_path) if discrete_tok_path else 'None'})")
     print(f"  设备：{device}")
     print("=" * 80)
+    
+    if args.lora_dir and not _lora_loaded:
+        print("[WARNING] LoRA 未生效，生成结果将等同于未微调的 base model。建议排查后重试。")
+        print("=" * 80)
 
     # Build eval samples
     samples = []
@@ -598,17 +882,18 @@ def main():
         samples = [(inputs_3d, None)]
     elif args.data_dir and os.path.isdir(args.data_dir):
         from vae_qwen3vl.dataset_sdf_caption import SDF3DCaptionDataset
+        import random
         dataset = SDF3DCaptionDataset(
             sdf_dir=args.data_dir,
             resolution=512,
             min_points=100,
             max_points=500000,
-            max_samples=args.max_eval_samples,
+            max_samples=None,
         )
-        import random
         indices = list(range(len(dataset)))
-        random.shuffle(indices)  # 打乱索引
-        for idx in indices[:args.max_eval_samples]:  # 取前 N 个随机索引
+        random.shuffle(indices)
+        indices = indices[:args.max_eval_samples]
+        for idx in indices:
             item = dataset[idx]
             inputs_3d = _to_device(item["inputs_3d"], device)
             gt_caption = item.get("caption", "")
@@ -627,7 +912,9 @@ def main():
     results = []
     for idx, (inputs_3d, gt_caption) in enumerate(samples):
         gen_info = _run_generation(
-            model, inputs_3d, tokenizer, args.prompt, args.max_new_tokens, device, vae_model=vae_model
+            model, inputs_3d, tokenizer, args.prompt, args.max_new_tokens, device, vae_model=vae_model,
+            max_safe_3d_length=getattr(args, "max_safe_3d_length", None) or 15000,
+            coord_max_3d=getattr(args, "coord_max_3d", 64),
         )
         
         generated = gen_info["text"]

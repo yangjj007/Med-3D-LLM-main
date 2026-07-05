@@ -1,0 +1,106 @@
+{
+    "models": {
+        "vqvae": {
+            "name": "SparseSDFVQVAE",
+            "args": {
+                "use_ema_update": true,
+                "vq_decay": 0.99,
+                "vq_epsilon": 1e-5,
+                "use_kmeans_reinit": false,
+                "kmeans_interval": 999,
+                "reservoir_size": 81920,
+                "resolution": 64,
+                "model_channels": 512,
+                "latent_channels": 16,
+                "num_blocks": 8,
+                "train_full_block_decode": true,
+                "num_embeddings": 8192,
+                "vq_group_size": 1,
+                "num_heads": null,
+                "num_head_channels": 64,
+                "mlp_ratio": 4.0,
+                "attn_mode": "swin",
+                "window_size": 8,
+                "pe_mode": "ape",
+                "use_fp16": false,
+                "use_checkpoint": true,
+                "qk_rms_norm": false,
+                "representation_config": null
+            }
+        }
+    },
+    "dataset": {
+        "name": "SparseSDF",
+        "args": {
+            "resolution": 512,
+            "min_points": 100,
+            "max_points": 500000,
+            "edge_margin": 0,
+            "input_band_factor": 0.5,
+            "preprocessing_extra_band_factor": 4.0,
+            "prefilter_encoder_band": false,
+            "min_encoder_band_voxels": 1,
+            "snapshot_mc_threshold": 0.0
+        }
+    },
+    "trainer": {
+        "name": "SparseSDF_VQVAETrainer",
+        "args": {
+            "training_stage": 2,
+            "num_workers": 60,
+            "pretrained_vae_path": "./vae_weights/sparse_vae_512.pth",
+            "max_steps": 100000,
+            "max_epoch": 4,
+            "batch_size_per_gpu": 2,
+            "batch_split": 1,
+            "disable_snapshot": false,
+            "optimizer": {
+                "name": "AdamW",
+                "args": {
+                    "lr": 1e-5,
+                    "weight_decay": 0.01
+                }
+            },
+            "lr_scheduler": {
+                "name": "WarmupThenScheduler",
+                "args": {
+                    "warmup_steps": 100,
+                    "main_scheduler_class": "CosineAnnealingLR",
+                    "main_scheduler_kwargs": {
+                        "eta_min": 5e-6
+                    }
+                }
+            },
+            "ema_rate": [0.9999],
+            "fp16_mode": "amp",
+            "fp16_scale_growth": 0.001,
+            "grad_clip": {
+                "name": "AdaptiveGradClipper",
+                "args": {
+                    "max_norm": 1.0,
+                    "clip_percentile": 90
+                }
+            },
+            "lambda_vq": 1.0,
+            "lambda_commitment": 0.25,
+            "lambda_inside": 1.0,
+            "lambda_sharp": 1.0,
+            "lambda_extra": 1.0,
+            "loss_type": "l2",
+            "extra_oor_skip_policy": "sample",
+            "extra_oor_ratio_threshold": 0.98,
+            "debug_loss_verbose": true,
+            "debug_loss_histogram_every_n_steps": 100,
+            "input_band_factor": 0.5,
+            "preprocessing_extra_band_factor": 4.0,
+            "decoder_band_prune": true,
+            "inference_band_factor": 2.0,
+            "inference_occ_resolution": 512,
+            "i_print": 100,
+            "i_log": 100,
+            "i_sample": 2000,
+            "i_save": 1000,
+            "i_ddpcheck": 1000
+        }
+    }
+}

@@ -1246,7 +1246,8 @@ def main():
         # LR scheduler (cosine with warmup)
         scheduler = None
         if getattr(args, "use_lr_scheduler", False):
-            num_training_steps = len(dataloader) * args.epochs
+            grad_accum = getattr(args, "gradient_accumulation_steps", 1)
+            num_training_steps = (len(dataloader) * args.epochs) // grad_accum
             num_warmup_steps = int(getattr(args, "warmup_ratio", 0.05) * num_training_steps)
             try:
                 from transformers import get_cosine_schedule_with_warmup
@@ -1256,7 +1257,7 @@ def main():
                 if not use_tp and accelerator is not None:
                     scheduler = accelerator.prepare(scheduler)
                 if is_main_process:
-                    print(f"LR scheduler: cosine, warmup {num_warmup_steps} / {num_training_steps} steps", flush=True)
+                    print(f"LR scheduler: cosine, warmup {num_warmup_steps} / {num_training_steps} optimizer steps (grad_accum={grad_accum})", flush=True)
             except ImportError:
                 pass
 
@@ -1518,32 +1519,33 @@ def main():
         _barrier()  # 确保所有进程同步
 
         # 【新增】在 epoch1 开始前保存初始完整权重（便于调试和恢复）
-        if is_main_process and use_lora_applied:
+        # 注意：use_tp 时 save_lora_tp/gather_full_state_dict 需要所有 rank 参与集合通信，
+        # 因此不能只让 is_main_process 进入；所有 rank 都必须调用，仅写磁盘的部分由主进程完成。
+        if use_lora_applied:
             init_lora_dir = os.path.join(args.output_dir, "lora_epoch0")
-            os.makedirs(init_lora_dir, exist_ok=True)
+            if is_main_process:
+                os.makedirs(init_lora_dir, exist_ok=True)
 
-            # 保存 LoRA 权重（使用修复后的函数）
             _save_lora_checkpoint(
                 model,
                 init_lora_dir,
-                is_main_process=True,
+                is_main_process=is_main_process,
                 use_tp=use_tp,
                 tokenizer=tokenizer,
                 expected_lora=expected_lora,
             )
 
-            # 同时保存训练参数配置
-            with open(os.path.join(init_lora_dir, "training_args.json"), "w") as f:
-                json.dump(vars(args), f, indent=2)
-            _print(f"[Init] Saved initial LoRA weights to {init_lora_dir}")
-            _print(f"[Init] Saved training_args.json")
+            if is_main_process:
+                with open(os.path.join(init_lora_dir, "training_args.json"), "w") as f:
+                    json.dump(vars(args), f, indent=2)
+                _print(f"[Init] Saved initial LoRA weights to {init_lora_dir}")
+                _print(f"[Init] Saved training_args.json")
 
-            # 【验证】检查 adapter_config.json 是否存在
-            config_check_path = os.path.join(init_lora_dir, "adapter_config.json")
-            if os.path.isfile(config_check_path):
-                _print(f"[Init] [OK] adapter_config.json verified at {config_check_path}")
-            else:
-                _print(f"[Init] [WARN] adapter_config.json NOT found at {config_check_path}")
+                config_check_path = os.path.join(init_lora_dir, "adapter_config.json")
+                if os.path.isfile(config_check_path):
+                    _print(f"[Init] [OK] adapter_config.json verified at {config_check_path}")
+                else:
+                    _print(f"[Init] [WARN] adapter_config.json NOT found at {config_check_path}")
 
         # 训练指标记录（仅 main process），用于可视化
         metrics_path = os.path.join(args.output_dir, "training_metrics.jsonl")
@@ -1780,67 +1782,65 @@ def main():
                             f"total={_t_opt-_step_t0:.2f}s"
                         )
 
-        # --- End-of-epoch checkpoint ---
-        _dlog(f"epoch_end enter epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
-        _barrier()
-        ckpt_path = os.path.join(args.output_dir, f"projector_epoch{epoch}.pt")
-        if use_tp:
-            from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp, save_warmup_embed_lmhead_tp
-            if _model.projector is not None:
-                save_projector_tp(model, ckpt_path, is_main=is_main_process)
-            if use_discrete and is_main_process:
-                tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
-                tokenizer.save_pretrained(tok_path)
-                _print(f"Saved tokenizer to {tok_path}")
-            if use_discrete and training_stage == "warmup":
-                warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
-                save_warmup_embed_lmhead_tp(model, warmup_embed_path, is_main=is_main_process)
-            if use_lora_applied:
-                lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
-                save_lora_tp(model, lora_dir, is_main=is_main_process)
-                _print(f"Saved LoRA to {lora_dir}")
-        else:
-            raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
-            if is_main_process:
-                if raw_model.projector is not None:
-                    torch.save(raw_model.projector.state_dict(), ckpt_path)
-                    _print(f"Saved {ckpt_path}")
-                if use_discrete:
+            # --- End-of-epoch checkpoint ---
+            _dlog(f"epoch_end enter epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
+            _barrier()
+            ckpt_path = os.path.join(args.output_dir, f"projector_epoch{epoch}.pt")
+            if use_tp:
+                from vae_qwen3vl.tensor_parallel_utils import save_projector_tp, save_lora_tp, save_warmup_embed_lmhead_tp
+                if _model.projector is not None:
+                    save_projector_tp(model, ckpt_path, is_main=is_main_process)
+                if use_discrete and is_main_process:
                     tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
                     tokenizer.save_pretrained(tok_path)
                     _print(f"Saved tokenizer to {tok_path}")
                 if use_discrete and training_stage == "warmup":
-                    vl_sd = raw_model.vl_model.state_dict()
-                    embed_lmhead_sd = {
-                        "vl_model." + k: v.cpu().clone()
-                        for k, v in vl_sd.items()
-                        if "embed_tokens" in k or "embedding" in k or "lm_head" in k
-                    }
-                    if embed_lmhead_sd:
-                        warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
-                        torch.save(embed_lmhead_sd, warmup_embed_path)
-                        _print(f"Saved warmup embed+lm_head ({len(embed_lmhead_sd)} keys) → {warmup_embed_path}")
-                # 【修复核心】使用 _save_lora_checkpoint 保存完整 LoRA（包含 adapter_config.json）
+                    warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
+                    save_warmup_embed_lmhead_tp(model, warmup_embed_path, is_main=is_main_process)
                 if use_lora_applied:
                     lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
-                    _save_lora_checkpoint(
-                        model,
-                        lora_dir,
-                        is_main_process=is_main_process,
-                        use_tp=use_tp,
-                        tokenizer=tokenizer,
-                        expected_lora=expected_lora,
-                    )
-                    if is_main_process:
-                        _print(f"Saved LoRA to {lora_dir} (with adapter_config.json)")
-                        # 验证保存是否完整
-                        config_path = os.path.join(lora_dir, "adapter_config.json")
-                        if os.path.isfile(config_path):
-                            _print(f"[OK] adapter_config.json 已保存")
-                        else:
-                            _print(f"[WARN] adapter_config.json 未保存，检查 PEFT 版本")
-        _barrier()
-        _dlog(f"epoch_end leave epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
+                    save_lora_tp(model, lora_dir, is_main=is_main_process)
+                    _print(f"Saved LoRA to {lora_dir}")
+            else:
+                raw_model = accelerator.unwrap_model(model) if accelerator is not None else model
+                if is_main_process:
+                    if raw_model.projector is not None:
+                        torch.save(raw_model.projector.state_dict(), ckpt_path)
+                        _print(f"Saved {ckpt_path}")
+                    if use_discrete:
+                        tok_path = os.path.join(args.output_dir, f"tokenizer_epoch{epoch}")
+                        tokenizer.save_pretrained(tok_path)
+                        _print(f"Saved tokenizer to {tok_path}")
+                    if use_discrete and training_stage == "warmup":
+                        vl_sd = raw_model.vl_model.state_dict()
+                        embed_lmhead_sd = {
+                            "vl_model." + k: v.cpu().clone()
+                            for k, v in vl_sd.items()
+                            if "embed_tokens" in k or "embedding" in k or "lm_head" in k
+                        }
+                        if embed_lmhead_sd:
+                            warmup_embed_path = os.path.join(args.output_dir, f"warmup_embed_lmhead_epoch{epoch}.pt")
+                            torch.save(embed_lmhead_sd, warmup_embed_path)
+                            _print(f"Saved warmup embed+lm_head ({len(embed_lmhead_sd)} keys) → {warmup_embed_path}")
+                    if use_lora_applied:
+                        lora_dir = os.path.join(args.output_dir, f"lora_epoch{epoch}")
+                        _save_lora_checkpoint(
+                            model,
+                            lora_dir,
+                            is_main_process=is_main_process,
+                            use_tp=use_tp,
+                            tokenizer=tokenizer,
+                            expected_lora=expected_lora,
+                        )
+                        if is_main_process:
+                            _print(f"Saved LoRA to {lora_dir} (with adapter_config.json)")
+                            config_path = os.path.join(lora_dir, "adapter_config.json")
+                            if os.path.isfile(config_path):
+                                _print(f"[OK] adapter_config.json 已保存")
+                            else:
+                                _print(f"[WARN] adapter_config.json 未保存，检查 PEFT 版本")
+            _barrier()
+            _dlog(f"epoch_end leave epoch={epoch}", all_ranks=True, force=getattr(args, "debug_sync_points", False))
 
         # --- Final checkpoint ---
         _dlog("final_checkpoint enter", all_ranks=True, force=getattr(args, "debug_sync_points", False))

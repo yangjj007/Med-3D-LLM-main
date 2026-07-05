@@ -109,8 +109,6 @@ If you prefer loading the model from local, you can download the model files fro
 TrellisImageTo3DPipeline.from_pretrained("/path/to/TRELLIS-image-large")
 ```
 
-<!-- Usage -->
-## 💡 Usage
 
 ### Minimal Example
 

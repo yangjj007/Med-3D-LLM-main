@@ -61,7 +61,6 @@
                     "warmup_steps": 100,
                     "main_scheduler_class": "CosineAnnealingLR",
                     "main_scheduler_kwargs": {
-                        "T_max": 100000,
                         "eta_min": 5e-5
                     }
                 }

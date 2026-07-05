@@ -3,7 +3,7 @@
         "vqvae": {
             "name": "SparseSDFVQVAE",
             "args": {
-                "resolution": 64,
+                "resolution": 32,
                 "model_channels": 512,
                 "latent_channels": 32,
                 "num_blocks": 8,
@@ -26,7 +26,8 @@
         "args": {
             "resolution": 512,
             "min_points": 100,
-            "max_points": 500000
+            "max_points": 500000,
+            "snapshot_mc_threshold": 0.0
         }
     },
     "trainer": {

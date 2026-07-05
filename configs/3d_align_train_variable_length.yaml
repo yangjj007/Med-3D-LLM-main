@@ -17,30 +17,37 @@
 # === 路径（请按本机路径修改）===
 vl_model: "/yangjunjie/model_qwen3vl_2B"
 vae_config: "configs/vae/sdf_vqvae_stage2.json"
-vae_ckpt: "outputs/sdf_vqvae_stage2_512_0.5-amp/ckpts/vqvae_step0000100.pt"
-data_dir: "train_sdf_dataset/res512_thre0.5"
+vae_ckpt: "outputs/sdf_vqvae_stage2_512_0.1-amp/ckpts/vqvae_step0000300.pt"
+data_dir: "train_sdf_dataset/res512_thre0.1_small"
 output_dir: "outputs_3d_align"
+
+# === 断点续训 ===
+# 留空表示从头训练；指定 output_dir 子目录路径则从该目录的 latest epoch 恢复
+# resume_from: "outputs_3d_align/ep16_lr5e-5_bs1_nall_lora16_20260313_045626"
+# 可选：指定具体 epoch，不指定则自动找最大
+# resume_ckpt_epoch: 3
 
 # === 离散 + 变长 3D ===
 use_discrete_3d_tokens: true
 use_variable_length_3d_tokens: true
-max_safe_3d_length: 15000
+max_safe_3d_length: 8000
 coord_max_3d: 64
-max_length_variable: 16384
+max_length_variable: 8192
 reconstruction_ratio: 0.0
-training_stage: "sft"
+training_stage: "warm up"
 # SFT 阶段：改为 training_stage: "sft" 并指定 warmup 输出目录以加载 tokenizer 与 embed/lm_head
-warmup_output_dir: "/yangjunjie/Med-3D-LLM-main/outputs_3d_align/ep1_lr1e-4_bs1_nall_lora16_20260307_072046"
+# warmup_output_dir: "/yangjunjie/Med-3D-LLM-main/outputs_3d_align/ep1_lr1e-4_bs1_nall_lora16_20260307_072046"
 
 # === 张量并行 + 序列并行 ===
-# TP=8: 8 GPU 上全量张量并行（2 机各 4 卡，DP=1）
-tensor_parallel_size: 8
+# TP=4: 4 GPU 上张量并行，DP=1（无 FSDP2 数据并行，避免 TP+FSDP2 组合问题）
+# 注：Qwen3-VL 2B 仅有 2 个 KV head，attention TP 最大支持 TP=2；
+#     但 LoRA 模式下 attention TP 会自动跳过，仅 MLP TP 生效，TP=4 可用。
+tensor_parallel_size: 4
 sequence_parallel_size: 1
 
-# === 多机配置 ===
-# gpus_per_node: 0 表示自动检测（nvidia-smi / torch.cuda.device_count）
-# num_nodes: 0 表示自动推算（num_processes / gpus_per_node）
-# master_addr / master_port: 留空则读 $MASTER_ADDR / $MASTER_PORT 环境变量
+# === 单机配置 ===
+# gpus_per_node: 启动的进程数（即使用的 GPU 数），必须 == tp_size * dp_size
+# num_nodes: 1 表示单机
 gpus_per_node: 8
 num_nodes: 1
 # master_addr: "pytorch-38492b6f-master-0"
@@ -50,30 +57,31 @@ num_nodes: 1
 # TP=2 + FSDP2 约降低每卡峰值激活内存 2 倍，加上 GC 后可承受更长序列。
 # gradient_accumulation_steps 等效 global batch = DP=2 × bs=1 × accum=8 = 16
 batch_size: 1
-gradient_accumulation_steps: 32
+gradient_accumulation_steps: 16
 use_flash_attn_2: true
 use_gradient_checkpointing: true   # TP 模式下 GC 无条件生效（无 DeepSpeed 兼容性 bug）
 
 # === 训练参数 ===
-lr: 1.0e-4
-epochs: 1
-max_3d_tokens: 512
+lr: 5.0e-5
+epochs: 4
+max_3d_tokens: 8000
 truncate_mode: "head"
 use_3d_pos: false
 projector_layers: 1
 weight_decay: 0.01
 grad_clip: 1.0
 use_lr_scheduler: true
-warmup_ratio: 0.05
+warmup_ratio: 0.0005
 
 use_lora: true
-lora_r: 16
-lora_alpha: 32
-lora_dropout: 0.1
+lora_r: 64
+lora_alpha: 256
+lora_dropout: 0.0
 
 prompt: "Describe this 3D shape in one sentence:"
 
 # # === 调试（排查 "too many values to unpack"、loss=NaN/Inf 等）===
+# debug_caption: true         # 【新增】为 true 时在日志中打印每个训练样本的 caption 及 token 统计
 # debug_vl_forward: true       # 打印 combined_embeds 等输入形状
 # debug_qwen3vl_patch: true    # 打印 transformers 版本等补丁日志
 # debug_memory: true           # OOM 调试：每步打印显存统计，定位爆显存步骤（@before_backward 后 OOM 多为反向梯度）
@@ -111,7 +119,7 @@ accelerate:
   main_training_function: main
   mixed_precision: bf16
   num_machines: 1
-  num_processes: 8   # 4 GPU: TP=2 + SP=2
+  num_processes: 4   # 4 GPU: TP=2 + SP=2
   rdzv_backend: static
   same_network: true
   tpu_env: []

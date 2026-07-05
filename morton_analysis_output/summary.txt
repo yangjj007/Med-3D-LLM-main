@@ -1,0 +1,63 @@
+=== Morton（latent x,y,z）排序：熵、熵差、序列相邻空间关系 ===
+
+几何约定：体素中心在归一化 [-0.5, 0.5]^3。
+  our_sparse_sdf_vqvae：latent 64^3，面邻接两中心欧氏距离 = 1/64。
+  shapellm_vqvae3d：latent 8×8×16，面邻沿 x/y 中心距 1/8，沿 z 为 1/16。
+
+seq_face_adj_frac：序列相邻 (i,i+1) 在 latent 索引上为 6-邻（L1=1）的比例。
+seq_26_adj_frac：序列相邻为 26-邻（L∞≤1 且非同格）的比例。
+d_h*_nat：仅 post 行有意义，= post - pre（H1/H2 重排不变故应≈0）。
+
+## our_sparse_sdf_vqvae / pre_morton
+  H1 unigram Shannon (nats) mean: 7.43927 (n=498)
+  H2 Renyi-2 (nats) mean: 6.92704 (n=498)
+  H bigram Shannon (nats) mean: 8.40339 (n=498)
+  spatial gap median mean (26-neigh in seq): 155.739 (n=498)
+  spatial gap mean mean: 138.174 (n=498)
+  spatial gap p90 mean: 282.162 (n=498)
+  seq adjacent face-neighbor (L1=1) frac: 0.669866 (n=498)
+  seq adjacent 26-neighbor frac: 0.67963 (n=498)
+  seq adjacent center euclidean mean: 0.0906385 (n=498)
+
+## our_sparse_sdf_vqvae / post_morton
+  H1 unigram Shannon (nats) mean: 7.43927 (n=498)
+  H2 Renyi-2 (nats) mean: 6.92704 (n=498)
+  H bigram Shannon (nats) mean: 8.44375 (n=498)
+  spatial gap median mean (26-neigh in seq): 10.0161 (n=498)
+  spatial gap mean mean: 158.844 (n=498)
+  spatial gap p90 mean: 336.284 (n=498)
+  seq adjacent face-neighbor (L1=1) frac: 0.503087 (n=498)
+  seq adjacent 26-neighbor frac: 0.856078 (n=498)
+  seq adjacent center euclidean mean: 0.0263141 (n=498)
+
+## our_sparse_sdf_vqvae / post_minus_pre entropy (per mesh, mean over samples)
+  mean d_h1_nat: -3.18353e-16 (n=498)
+  mean d_h2_nat: -4.6772e-16 (n=498)
+  mean d_h_bigram_nat: 0.0403553 (n=498)
+
+## shapellm_vqvae3d / pre_morton
+  H1 unigram Shannon (nats) mean: 4.40376 (n=500)
+  H2 Renyi-2 (nats) mean: 3.14983 (n=500)
+  H bigram Shannon (nats) mean: 5.45884 (n=500)
+  spatial gap median mean (26-neigh in seq): 113 (n=500)
+  spatial gap mean mean: 89.3529 (n=500)
+  spatial gap p90 mean: 144 (n=500)
+  seq adjacent face-neighbor (L1=1) frac: 0.938416 (n=500)
+  seq adjacent 26-neighbor frac: 0.938416 (n=500)
+  seq adjacent center euclidean mean: 0.119241 (n=500)
+
+## shapellm_vqvae3d / post_morton
+  H1 unigram Shannon (nats) mean: 4.40376 (n=500)
+  H2 Renyi-2 (nats) mean: 3.14983 (n=500)
+  H bigram Shannon (nats) mean: 5.59786 (n=500)
+  spatial gap median mean (26-neigh in seq): 14 (n=500)
+  spatial gap mean mean: 50.9303 (n=500)
+  spatial gap p90 mean: 217.1 (n=500)
+  seq adjacent face-neighbor (L1=1) frac: 0.500489 (n=500)
+  seq adjacent 26-neighbor frac: 0.938416 (n=500)
+  seq adjacent center euclidean mean: 0.173447 (n=500)
+
+## shapellm_vqvae3d / post_minus_pre entropy (per mesh, mean over samples)
+  mean d_h1_nat: -8.31335e-16 (n=500)
+  mean d_h2_nat: 0 (n=500)
+  mean d_h_bigram_nat: 0.139013 (n=500)

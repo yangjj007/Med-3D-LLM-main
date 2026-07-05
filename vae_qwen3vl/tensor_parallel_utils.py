@@ -427,6 +427,40 @@ def register_dp_grad_hooks(model: nn.Module, dp_mesh) -> None:
 # Checkpoint helpers for FSDP2
 # ---------------------------------------------------------------------------
 
+def _all_gather_uneven(local_tensor: torch.Tensor, shard_dim: int, pg) -> torch.Tensor:
+    """all_gather that handles uneven shards (different sizes across ranks)."""
+    import torch.distributed as dist
+
+    world_size = dist.get_world_size(pg)
+    local_size = local_tensor.shape[shard_dim]
+    device = local_tensor.device
+
+    size_tensor = torch.tensor([local_size], dtype=torch.long, device=device)
+    all_sizes = [torch.empty(1, dtype=torch.long, device=device) for _ in range(world_size)]
+    dist.all_gather(all_sizes, size_tensor, group=pg)
+    all_sizes = [s.item() for s in all_sizes]
+
+    max_size = max(all_sizes)
+
+    if local_size < max_size:
+        pad_shape = list(local_tensor.shape)
+        pad_shape[shard_dim] = max_size - local_size
+        padded = torch.cat(
+            [local_tensor, torch.zeros(pad_shape, dtype=local_tensor.dtype, device=device)],
+            dim=shard_dim,
+        )
+    else:
+        padded = local_tensor
+
+    gathered = [torch.empty_like(padded) for _ in range(world_size)]
+    dist.all_gather(gathered, padded, group=pg)
+
+    trimmed = [
+        torch.narrow(g, shard_dim, 0, sz) for g, sz in zip(gathered, all_sizes)
+    ]
+    return torch.cat(trimmed, dim=shard_dim)
+
+
 def gather_full_state_dict(model: nn.Module) -> dict:
     """
     Gather the full (unsharded) state dict from an FSDP2-wrapped model.
@@ -434,24 +468,28 @@ def gather_full_state_dict(model: nn.Module) -> dict:
 
     Returns a CPU state dict (only meaningful on rank 0 after the call).
     """
-    try:
-        from torch.distributed.checkpoint.state_dict import (
-            get_model_state_dict,
-            StateDictOptions,
-        )
-        full_sd = get_model_state_dict(
-            model,
-            options=StateDictOptions(full_state_dict=True, cpu_offload=True),
-        )
-    except Exception as exc:
-        # Fallback: collect DTensor params manually
-        print(f"[FSDP2] get_model_state_dict failed ({exc}), using DTensor fallback", flush=True)
-        full_sd = {}
-        for name, param in model.named_parameters():
-            if hasattr(param, "full_tensor"):
-                full_sd[name] = param.full_tensor().detach().cpu()
-            else:
-                full_sd[name] = param.detach().cpu()
+    import torch.distributed as dist
+    from torch.distributed._tensor import DTensor
+
+    dist.barrier()
+
+    full_sd = {}
+    for name, param in model.named_parameters():
+        if isinstance(param, DTensor):
+            local_tensor = param.to_local().detach().clone()
+
+            for i, placement in enumerate(param.placements):
+                if placement.is_shard():
+                    pg = param.device_mesh.get_group(i)
+                    local_tensor = _all_gather_uneven(local_tensor, placement.dim, pg)
+
+            full_sd[name] = local_tensor.cpu()
+
+        elif hasattr(param, "full_tensor"):
+            full_sd[name] = param.full_tensor().detach().cpu()
+        else:
+            full_sd[name] = param.detach().cpu()
+
     return full_sd
 
 
@@ -469,29 +507,46 @@ def save_projector_tp(model: nn.Module, save_path: str, is_main: bool) -> None:
 
 
 def save_lora_tp(model: nn.Module, save_dir: str, is_main: bool) -> None:
-    """Save LoRA adapter weights from an FSDP2-wrapped model. All ranks participate."""
+    """Save LoRA adapter weights from an FSDP2-wrapped model.
+
+    ALL ranks must call this function (gather_full_state_dict requires
+    collective ops). Only rank 0 (is_main) writes files to disk.
+
+    Uses gather_full_state_dict to reconstruct full (un-sharded) LoRA
+    tensors, which is critical when FSDP2 shards LoRA parameters across
+    DP ranks — to_local() would only return a partial shard.
+    """
     import os
     import json
     full_sd = gather_full_state_dict(model)
+
     if is_main:
         os.makedirs(save_dir, exist_ok=True)
-        # Extract vl_model sub-keys (peft LoRA weights live under vl_model.*)
-        vl_sd = {
-            k.removeprefix("vl_model."): v
-            for k, v in full_sd.items()
-            if k.startswith("vl_model.")
-        }
-        # Filter to LoRA-specific tensors only (lora_A, lora_B, lora_embedding*)
-        lora_sd = {k: v for k, v in vl_sd.items() if "lora_" in k}
+
+        lora_sd = {}
+        for name, tensor in full_sd.items():
+            if not name.startswith("vl_model."):
+                continue
+            if "lora_" not in name:
+                continue
+            key = name.removeprefix("vl_model.")
+            lora_sd[key] = tensor
+
         if lora_sd:
             lora_path = os.path.join(save_dir, "adapter_model.bin")
             torch.save(lora_sd, lora_path)
-            print(f"[TP] Saved LoRA adapter → {lora_path}", flush=True)
+            sample_key = next(iter(lora_sd))
+            print(
+                f"[TP] Saved LoRA adapter → {lora_path} ({len(lora_sd)} tensors, "
+                f"sample: {sample_key} {tuple(lora_sd[sample_key].shape)})",
+                flush=True,
+            )
         else:
-            # Fallback: save entire vl_model state (no peft, or non-standard naming)
-            fallback_path = os.path.join(save_dir, "vl_model_state.pt")
-            torch.save(vl_sd, fallback_path)
-            print(f"[TP] (No lora_ keys found) Saved vl_model state → {fallback_path}", flush=True)
+            print(
+                "[TP WARN] No lora_ parameters found under model.vl_model; "
+                "skipping adapter_model.bin save.",
+                flush=True,
+            )
 
         # Write adapter_config.json so that `PeftModel.from_pretrained(..., save_dir)`
         # works in eval code. We must NOT fabricate defaults silently: extract the
